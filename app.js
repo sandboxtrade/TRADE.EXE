@@ -134,10 +134,17 @@ var require_liquidity = __commonJS({
 // engine/pnl.js
 var require_pnl = __commonJS({
   "engine/pnl.js"(exports, module) {
-    var { CONFIG: CONFIG2 } = require_config();
+    var { CONFIG: CONFIG2, scaleOf } = require_config();
+    var { executionPrice } = require_liquidity();
     function settlementValue(pos, price) {
       if (pos.side === "long") return pos.units * price;
       return Math.max(0, pos.margin + (pos.entryPrice - price) * pos.units);
+    }
+    function projectedSettlement(state, pos) {
+      const direction = pos.side === "long" ? -1 : 1;
+      const exposure = pos.units * state.price;
+      const execPrice = executionPrice(state.price, exposure, state.liquidity, direction, scaleOf(state));
+      return settlementValue(pos, execPrice);
     }
     var unrealizedPnL = (p, price) => p.position ? settlementValue(p.position, price) - p.position.margin : 0;
     var equityOf = (p, price) => p.cash + (p.position ? settlementValue(p.position, price) : 0);
@@ -176,7 +183,7 @@ var require_pnl = __commonJS({
         shortShare: directional === 0 ? 0 : shortPlayers / directional
       };
     }
-    module.exports = { settlementValue, unrealizedPnL, equityOf, isLiquidatable, aggregate };
+    module.exports = { settlementValue, projectedSettlement, unrealizedPnL, equityOf, isLiquidatable, aggregate };
   }
 });
 
@@ -1057,9 +1064,11 @@ var require_validate = __commonJS({
 var require_snapshot = __commonJS({
   "engine/snapshot.js"(exports, module) {
     var { CONFIG: CONFIG2 } = require_config();
-    var { aggregate, equityOf, unrealizedPnL, settlementValue } = require_pnl();
+    var { aggregate, equityOf, settlementValue, projectedSettlement } = require_pnl();
     function projectPlayer(state, player, { viewer, devMode }) {
       const position = player.position;
+      const exitSettlement = viewer && position ? projectedSettlement(state, position) : null;
+      const settlement = position ? exitSettlement ?? settlementValue(position, state.price) : null;
       const projected = {
         id: player.id,
         name: player.name,
@@ -1070,14 +1079,14 @@ var require_snapshot = __commonJS({
         tradeCount: player.tradeCount,
         realizedPnL: player.realizedPnL,
         equity: equityOf(player, state.price),
-        unrealized: unrealizedPnL(player, state.price),
+        unrealized: position ? settlement - position.margin : 0,
         position: position ? {
           side: position.side,
           units: position.units,
           margin: position.margin,
           entryPrice: position.entryPrice,
           openedAtTick: position.openedAtTick,
-          settlement: settlementValue(position, state.price)
+          settlement
         } : null
       };
       if (viewer) {
