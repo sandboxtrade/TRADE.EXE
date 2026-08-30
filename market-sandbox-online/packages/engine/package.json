@@ -1,8 +1,0 @@
-{
-  "name": "@market-sandbox/engine",
-  "version": "1.0.0",
-  "description": "Детерминированный торговый движок Market Sandbox. Импортируется приложением, Cloud Functions и тик-процессом на Cloud Run. Логика 1:1 с прототипом — см. ARCHITECTURE.md.",
-  "main": "index.js",
-  "license": "UNLICENSED",
-  "private": true
-}
