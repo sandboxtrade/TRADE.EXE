@@ -1,0 +1,17 @@
+{
+  "name": "market-sandbox-room-server",
+  "version": "1.0.0",
+  "description": "Тик-процесс комнат Market Sandbox для Cloud Run.",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "@market-sandbox/engine": "file:../packages/engine",
+    "cors": "^2.8.5",
+    "express": "^4.19.2",
+    "firebase-admin": "^12.3.1",
+    "ws": "^8.18.0"
+  },
+  "private": true
+}
