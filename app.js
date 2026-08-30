@@ -1361,14 +1361,122 @@ import {
   doc,
   onSnapshot as onFirestoreSnapshot
 } from "firebase/firestore";
-import { TrendingUp, SlidersHorizontal, FileText, Users, Bug } from "lucide-react";
 import { Fragment, jsx, jsxs } from "react/jsx-runtime";
+function IconTrendingUp({ size = 18, strokeWidth = 2 }) {
+  return /* @__PURE__ */ jsxs(
+    "svg",
+    {
+      width: size,
+      height: size,
+      viewBox: "0 0 24 24",
+      fill: "none",
+      stroke: "currentColor",
+      strokeWidth,
+      strokeLinecap: "round",
+      strokeLinejoin: "round",
+      children: [
+        /* @__PURE__ */ jsx("polyline", { points: "3 17 9 11 13 15 21 6" }),
+        /* @__PURE__ */ jsx("polyline", { points: "15 6 21 6 21 12" })
+      ]
+    }
+  );
+}
+function IconSliders({ size = 18, strokeWidth = 2 }) {
+  return /* @__PURE__ */ jsxs(
+    "svg",
+    {
+      width: size,
+      height: size,
+      viewBox: "0 0 24 24",
+      fill: "none",
+      stroke: "currentColor",
+      strokeWidth,
+      strokeLinecap: "round",
+      strokeLinejoin: "round",
+      children: [
+        /* @__PURE__ */ jsx("line", { x1: "4", y1: "6", x2: "20", y2: "6" }),
+        /* @__PURE__ */ jsx("circle", { cx: "9", cy: "6", r: "2", fill: "currentColor", stroke: "none" }),
+        /* @__PURE__ */ jsx("line", { x1: "4", y1: "12", x2: "20", y2: "12" }),
+        /* @__PURE__ */ jsx("circle", { cx: "16", cy: "12", r: "2", fill: "currentColor", stroke: "none" }),
+        /* @__PURE__ */ jsx("line", { x1: "4", y1: "18", x2: "20", y2: "18" }),
+        /* @__PURE__ */ jsx("circle", { cx: "11", cy: "18", r: "2", fill: "currentColor", stroke: "none" })
+      ]
+    }
+  );
+}
+function IconFileText({ size = 18, strokeWidth = 2 }) {
+  return /* @__PURE__ */ jsxs(
+    "svg",
+    {
+      width: size,
+      height: size,
+      viewBox: "0 0 24 24",
+      fill: "none",
+      stroke: "currentColor",
+      strokeWidth,
+      strokeLinecap: "round",
+      strokeLinejoin: "round",
+      children: [
+        /* @__PURE__ */ jsx("path", { d: "M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" }),
+        /* @__PURE__ */ jsx("polyline", { points: "14 2 14 8 20 8" }),
+        /* @__PURE__ */ jsx("line", { x1: "8", y1: "13", x2: "16", y2: "13" }),
+        /* @__PURE__ */ jsx("line", { x1: "8", y1: "17", x2: "16", y2: "17" })
+      ]
+    }
+  );
+}
+function IconUsers({ size = 18, strokeWidth = 2 }) {
+  return /* @__PURE__ */ jsxs(
+    "svg",
+    {
+      width: size,
+      height: size,
+      viewBox: "0 0 24 24",
+      fill: "none",
+      stroke: "currentColor",
+      strokeWidth,
+      strokeLinecap: "round",
+      strokeLinejoin: "round",
+      children: [
+        /* @__PURE__ */ jsx("path", { d: "M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2" }),
+        /* @__PURE__ */ jsx("circle", { cx: "9", cy: "7", r: "4" }),
+        /* @__PURE__ */ jsx("path", { d: "M23 21v-2a4 4 0 0 0-3-3.87" }),
+        /* @__PURE__ */ jsx("path", { d: "M16 3.13a4 4 0 0 1 0 7.75" })
+      ]
+    }
+  );
+}
+function IconBug({ size = 18, strokeWidth = 2 }) {
+  return /* @__PURE__ */ jsxs(
+    "svg",
+    {
+      width: size,
+      height: size,
+      viewBox: "0 0 24 24",
+      fill: "none",
+      stroke: "currentColor",
+      strokeWidth,
+      strokeLinecap: "round",
+      strokeLinejoin: "round",
+      children: [
+        /* @__PURE__ */ jsx("rect", { x: "8", y: "6", width: "8", height: "14", rx: "4" }),
+        /* @__PURE__ */ jsx("path", { d: "M12 2v4" }),
+        /* @__PURE__ */ jsx("path", { d: "M4 10h4" }),
+        /* @__PURE__ */ jsx("path", { d: "M16 10h4" }),
+        /* @__PURE__ */ jsx("path", { d: "M4 16h4" }),
+        /* @__PURE__ */ jsx("path", { d: "M16 16h4" }),
+        /* @__PURE__ */ jsx("path", { d: "M9 20l-3 2" }),
+        /* @__PURE__ */ jsx("path", { d: "M15 20l3 2" })
+      ]
+    }
+  );
+}
 var TAB_ICONS = {
-  "\u0420\u044B\u043D\u043E\u043A": TrendingUp,
-  "\u041F\u043E\u0437\u0438\u0446\u0438\u0438": SlidersHorizontal,
-  "\u041E\u0440\u0434\u0435\u0440\u0430": FileText,
-  "\u0423\u0447\u0430\u0441\u0442\u043D\u0438\u043A\u0438": Users,
-  "\u041E\u0442\u043B\u0430\u0434\u043A\u0430": Bug
+  "\u0420\u044B\u043D\u043E\u043A": IconTrendingUp,
+  "\u041F\u043E\u0437\u0438\u0446\u0438\u0438": IconSliders,
+  "\u041E\u0440\u0434\u0435\u0440\u0430": IconFileText,
+  "\u0423\u0447\u0430\u0441\u0442\u043D\u0438\u043A\u0438": IconUsers,
+  "\u041E\u0442\u043B\u0430\u0434\u043A\u0430": IconBug
 };
 var firebaseConfig = {
   apiKey: "PASTE_API_KEY_HERE",
