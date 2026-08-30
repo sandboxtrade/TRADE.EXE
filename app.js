@@ -3103,7 +3103,7 @@ function AuthScreen({ onBack }) {
 function ModeSelect({ onPick }) {
   return /* @__PURE__ */ jsx("div", { className: "w-full h-screen flex flex-col", style: { backgroundColor: BG, color: TEXT }, children: /* @__PURE__ */ jsxs("div", { className: "max-w-md w-full mx-auto flex-1 flex flex-col justify-center px-6", children: [
     /* @__PURE__ */ jsx("div", { className: "text-[11px] tracking-[0.4em] mb-2", style: { color: FAINT }, children: "\u0417\u0410\u041A\u0420\u042B\u0422\u042B\u0419 \u0420\u042B\u041D\u041E\u041A" }),
-    /* @__PURE__ */ jsx("div", { className: "text-[28px] leading-none tracking-tight mb-10", children: "Market Sandbox" }),
+    /* @__PURE__ */ jsx("div", { className: "text-[28px] leading-none tracking-tight mb-10", children: "trade.exe" }),
     /* @__PURE__ */ jsxs(
       "button",
       {
@@ -3139,7 +3139,7 @@ function OnlineLobby({ user, profile, onNew, onSignOut, onExit }) {
         /* @__PURE__ */ jsx("span", { className: "text-[11px] tracking-[0.4em]", style: { color: FAINT }, children: "\u0417\u0410\u041A\u0420\u042B\u0422\u042B\u0419 \u0420\u042B\u041D\u041E\u041A \xB7 \u041E\u041D\u041B\u0410\u0419\u041D" }),
         /* @__PURE__ */ jsx("button", { onClick: onExit, className: "text-[11px]", style: { color: DIM }, children: "\u0441\u043C\u0435\u043D\u0438\u0442\u044C \u0440\u0435\u0436\u0438\u043C" })
       ] }),
-      /* @__PURE__ */ jsx("div", { className: "text-[28px] leading-none tracking-tight mb-1", children: "Market Sandbox" }),
+      /* @__PURE__ */ jsx("div", { className: "text-[28px] leading-none tracking-tight mb-1", children: "trade.exe" }),
       /* @__PURE__ */ jsxs("div", { className: "text-[12px] mb-8", style: { color: FAINT }, children: [
         user.isAnonymous ? "\u0433\u043E\u0441\u0442\u044C" : user.displayName || user.email,
         " \xB7",
