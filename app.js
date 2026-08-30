@@ -1343,24 +1343,6 @@ import ReactDOM from "react-dom/client";
 // MarketSandbox.src.jsx
 var import_engine = __toESM(require_engine());
 import React, { useEffect, useRef, useState } from "react";
-import {
-  initializeApp
-} from "firebase/app";
-import {
-  getAuth,
-  onAuthStateChanged,
-  signInWithEmailAndPassword,
-  createUserWithEmailAndPassword,
-  signInAnonymously,
-  signOut,
-  sendPasswordResetEmail,
-  updateProfile
-} from "firebase/auth";
-import {
-  getFirestore,
-  doc,
-  onSnapshot as onFirestoreSnapshot
-} from "firebase/firestore";
 import { Fragment, jsx, jsxs } from "react/jsx-runtime";
 function IconTrendingUp({ size = 18, strokeWidth = 2 }) {
   return /* @__PURE__ */ jsxs(
@@ -1494,18 +1476,32 @@ var FIREBASE_CONFIGURED = Boolean(
 var firebaseApp = null;
 var auth = null;
 var db = null;
-function ensureFirebase() {
+var fb = null;
+async function ensureFirebase() {
   if (!FIREBASE_CONFIGURED) {
     throw new Error(
       "Firebase \u043D\u0435 \u043D\u0430\u0441\u0442\u0440\u043E\u0435\u043D: \u043E\u0442\u043A\u0440\u043E\u0439\u0442\u0435 app.js \u0438 \u0432\u043F\u0438\u0448\u0438\u0442\u0435 \u0441\u0432\u043E\u0438 \u0437\u043D\u0430\u0447\u0435\u043D\u0438\u044F \u0432 firebaseConfig (\u0441\u043C. \u043A\u043E\u043C\u043C\u0435\u043D\u0442\u0430\u0440\u0438\u0439 \u0432 \u043D\u0430\u0447\u0430\u043B\u0435 \u0444\u0430\u0439\u043B\u0430)."
     );
   }
   if (!firebaseApp) {
-    firebaseApp = initializeApp(firebaseConfig);
-    auth = getAuth(firebaseApp);
-    db = getFirestore(firebaseApp);
+    let appMod, authMod, storeMod;
+    try {
+      [appMod, authMod, storeMod] = await Promise.all([
+        import("firebase/app"),
+        import("firebase/auth"),
+        import("firebase/firestore")
+      ]);
+    } catch (err) {
+      throw new Error(
+        "\u041D\u0435 \u0443\u0434\u0430\u043B\u043E\u0441\u044C \u0437\u0430\u0433\u0440\u0443\u0437\u0438\u0442\u044C Firebase. \u0421\u0435\u0440\u0432\u0435\u0440\u044B Google \u043C\u043E\u0433\u0443\u0442 \u0431\u044B\u0442\u044C \u043D\u0435\u0434\u043E\u0441\u0442\u0443\u043F\u043D\u044B \u2014 \u043F\u0440\u043E\u0432\u0435\u0440\u044C\u0442\u0435 \u0441\u043E\u0435\u0434\u0438\u043D\u0435\u043D\u0438\u0435 \u0438\u043B\u0438 \u0432\u043A\u043B\u044E\u0447\u0438\u0442\u0435 VPN. \u0420\u0435\u0436\u0438\u043C \xAB\u041F\u0440\u0430\u043A\u0442\u0438\u043A\u0430\xBB \u0440\u0430\u0431\u043E\u0442\u0430\u0435\u0442 \u0431\u0435\u0437 \u0438\u043D\u0442\u0435\u0440\u043D\u0435\u0442\u0430."
+      );
+    }
+    fb = { ...authMod, ...storeMod };
+    firebaseApp = appMod.initializeApp(firebaseConfig);
+    auth = authMod.getAuth(firebaseApp);
+    db = storeMod.getFirestore(firebaseApp);
   }
-  return { auth, db };
+  return { auth, db, fb };
 }
 async function callRoomService(path, { method = "GET", body } = {}) {
   const user = auth.currentUser;
@@ -2941,10 +2937,10 @@ function AuthScreen({ onBack }) {
     setBusy(true);
     try {
       if (mode === "signup") {
-        const cred = await createUserWithEmailAndPassword(auth, email, password);
-        if (name.trim()) await updateProfile(cred.user, { displayName: name.trim() });
+        const cred = await fb.createUserWithEmailAndPassword(auth, email, password);
+        if (name.trim()) await fb.updateProfile(cred.user, { displayName: name.trim() });
       } else {
-        await signInWithEmailAndPassword(auth, email, password);
+        await fb.signInWithEmailAndPassword(auth, email, password);
       }
     } catch (err) {
       setError(friendlyError(err));
@@ -2956,7 +2952,7 @@ function AuthScreen({ onBack }) {
     setError("");
     setBusy(true);
     try {
-      await signInAnonymously(auth);
+      await fb.signInAnonymously(auth);
     } catch (err) {
       setError(friendlyError(err));
     } finally {
@@ -2971,7 +2967,7 @@ function AuthScreen({ onBack }) {
     setError("");
     setBusy(true);
     try {
-      await sendPasswordResetEmail(auth, email);
+      await fb.sendPasswordResetEmail(auth, email);
       setResetSent(true);
     } catch (err) {
       setError(friendlyError(err));
@@ -3751,8 +3747,8 @@ function OnlineApp({ user, onExit }) {
   const [joinError, setJoinError] = useState("");
   const transportRef = useRef(null);
   useEffect(() => {
-    const ref = doc(db, "users", user.uid);
-    const unsub = onFirestoreSnapshot(ref, (snap) => {
+    const ref = fb.doc(db, "users", user.uid);
+    const unsub = fb.onSnapshot(ref, (snap) => {
       if (snap.exists()) {
         const data = snap.data();
         setProfile({
@@ -3790,7 +3786,7 @@ function OnlineApp({ user, onExit }) {
     setSession(null);
     setScreen("result");
   };
-  const handleSignOut = () => signOut(auth);
+  const handleSignOut = () => fb.signOut(auth);
   if (!profile) return /* @__PURE__ */ jsx(ConnectingScreen, { label: "\u0437\u0430\u0433\u0440\u0443\u0437\u043A\u0430 \u043F\u0440\u043E\u0444\u0438\u043B\u044F\u2026" });
   if (screen === "lobby") {
     return /* @__PURE__ */ jsx(
@@ -3903,13 +3899,21 @@ function MarketSandboxRoot() {
   const [firebaseError, setFirebaseError] = useState("");
   useEffect(() => {
     if (mode !== "online") return void 0;
-    try {
-      const { auth: a } = ensureFirebase();
-      return onAuthStateChanged(a, setAuthUser);
-    } catch (err) {
-      setFirebaseError(err.message);
-      return void 0;
-    }
+    let unsub = null;
+    let cancelled = false;
+    (async () => {
+      try {
+        const loaded = await ensureFirebase();
+        if (cancelled) return;
+        unsub = loaded.fb.onAuthStateChanged(loaded.auth, setAuthUser);
+      } catch (err) {
+        if (!cancelled) setFirebaseError(err.message);
+      }
+    })();
+    return () => {
+      cancelled = true;
+      if (unsub) unsub();
+    };
   }, [mode]);
   if (mode === null) return /* @__PURE__ */ jsx(ModeSelect, { onPick: setMode });
   if (mode === "practice") return /* @__PURE__ */ jsx(PracticeApp, { onExit: () => setMode(null) });
