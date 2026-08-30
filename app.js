@@ -1602,7 +1602,7 @@ var VH = 60;
 var MAX_CANDLES = 60;
 function Chart({ state, timeframe, mode, entryPrice, stopLoss, takeProfit }) {
   const bucketMs = TIMEFRAMES.find((t) => t.label === timeframe)?.ms ?? 1e3;
-  const candles = buildCandles(state.priceHistory, bucketMs, MAX_CANDLES);
+  const candles = buildCandles(state.priceStream, bucketMs, MAX_CANDLES);
   if (candles.length < 2) {
     return /* @__PURE__ */ jsx(
       "div",
