@@ -43,11 +43,11 @@ var require_config = __commonJS({
       risk: { shortLiquidationRatio: 0.05 },
       history: { maxPoints: 6e3 }
     };
-    var REFERENCE_CAPITAL = CONFIG2.market.totalPlayers * CONFIG2.market.startingCapital;
-    var scaleOf = (state) => state.totalCapital / REFERENCE_CAPITAL;
+    var REFERENCE_CAPITAL2 = CONFIG2.market.totalPlayers * CONFIG2.market.startingCapital;
+    var scaleOf = (state) => state.totalCapital / REFERENCE_CAPITAL2;
     var minTrade = (state) => 0.5 * scaleOf(state);
     var HUMAN_ID2 = "p-000";
-    module.exports = { CONFIG: CONFIG2, REFERENCE_CAPITAL, scaleOf, minTrade, HUMAN_ID: HUMAN_ID2 };
+    module.exports = { CONFIG: CONFIG2, REFERENCE_CAPITAL: REFERENCE_CAPITAL2, scaleOf, minTrade, HUMAN_ID: HUMAN_ID2 };
   }
 });
 
@@ -120,14 +120,14 @@ var require_liquidity = __commonJS({
       const saturation = 1 + CONFIG2.liquidity.openInterestPenalty * (openInterest / Math.max(1, state.totalCapital));
       return Math.max(CONFIG2.liquidity.min * scale, raw / saturation);
     }
-    function executionPrice(ref, notional, liquidity, direction, scale = 1) {
+    function executionPrice2(ref, notional, liquidity, direction, scale = 1) {
       const magnitude = Math.min(
         CONFIG2.impact.maxImpact,
         CONFIG2.impact.coefficient * Math.abs(notional) / Math.max(liquidity, CONFIG2.liquidity.min * scale)
       );
       return Math.max(CONFIG2.market.minPrice, ref * (1 + magnitude * direction));
     }
-    module.exports = { computeLiquidity, executionPrice };
+    module.exports = { computeLiquidity, executionPrice: executionPrice2 };
   }
 });
 
@@ -135,7 +135,7 @@ var require_liquidity = __commonJS({
 var require_pnl = __commonJS({
   "engine/pnl.js"(exports, module) {
     var { CONFIG: CONFIG2, scaleOf } = require_config();
-    var { executionPrice } = require_liquidity();
+    var { executionPrice: executionPrice2 } = require_liquidity();
     function settlementValue(pos, price) {
       if (pos.side === "long") return pos.units * price;
       return Math.max(0, pos.margin + (pos.entryPrice - price) * pos.units);
@@ -143,7 +143,7 @@ var require_pnl = __commonJS({
     function projectedSettlement(state, pos) {
       const direction = pos.side === "long" ? -1 : 1;
       const exposure = pos.units * state.price;
-      const execPrice = executionPrice(state.price, exposure, state.liquidity, direction, scaleOf(state));
+      const execPrice = executionPrice2(state.price, exposure, state.liquidity, direction, scaleOf(state));
       return settlementValue(pos, execPrice);
     }
     var unrealizedPnL = (p, price) => p.position ? settlementValue(p.position, price) - p.position.margin : 0;
@@ -629,7 +629,7 @@ var require_npc = __commonJS({
 var require_orders = __commonJS({
   "engine/orders.js"(exports, module) {
     var { HUMAN_ID: HUMAN_ID2, minTrade, scaleOf } = require_config();
-    var { executionPrice } = require_liquidity();
+    var { executionPrice: executionPrice2 } = require_liquidity();
     var { settlementValue } = require_pnl();
     var { clamp } = require_util();
     var { recordEntry, recordExit } = require_npc();
@@ -655,7 +655,7 @@ var require_orders = __commonJS({
       const margin = full ? pos.margin : pos.margin * f;
       const direction = pos.side === "long" ? -1 : 1;
       const exposure = units * state.price;
-      const execPrice = executionPrice(state.price, exposure, state.liquidity, direction, scaleOf(state));
+      const execPrice = executionPrice2(state.price, exposure, state.liquidity, direction, scaleOf(state));
       const payout = settlementValue({ ...pos, units, margin }, execPrice);
       const realized = payout - margin;
       player.cash += payout;
@@ -692,7 +692,7 @@ var require_orders = __commonJS({
       const notional = Math.min(requested, player.cash);
       if (notional < minTrade(state)) return null;
       const direction = side === "long" ? 1 : -1;
-      const execPrice = executionPrice(state.price, notional, state.liquidity, direction, scaleOf(state));
+      const execPrice = executionPrice2(state.price, notional, state.liquidity, direction, scaleOf(state));
       const units = notional / execPrice;
       player.cash -= notional;
       state.poolCash += notional;
@@ -1361,7 +1361,15 @@ import {
   doc,
   onSnapshot as onFirestoreSnapshot
 } from "firebase/firestore";
+import { TrendingUp, SlidersHorizontal, FileText, Users, Bug } from "lucide-react";
 import { Fragment, jsx, jsxs } from "react/jsx-runtime";
+var TAB_ICONS = {
+  "\u0420\u044B\u043D\u043E\u043A": TrendingUp,
+  "\u041F\u043E\u0437\u0438\u0446\u0438\u0438": SlidersHorizontal,
+  "\u041E\u0440\u0434\u0435\u0440\u0430": FileText,
+  "\u0423\u0447\u0430\u0441\u0442\u043D\u0438\u043A\u0438": Users,
+  "\u041E\u0442\u043B\u0430\u0434\u043A\u0430": Bug
+};
 var firebaseConfig = {
   apiKey: "PASTE_API_KEY_HERE",
   authDomain: "PASTE_PROJECT_ID_HERE.firebaseapp.com",
@@ -1371,7 +1379,7 @@ var firebaseConfig = {
   appId: "PASTE_APP_ID_HERE"
 };
 var ROOM_SERVICE_URL = "PASTE_ROOM_SERVICE_URL_HERE";
-var ROOM_SERVICE_WS_URL = ROOM_SERVICE_URL ? `${ROOM_SERVICE_URL.replace(/^http/, "ws")}/ws` : "";
+var ROOM_SERVICE_WS_URL = ROOM_SERVICE_URL.startsWith("PASTE_") ? "" : `${ROOM_SERVICE_URL.replace(/^http/, "ws")}/ws`;
 var FIREBASE_CONFIGURED = Boolean(
   firebaseConfig.apiKey && !firebaseConfig.apiKey.startsWith("PASTE_")
 );
@@ -1587,15 +1595,15 @@ function buildCandles(points, bucketMs, maxCandles) {
   }
   return candles.slice(-maxCandles);
 }
-var BG = "#000000";
-var SURFACE = "#0B0B0C";
-var RAISED = "#141416";
-var HAIR = "#1E1E21";
+var BG = "#0B0B0B";
+var SURFACE = "#141414";
+var RAISED = "#1C1C1E";
+var HAIR = "#232325";
 var TEXT = "#FFFFFF";
-var DIM = "#7A7A80";
-var FAINT = "#46464C";
-var LONG = "#19D67E";
-var SHORT = "#FF3F52";
+var DIM = "#8A8A8E";
+var FAINT = "#4A4A4E";
+var LONG = "#00E676";
+var SHORT = "#FF3B30";
 var fmt = (v, d = 2) => {
   const digits = Math.abs(v) >= 1e3 ? 0 : d;
   return `${v < 0 ? "-" : ""}$${Math.abs(v).toLocaleString("en-US", {
@@ -1924,6 +1932,8 @@ function SessionSetup({ wallet, onStart, onBack }) {
 }
 function SessionResult({ result, onDone }) {
   const good = result.pnl >= 0;
+  const totalPlayers = import_engine.CONFIG.market.totalPlayers;
+  const percentile = Math.round((totalPlayers - result.rank) / (totalPlayers - 1) * 100);
   return /* @__PURE__ */ jsxs("div", { className: "w-full h-screen flex flex-col", style: { backgroundColor: BG, color: TEXT }, children: [
     /* @__PURE__ */ jsxs("div", { className: "max-w-md w-full mx-auto flex-1 flex flex-col justify-center px-6", children: [
       /* @__PURE__ */ jsx("div", { className: "text-[11px] tracking-[0.4em] mb-3", style: { color: FAINT }, children: "\u0421\u0415\u0421\u0421\u0418\u042F \u0417\u0410\u0412\u0415\u0420\u0428\u0415\u041D\u0410" }),
@@ -1932,10 +1942,15 @@ function SessionResult({ result, onDone }) {
         (result.pnl / result.capital * 100).toFixed(2),
         "% \u043E\u0442 \u0432\u0437\u043D\u043E\u0441\u0430"
       ] }),
+      /* @__PURE__ */ jsxs("div", { className: "text-[13px] mt-3", style: { color: percentile >= 50 ? LONG : DIM }, children: [
+        "\u0412\u0430\u0448 \u0440\u0435\u0437\u0443\u043B\u044C\u0442\u0430\u0442 \u043B\u0443\u0447\u0448\u0435, \u0447\u0435\u043C \u0443 ",
+        percentile,
+        "% \u0443\u0447\u0430\u0441\u0442\u043D\u0438\u043A\u043E\u0432"
+      ] }),
       /* @__PURE__ */ jsxs("div", { className: "mt-10", children: [
         /* @__PURE__ */ jsx(Line, { left: "\u0412\u0437\u043D\u043E\u0441", right: fmt(result.capital) }),
         /* @__PURE__ */ jsx(Line, { left: "\u0418\u0442\u043E\u0433\u043E\u0432\u044B\u0439 \u043A\u0430\u043F\u0438\u0442\u0430\u043B", right: fmt(result.equity) }),
-        /* @__PURE__ */ jsx(Line, { left: "\u041C\u0435\u0441\u0442\u043E \u0432 \u0440\u0435\u0439\u0442\u0438\u043D\u0433\u0435", right: `${result.rank} \u0438\u0437 ${import_engine.CONFIG.market.totalPlayers}` }),
+        /* @__PURE__ */ jsx(Line, { left: "\u041C\u0435\u0441\u0442\u043E \u0432 \u0440\u0435\u0439\u0442\u0438\u043D\u0433\u0435", right: `${result.rank} \u0438\u0437 ${totalPlayers}` }),
         /* @__PURE__ */ jsx(Line, { left: "\u0421\u0434\u0435\u043B\u043E\u043A", right: String(result.trades) }),
         /* @__PURE__ */ jsx(Line, { left: "\u0412\u0440\u0435\u043C\u044F \u0432 \u0440\u044B\u043D\u043A\u0435", right: (0, import_engine.clock)(result.ticks * import_engine.CONFIG.market.tickMs) }),
         /* @__PURE__ */ jsx(Line, { left: "\u0426\u0435\u043D\u0430 \u043D\u0430 \u0432\u044B\u0445\u043E\u0434\u0435", right: fmt(result.price) })
@@ -2100,8 +2115,15 @@ function PracticeApp({ onExit }) {
     refresh();
     return res;
   };
-  const buyHint = pos && pos.side === "short" ? "\u0437\u0430\u043A\u0440\u043E\u0435\u0442 Short" : "\u043E\u0442\u043A\u0440\u044B\u0442\u044C / \u0443\u0432\u0435\u043B\u0438\u0447\u0438\u0442\u044C Long";
-  const sellHint = pos && pos.side === "long" ? "\u0437\u0430\u043A\u0440\u043E\u0435\u0442 Long" : "\u043E\u0442\u043A\u0440\u044B\u0442\u044C / \u0443\u0432\u0435\u043B\u0438\u0447\u0438\u0442\u044C Short";
+  const scale = state.totalCapital / import_engine.REFERENCE_CAPITAL;
+  const buyClosing = pos && pos.side === "short";
+  const sellClosing = pos && pos.side === "long";
+  const buyExposure = buyClosing ? pos.units * state.price : notional;
+  const sellExposure = sellClosing ? pos.units * state.price : notional;
+  const buyPreview = buyExposure >= 1 ? (0, import_engine.executionPrice)(state.price, buyExposure, state.liquidity, 1, scale) : null;
+  const sellPreview = sellExposure >= 1 ? (0, import_engine.executionPrice)(state.price, sellExposure, state.liquidity, -1, scale) : null;
+  const buyHint = buyPreview ? `${buyClosing ? "\u0437\u0430\u043A\u0440\u043E\u0435\u0442 Short" : "\u0432\u0445\u043E\u0434"} \u2248 $${buyPreview.toFixed(2)}` : buyClosing ? "\u0437\u0430\u043A\u0440\u043E\u0435\u0442 Short" : "\u043E\u0442\u043A\u0440\u044B\u0442\u044C / \u0443\u0432\u0435\u043B\u0438\u0447\u0438\u0442\u044C Long";
+  const sellHint = sellPreview ? `${sellClosing ? "\u0437\u0430\u043A\u0440\u043E\u0435\u0442 Long" : "\u0432\u0445\u043E\u0434"} \u2248 $${sellPreview.toFixed(2)}` : sellClosing ? "\u0437\u0430\u043A\u0440\u043E\u0435\u0442 Long" : "\u043E\u0442\u043A\u0440\u044B\u0442\u044C / \u0443\u0432\u0435\u043B\u0438\u0447\u0438\u0442\u044C Short";
   const doBuy = async () => {
     const res = await send({ type: "TRADE", action: "BUY", notional, reason: "\u0440\u0443\u0447\u043D\u0430\u044F \u043F\u043E\u043A\u0443\u043F\u043A\u0430" });
     if (res.ok) say(pos && pos.side === "short" ? "\u0437\u0430\u043A\u0440\u044B\u0432\u0430\u0435\u043C Short" : `\u043F\u043E\u043A\u0443\u043F\u043A\u0430 ${fmt(notional, 0)}`, LONG);
@@ -2769,16 +2791,22 @@ function PracticeApp({ onExit }) {
         children: toast.text
       }
     ) }),
-    /* @__PURE__ */ jsx("div", { className: "grid grid-cols-5 border-t", style: { borderColor: HAIR }, children: TAB_KEYS.map((key) => /* @__PURE__ */ jsx(
-      "button",
-      {
-        onClick: () => setTab(key),
-        className: "py-3 text-[11px]",
-        style: { color: tab === key ? TEXT : FAINT },
-        children: key
-      },
-      key
-    )) })
+    /* @__PURE__ */ jsx("div", { className: "grid grid-cols-5 border-t", style: { borderColor: HAIR }, children: TAB_KEYS.map((key) => {
+      const Icon = TAB_ICONS[key];
+      return /* @__PURE__ */ jsxs(
+        "button",
+        {
+          onClick: () => setTab(key),
+          className: "py-2.5 text-[10px] flex flex-col items-center gap-1",
+          style: { color: tab === key ? TEXT : FAINT },
+          children: [
+            /* @__PURE__ */ jsx(Icon, { size: 18, strokeWidth: tab === key ? 2.2 : 1.8 }),
+            key
+          ]
+        },
+        key
+      );
+    }) })
   ] }) });
 }
 function AuthScreen({ onBack }) {
@@ -3069,8 +3097,15 @@ function OnlineGameScreen({ transport, session, onFinish }) {
     refresh();
     return res;
   };
-  const buyHint = pos && pos.side === "short" ? "\u0437\u0430\u043A\u0440\u043E\u0435\u0442 Short" : "\u043E\u0442\u043A\u0440\u044B\u0442\u044C / \u0443\u0432\u0435\u043B\u0438\u0447\u0438\u0442\u044C Long";
-  const sellHint = pos && pos.side === "long" ? "\u0437\u0430\u043A\u0440\u043E\u0435\u0442 Long" : "\u043E\u0442\u043A\u0440\u044B\u0442\u044C / \u0443\u0432\u0435\u043B\u0438\u0447\u0438\u0442\u044C Short";
+  const scale = state.totalCapital / import_engine.REFERENCE_CAPITAL;
+  const buyClosing = pos && pos.side === "short";
+  const sellClosing = pos && pos.side === "long";
+  const buyExposure = buyClosing ? pos.units * state.price : notional;
+  const sellExposure = sellClosing ? pos.units * state.price : notional;
+  const buyPreview = buyExposure >= 1 ? (0, import_engine.executionPrice)(state.price, buyExposure, state.liquidity, 1, scale) : null;
+  const sellPreview = sellExposure >= 1 ? (0, import_engine.executionPrice)(state.price, sellExposure, state.liquidity, -1, scale) : null;
+  const buyHint = buyPreview ? `${buyClosing ? "\u0437\u0430\u043A\u0440\u043E\u0435\u0442 Short" : "\u0432\u0445\u043E\u0434"} \u2248 $${buyPreview.toFixed(2)}` : buyClosing ? "\u0437\u0430\u043A\u0440\u043E\u0435\u0442 Short" : "\u043E\u0442\u043A\u0440\u044B\u0442\u044C / \u0443\u0432\u0435\u043B\u0438\u0447\u0438\u0442\u044C Long";
+  const sellHint = sellPreview ? `${sellClosing ? "\u0437\u0430\u043A\u0440\u043E\u0435\u0442 Long" : "\u0432\u0445\u043E\u0434"} \u2248 $${sellPreview.toFixed(2)}` : sellClosing ? "\u0437\u0430\u043A\u0440\u043E\u0435\u0442 Long" : "\u043E\u0442\u043A\u0440\u044B\u0442\u044C / \u0443\u0432\u0435\u043B\u0438\u0447\u0438\u0442\u044C Short";
   const doBuy = async () => {
     const res = await send({ type: "TRADE", action: "BUY", notional, reason: "\u0440\u0443\u0447\u043D\u0430\u044F \u043F\u043E\u043A\u0443\u043F\u043A\u0430" });
     if (res.ok) say(pos && pos.side === "short" ? "\u0437\u0430\u043A\u0440\u044B\u0432\u0430\u0435\u043C Short" : `\u043F\u043E\u043A\u0443\u043F\u043A\u0430 ${fmt(notional, 0)}`, LONG);
@@ -3581,16 +3616,22 @@ function OnlineGameScreen({ transport, session, onFinish }) {
         children: toast.text
       }
     ) }),
-    /* @__PURE__ */ jsx("div", { className: "grid grid-cols-4 border-t", style: { borderColor: HAIR }, children: TAB_KEYS.map((key) => /* @__PURE__ */ jsx(
-      "button",
-      {
-        onClick: () => setTab(key),
-        className: "py-3 text-[11px]",
-        style: { color: tab === key ? TEXT : FAINT },
-        children: key
-      },
-      key
-    )) })
+    /* @__PURE__ */ jsx("div", { className: "grid grid-cols-4 border-t", style: { borderColor: HAIR }, children: TAB_KEYS.map((key) => {
+      const Icon = TAB_ICONS[key];
+      return /* @__PURE__ */ jsxs(
+        "button",
+        {
+          onClick: () => setTab(key),
+          className: "py-2.5 text-[10px] flex flex-col items-center gap-1",
+          style: { color: tab === key ? TEXT : FAINT },
+          children: [
+            /* @__PURE__ */ jsx(Icon, { size: 18, strokeWidth: tab === key ? 2.2 : 1.8 }),
+            key
+          ]
+        },
+        key
+      );
+    }) })
   ] }) });
 }
 function OnlineApp({ user, onExit }) {
@@ -3700,6 +3741,18 @@ function OnlineApp({ user, onExit }) {
           (result.pnl / result.capital * 100).toFixed(2),
           "% \u043E\u0442 \u0432\u0437\u043D\u043E\u0441\u0430"
         ] }),
+        /* @__PURE__ */ jsxs(
+          "div",
+          {
+            className: "text-[13px] mt-3",
+            style: { color: result.rank && (import_engine.CONFIG.market.totalPlayers - result.rank) / (import_engine.CONFIG.market.totalPlayers - 1) >= 0.5 ? LONG : DIM },
+            children: [
+              "\u0412\u0430\u0448 \u0440\u0435\u0437\u0443\u043B\u044C\u0442\u0430\u0442 \u043B\u0443\u0447\u0448\u0435, \u0447\u0435\u043C \u0443 ",
+              Math.round((import_engine.CONFIG.market.totalPlayers - result.rank) / (import_engine.CONFIG.market.totalPlayers - 1) * 100),
+              "% \u0443\u0447\u0430\u0441\u0442\u043D\u0438\u043A\u043E\u0432"
+            ]
+          }
+        ),
         /* @__PURE__ */ jsxs("div", { className: "mt-10", children: [
           /* @__PURE__ */ jsx(Line, { left: "\u0412\u0437\u043D\u043E\u0441", right: fmt(result.capital) }),
           /* @__PURE__ */ jsx(Line, { left: "\u0418\u0442\u043E\u0433\u043E\u0432\u044B\u0439 \u043A\u0430\u043F\u0438\u0442\u0430\u043B", right: fmt(result.equity) }),

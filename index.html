@@ -13,7 +13,16 @@
   <script src="https://cdn.tailwindcss.com"></script>
 
   <style>
-    html, body { margin: 0; padding: 0; background: #000000; overscroll-behavior: none; }
+    html, body { margin: 0; padding: 0; background: #0B0B0B; overscroll-behavior: none; }
+    /* SF Pro Display нельзя раздавать с CDN — лицензия Apple это не
+       разрешает. Системный стек шрифтов — честная и рабочая замена: на
+       iOS/macOS -apple-system резолвится в НАСТОЯЩИЙ SF Pro, на Windows/
+       Android/Linux браузер подставит свой аналог того же класса. */
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", "Segoe UI",
+        Roboto, "Helvetica Neue", Arial, sans-serif;
+      font-weight: 400;
+    }
     #root { min-height: 100vh; }
   </style>
 
@@ -29,7 +38,7 @@
       "react-dom": "https://esm.sh/react-dom@18.3.1",
       "react-dom/client": "https://esm.sh/react-dom@18.3.1/client",
       "react/jsx-runtime": "https://esm.sh/react@18.3.1/jsx-runtime",
-      "react/jsx-dev-runtime": "https://esm.sh/react@18.3.1/jsx-dev-runtime",
+
       "firebase/app": "https://www.gstatic.com/firebasejs/12.17.1/firebase-app.js",
       "firebase/auth": "https://www.gstatic.com/firebasejs/12.17.1/firebase-auth.js",
       "firebase/firestore": "https://www.gstatic.com/firebasejs/12.17.1/firebase-firestore.js"
@@ -43,6 +52,6 @@
        увеличивайте это число (v=2, v=3, ...) — иначе браузер (особенно на
        телефоне) может показывать старую сохранённую версию файла даже после
        того, как вы залили новую на GitHub. -->
-  <script type="module" src="./app.js?v=4"></script>
+  <script type="module" src="./app.js?v=6"></script>
 </body>
 </html>
