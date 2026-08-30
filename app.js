@@ -39,7 +39,7 @@ var require_config = __commonJS({
       },
       price: { maxTickMove: 0.02, sensitivity: 0.12, pressureDecay: 0.45, pressureFloor: 0.01 },
       liquidity: { base: 250, freeCashWeight: 0.45, poolWeight: 0.35, openInterestPenalty: 0.9, min: 120 },
-      impact: { coefficient: 0.55, maxImpact: 0.05 },
+      impact: { coefficient: 0.1, maxImpact: 0.02 },
       risk: { shortLiquidationRatio: 0.05 },
       history: { maxPoints: 6e3 }
     };
