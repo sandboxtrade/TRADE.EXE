@@ -1856,6 +1856,7 @@ function Toggle({ active, onClick, children }) {
 var PROFILE_KEY = "sandbox:profile";
 var STARTING_WALLET = 25e3;
 var emptyProfile = () => ({
+  nickname: "",
   wallet: STARTING_WALLET,
   deposited: STARTING_WALLET,
   sessions: []
@@ -1893,87 +1894,130 @@ function profileStats(profile) {
     worst: Math.min(...list.map((x) => x.pnl))
   };
 }
-function Lobby({ profile, onNew, onReset, onExit }) {
+function Lobby({ profile, onNew, onReset, onExit, onRename }) {
   const st = profileStats(profile);
   const affordable = import_engine.CONFIG.market.capitalOptions.some((c) => c <= profile.wallet);
-  return /* @__PURE__ */ jsxs("div", { className: "w-full h-screen flex flex-col", style: { backgroundColor: BG, color: TEXT }, children: [
-    /* @__PURE__ */ jsxs("div", { className: "max-w-md w-full mx-auto flex-1 overflow-y-auto px-6 pt-10 pb-4", children: [
-      /* @__PURE__ */ jsxs("div", { className: "flex items-center justify-between mb-2", children: [
-        /* @__PURE__ */ jsx("span", { className: "text-[11px] tracking-[0.4em]", style: { color: FAINT }, children: "\u0417\u0410\u041A\u0420\u042B\u0422\u042B\u0419 \u0420\u042B\u041D\u041E\u041A \xB7 \u041F\u0420\u0410\u041A\u0422\u0418\u041A\u0410" }),
+  const [editingName, setEditingName] = useState(false);
+  const [draftName, setDraftName] = useState(profile.nickname || "");
+  const saveName = () => {
+    const clean = draftName.trim().slice(0, 20);
+    onRename(clean);
+    setEditingName(false);
+  };
+  const displayName = profile.nickname || "\u0422\u0440\u0435\u0439\u0434\u0435\u0440";
+  const initial = displayName.charAt(0).toUpperCase();
+  const winRate = st.count ? Math.round(st.wins / st.count * 100) : 0;
+  return /* @__PURE__ */ jsxs("div", { className: "w-full h-screen flex flex-col overflow-hidden", style: { backgroundColor: BG, color: TEXT }, children: [
+    /* @__PURE__ */ jsxs("div", { className: "max-w-md w-full mx-auto flex-1 flex flex-col px-6 pt-8 pb-3 min-h-0", children: [
+      /* @__PURE__ */ jsxs("div", { className: "flex items-center justify-between mb-5", children: [
+        /* @__PURE__ */ jsx("span", { className: "text-[10px] tracking-[0.3em]", style: { color: FAINT }, children: "\u041F\u0420\u0410\u041A\u0422\u0418\u041A\u0410" }),
         onExit && /* @__PURE__ */ jsx("button", { onClick: onExit, className: "text-[11px]", style: { color: DIM }, children: "\u0441\u043C\u0435\u043D\u0438\u0442\u044C \u0440\u0435\u0436\u0438\u043C" })
       ] }),
-      /* @__PURE__ */ jsx("div", { className: "text-[28px] leading-none tracking-tight mb-10", children: "Market Sandbox" }),
-      /* @__PURE__ */ jsx("div", { className: "text-[11px] tracking-[0.15em] mb-2", style: { color: FAINT }, children: "\u0411\u0410\u041B\u0410\u041D\u0421" }),
-      /* @__PURE__ */ jsx("div", { className: "text-[44px] leading-none font-mono tracking-tight", children: fmt(profile.wallet) }),
-      /* @__PURE__ */ jsx(
-        "div",
-        {
-          className: "text-[13px] font-mono mt-2",
-          style: { color: st.total > 0 ? LONG : st.total < 0 ? SHORT : DIM },
-          children: st.count === 0 ? "\u0441\u0435\u0441\u0441\u0438\u0439 \u0435\u0449\u0451 \u043D\u0435 \u0431\u044B\u043B\u043E" : `${fmtSigned(st.total)} \u0437\u0430 ${st.count} \u0441\u0435\u0441\u0441.`
-        }
-      ),
-      /* @__PURE__ */ jsxs("div", { className: "grid grid-cols-4 gap-3 mt-8", children: [
-        /* @__PURE__ */ jsx(Metric, { label: "\u0421\u0415\u0421\u0421\u0418\u0419", value: String(st.count) }),
+      /* @__PURE__ */ jsxs("div", { className: "flex items-center gap-3 mb-6", children: [
         /* @__PURE__ */ jsx(
-          Metric,
+          "div",
           {
-            label: "\u041F\u0420\u0418\u0411\u042B\u041B\u042C\u041D\u042B\u0425",
-            value: st.count ? `${st.wins}` : "\u2014",
-            color: st.wins > 0 ? LONG : TEXT
+            className: "w-12 h-12 rounded-full flex items-center justify-center text-[18px] font-semibold shrink-0",
+            style: { backgroundColor: SURFACE, border: `1px solid ${HAIR}`, color: DIM },
+            children: initial
           }
         ),
+        /* @__PURE__ */ jsxs("div", { className: "min-w-0 flex-1", children: [
+          editingName ? /* @__PURE__ */ jsx(
+            "input",
+            {
+              autoFocus: true,
+              value: draftName,
+              maxLength: 20,
+              onChange: (e) => setDraftName(e.target.value),
+              onBlur: saveName,
+              onKeyDown: (e) => {
+                if (e.key === "Enter") saveName();
+              },
+              placeholder: "\u0432\u0430\u0448 \u043D\u0438\u043A\u043D\u0435\u0439\u043C",
+              className: "w-full bg-transparent outline-none text-[17px] rounded px-2 py-1",
+              style: { color: TEXT, border: `1px solid ${HAIR}` }
+            }
+          ) : /* @__PURE__ */ jsxs(
+            "button",
+            {
+              onClick: () => {
+                setDraftName(profile.nickname || "");
+                setEditingName(true);
+              },
+              className: "text-[17px] text-left truncate w-full",
+              children: [
+                displayName,
+                " ",
+                /* @__PURE__ */ jsx("span", { className: "text-[12px]", style: { color: FAINT }, children: "\u0438\u0437\u043C\u0435\u043D\u0438\u0442\u044C" })
+              ]
+            }
+          ),
+          /* @__PURE__ */ jsx("div", { className: "text-[11px] mt-0.5", style: { color: FAINT }, children: st.count === 0 ? "\u043D\u043E\u0432\u044B\u0439 \u0438\u0433\u0440\u043E\u043A" : `${st.count} \u0441\u0435\u0441\u0441. \xB7 ${winRate}% \u043F\u0440\u0438\u0431\u044B\u043B\u044C\u043D\u044B\u0445` })
+        ] })
+      ] }),
+      /* @__PURE__ */ jsxs("div", { className: "rounded-xl px-4 py-4 mb-4", style: { backgroundColor: SURFACE, border: `1px solid ${HAIR}` }, children: [
+        /* @__PURE__ */ jsx("div", { className: "text-[10px] tracking-[0.2em] mb-1.5", style: { color: FAINT }, children: "\u0411\u0410\u041B\u0410\u041D\u0421" }),
+        /* @__PURE__ */ jsx("div", { className: "text-[34px] leading-none font-mono tracking-tight", children: fmt(profile.wallet, 0) }),
         /* @__PURE__ */ jsx(
-          Metric,
+          "div",
           {
-            label: "\u041B\u0423\u0427\u0428\u0410\u042F",
-            value: st.count ? fmtSigned(st.best, 0) : "\u2014",
-            color: st.best > 0 ? LONG : TEXT
-          }
-        ),
-        /* @__PURE__ */ jsx(
-          Metric,
-          {
-            label: "\u0425\u0423\u0414\u0428\u0410\u042F",
-            value: st.count ? fmtSigned(st.worst, 0) : "\u2014",
-            color: st.worst < 0 ? SHORT : TEXT
+            className: "text-[12px] font-mono mt-1.5",
+            style: { color: st.total > 0 ? LONG : st.total < 0 ? SHORT : DIM },
+            children: st.count === 0 ? "\u0441\u0435\u0441\u0441\u0438\u0439 \u0435\u0449\u0451 \u043D\u0435 \u0431\u044B\u043B\u043E" : `${fmtSigned(st.total)} \u0432\u0441\u0435\u0433\u043E`
           }
         )
       ] }),
-      /* @__PURE__ */ jsx("div", { className: "text-[11px] tracking-[0.15em] mt-10 mb-1", style: { color: FAINT }, children: "\u0418\u0421\u0422\u041E\u0420\u0418\u042F" }),
-      profile.sessions.length === 0 ? /* @__PURE__ */ jsx(Blank, { children: "\u0437\u0434\u0435\u0441\u044C \u043F\u043E\u044F\u0432\u044F\u0442\u0441\u044F \u0440\u0435\u0437\u0443\u043B\u044C\u0442\u0430\u0442\u044B \u0432\u0430\u0448\u0438\u0445 \u0441\u0435\u0441\u0441\u0438\u0439" }) : profile.sessions.slice(0, 12).map((x, i) => /* @__PURE__ */ jsxs("div", { className: "flex items-center justify-between py-2.5 border-b", style: { borderColor: HAIR }, children: [
+      /* @__PURE__ */ jsx("div", { className: "grid grid-cols-3 gap-2 mb-5", children: [
+        ["\u0421\u0415\u0421\u0421\u0418\u0419", String(st.count), TEXT],
+        ["\u041B\u0423\u0427\u0428\u0410\u042F", st.count ? fmtSigned(st.best, 0) : "\u2014", st.best > 0 ? LONG : TEXT],
+        ["\u0425\u0423\u0414\u0428\u0410\u042F", st.count ? fmtSigned(st.worst, 0) : "\u2014", st.worst < 0 ? SHORT : TEXT]
+      ].map(([label, value, color]) => /* @__PURE__ */ jsxs(
+        "div",
+        {
+          className: "rounded-lg px-3 py-2.5",
+          style: { backgroundColor: SURFACE, border: `1px solid ${HAIR}` },
+          children: [
+            /* @__PURE__ */ jsx("div", { className: "text-[9px] tracking-[0.15em] mb-1", style: { color: FAINT }, children: label }),
+            /* @__PURE__ */ jsx("div", { className: "text-[15px] font-mono", style: { color }, children: value })
+          ]
+        },
+        label
+      )) }),
+      /* @__PURE__ */ jsx("div", { className: "text-[10px] tracking-[0.2em] mb-1", style: { color: FAINT }, children: "\u0418\u0421\u0422\u041E\u0420\u0418\u042F" }),
+      /* @__PURE__ */ jsx("div", { className: "flex-1 min-h-0 overflow-y-auto no-scrollbar", children: profile.sessions.length === 0 ? /* @__PURE__ */ jsx(Blank, { children: "\u0437\u0434\u0435\u0441\u044C \u043F\u043E\u044F\u0432\u044F\u0442\u0441\u044F \u0440\u0435\u0437\u0443\u043B\u044C\u0442\u0430\u0442\u044B \u0432\u0430\u0448\u0438\u0445 \u0441\u0435\u0441\u0441\u0438\u0439" }) : profile.sessions.map((x, i) => /* @__PURE__ */ jsxs("div", { className: "flex items-center justify-between py-2 border-b", style: { borderColor: HAIR }, children: [
         /* @__PURE__ */ jsxs("div", { className: "min-w-0", children: [
-          /* @__PURE__ */ jsxs("div", { className: "text-[13px] font-mono", children: [
+          /* @__PURE__ */ jsxs("div", { className: "text-[12px] font-mono", children: [
             fmt(x.capital, 0),
             " \u2192 ",
-            fmt(x.equity)
+            fmt(x.equity, 0)
           ] }),
-          /* @__PURE__ */ jsxs("div", { className: "text-[11px]", style: { color: FAINT }, children: [
+          /* @__PURE__ */ jsxs("div", { className: "text-[10px]", style: { color: FAINT }, children: [
             (0, import_engine.clock)(x.ticks * import_engine.CONFIG.market.tickMs),
-            " \u0432 \u0440\u044B\u043D\u043A\u0435 \xB7 \u043C\u0435\u0441\u0442\u043E ",
+            " \xB7 \u043C\u0435\u0441\u0442\u043E ",
             x.rank,
             " \u0438\u0437 ",
             import_engine.CONFIG.market.totalPlayers
           ] })
         ] }),
-        /* @__PURE__ */ jsx("div", { className: "text-[14px] font-mono", style: { color: x.pnl >= 0 ? LONG : SHORT }, children: fmtSigned(x.pnl) })
-      ] }, i))
+        /* @__PURE__ */ jsx("div", { className: "text-[13px] font-mono", style: { color: x.pnl >= 0 ? LONG : SHORT }, children: fmtSigned(x.pnl, 0) })
+      ] }, i)) })
     ] }),
-    /* @__PURE__ */ jsx("div", { className: "max-w-md w-full mx-auto px-6 pb-8 pt-3", children: affordable ? /* @__PURE__ */ jsx(
+    /* @__PURE__ */ jsx("div", { className: "max-w-md w-full mx-auto px-6 pb-7 pt-2 shrink-0", children: affordable ? /* @__PURE__ */ jsx(
       "button",
       {
         onClick: onNew,
-        className: "w-full rounded-lg py-4 text-[15px] tracking-[0.15em] font-semibold",
+        className: "w-full rounded-xl py-4 text-[15px] tracking-[0.15em] font-semibold",
         style: { backgroundColor: TEXT, color: BG },
         children: "\u041D\u041E\u0412\u0410\u042F \u0421\u0415\u0421\u0421\u0418\u042F"
       }
     ) : /* @__PURE__ */ jsxs(Fragment, { children: [
-      /* @__PURE__ */ jsx("div", { className: "text-[12px] mb-3 text-center", style: { color: FAINT }, children: "\u041D\u0430 \u0431\u0430\u043B\u0430\u043D\u0441\u0435 \u043C\u0435\u043D\u044C\u0448\u0435 \u043C\u0438\u043D\u0438\u043C\u0430\u043B\u044C\u043D\u043E\u0433\u043E \u0432\u0437\u043D\u043E\u0441\u0430." }),
+      /* @__PURE__ */ jsx("div", { className: "text-[12px] mb-2 text-center", style: { color: FAINT }, children: "\u041D\u0430 \u0431\u0430\u043B\u0430\u043D\u0441\u0435 \u043C\u0435\u043D\u044C\u0448\u0435 \u043C\u0438\u043D\u0438\u043C\u0430\u043B\u044C\u043D\u043E\u0433\u043E \u0432\u0437\u043D\u043E\u0441\u0430." }),
       /* @__PURE__ */ jsxs(
         "button",
         {
           onClick: onReset,
-          className: "w-full rounded-lg py-4 text-[15px] tracking-[0.15em]",
+          className: "w-full rounded-xl py-4 text-[15px] tracking-[0.15em]",
           style: { backgroundColor: SURFACE, color: TEXT, border: `1px solid ${HAIR}` },
           children: [
             "\u041F\u041E\u041F\u041E\u041B\u041D\u0418\u0422\u042C \u0414\u041E ",
@@ -2165,6 +2209,7 @@ function PracticeApp({ onExit }) {
         profile,
         onNew: () => setScreen("setup"),
         onExit,
+        onRename: (nickname) => persist({ ...profile, nickname }),
         onReset: () => persist({ ...profile, wallet: STARTING_WALLET, deposited: profile.deposited + STARTING_WALLET })
       }
     );
@@ -2185,6 +2230,7 @@ function PracticeApp({ onExit }) {
         profile,
         onNew: () => setScreen("setup"),
         onExit,
+        onRename: (nickname) => persist({ ...profile, nickname }),
         onReset: () => persist({ ...profile, wallet: STARTING_WALLET })
       }
     );

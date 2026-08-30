@@ -24,6 +24,14 @@
       font-weight: 400;
     }
     #root { min-height: 100vh; }
+
+    /* Скрыть полосы прокрутки, оставив саму прокрутку рабочей.
+       На телефоне полоса всё равно не нужна — она только съедает край
+       экрана и выглядит как «серая палка» справа. */
+    .no-scrollbar::-webkit-scrollbar { width: 0; height: 0; display: none; }
+    .no-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
+    *::-webkit-scrollbar { width: 0; height: 0; display: none; }
+    * { scrollbar-width: none; -ms-overflow-style: none; }
   </style>
 
   <!-- Карта импортов: говорит браузеру, откуда брать React и Firebase, когда
@@ -52,6 +60,6 @@
        увеличивайте это число (v=2, v=3, ...) — иначе браузер (особенно на
        телефоне) может показывать старую сохранённую версию файла даже после
        того, как вы залили новую на GitHub. -->
-  <script type="module" src="./app.js?v=8"></script>
+  <script type="module" src="./app.js?v=9"></script>
 </body>
 </html>
