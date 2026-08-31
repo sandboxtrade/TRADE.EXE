@@ -739,11 +739,11 @@ function App() {
       jsxs("div", { className: "grid grid-cols-3 gap-2", children: [
         jsxs("button", { onClick: () => trade("BUY"),
           className: "py-4 rounded-lg bg-[#16a34a] text-white text-[15px] font-medium",
-          children: [jsx("div", null, "ЛОНГ"), jsx("div", { className: "text-[11px] opacity-80 mt-0.5",
+          children: [jsx("div", { children: "ЛОНГ" }), jsx("div", { className: "text-[11px] opacity-80 mt-0.5",
             children: `$${fmt((you.cash*amount)/100,0)}` })] }),
         jsxs("button", { onClick: () => trade("SELL"),
           className: "py-4 rounded-lg bg-[#dc2626] text-white text-[15px] font-medium",
-          children: [jsx("div", null, "ШОРТ"), jsx("div", { className: "text-[11px] opacity-80 mt-0.5",
+          children: [jsx("div", { children: "ШОРТ" }), jsx("div", { className: "text-[11px] opacity-80 mt-0.5",
             children: `$${fmt((you.cash*amount)/100,0)}` })] }),
         jsx("button", { onClick: () => trade("CLOSE"), disabled: !hasPos,
           className: "py-4 rounded-lg text-[15px] font-medium " + (hasPos ? "bg-[#232326] text-white" : "bg-[#141416] text-[#46464C]"),
