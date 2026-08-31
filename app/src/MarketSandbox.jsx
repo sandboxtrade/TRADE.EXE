@@ -9,7 +9,7 @@ import {
 import {
   getFirestore, doc, onSnapshot as onFirestoreSnapshot,
 } from "firebase/firestore";
-import { CONFIG, STRATEGY_LABELS, clock, signedPct, HUMAN_ID, Room } from "@market-sandbox/engine";
+import { CONFIG, STRATEGY_LABELS, clock, signedPct, LegacyRoom as Room } from "@market-sandbox/engine";
 
 /* ============================================================================
    MARKET SANDBOX — клиент.
@@ -103,8 +103,7 @@ async function callRoomService(path, { method = "GET", body } = {}) {
 class LocalTransport {
   constructor({ startingCapital, seed, devMode = true } = {}) {
     this.room = new Room({ startingCapital, seed, devMode });
-    this.playerId = HUMAN_ID;
-    this.room.join(this.playerId, "ВЫ");
+    this.playerId = this.room.join(null, "ВЫ"); // новый движок сам выдаёт id человека
     this.timer = null;
     this.speed = 1;
   }
