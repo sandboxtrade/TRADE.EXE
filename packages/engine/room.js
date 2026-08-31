@@ -1,91 +1,100 @@
-"use strict";
-const { Market } = require("./market");
-const { attachNPCs, npcIntents } = require("./npc");
-const { validateCommand, commandToIntent, pendingIntents } = require("./orders");
-const { checkInvariants } = require("./invariants");
+const { SimulationEngine } = require("./simulation");
+const { validateCommand } = require("./validate");
 const { createSnapshot } = require("./snapshot");
+const { CONFIG } = require("./config");
 
 /**
- * ROOM — цикл тика. Порядок фиксирован и одинаков для всех:
- *   1. собрать отложенные (стоп/тейк/лимит)
- *   2. собрать намерения NPC
- *   3. собрать команды людей, поступившие с прошлого тика
- *   4. ОДИН клиринг: единая цена для всех
- *   5. проверить инварианты; при нарушении — HALT
- *
- * Люди и NPC ничем не отличаются на шаге 4. Порядок внутри шагов не влияет
- * на результат (доказано: обрезка зависит только от P* и своего состояния).
+ * КОМНАТА. На Cloud Run живёт в памяти тик-процесса; Market Engine внутри
+ * неё не знает ни про сеть, ни про Firebase, ни про то, сколько людей
+ * сейчас в комнате против ботов.
  */
 class Room {
-  constructor({ playerCount = 100, startingCapital = 100, seed = 1, npcCount = null } = {}) {
-    this.market = new Market({ playerCount, startingCapital, seed });
-    this.history = [this.market.mark];
-    this.pendingCommands = [];
-    this.humanSlots = new Set();
-    this.halted = null;
-    const npcs = npcCount === null ? playerCount : npcCount;
-    if (npcs > 0) attachNPCs(this.market, playerCount - npcs, npcs, seed);
+  constructor({ id = "local", startingCapital = CONFIG.market.startingCapital,
+                seed = Date.now() % 2147483647, devMode = true } = {}) {
+    this.id = id;
+    this.devMode = devMode;
+    this.engine = new SimulationEngine(seed, startingCapital);
+    this.engine.getState().roomId = id;
+    this.rejections = [];
+    this.humanCount = 0;
   }
 
-  /** Человек занимает слот бота: позиция бота закрывается в ближайшем клиринге. */
-  join(name) {
-    const m = this.market;
-    const slot = m.players.find((p) => p.npc && !p.isHuman);
-    if (!slot) return null;
-    if (slot.u !== 0) this.pendingCommands.push({ i: slot.id, cmd: { type: "TRADE", action: "CLOSE" } });
-    slot.npc = null; slot.isHuman = true; slot.name = name;
-    this.humanSlots.add(slot.id);
-    return slot.id;
+  join(uid, name) {
+    const slot = this.engine.addHuman(uid, name);
+    if (slot) this.humanCount = this.engine.getState().humanIds.size;
+    return slot;
   }
 
-  send(playerId, cmd) {
-    const v = validateCommand(this.market, playerId, cmd);
-    if (!v.ok) return v;
-    if (cmd.type === "PROTECT") {
-      const pl = this.market.players[playerId];
-      if (cmd.clear) { pl.stopLoss = null; pl.takeProfit = null; }
-      if (Number.isFinite(cmd.stopLoss)) pl.stopLoss = cmd.stopLoss;
-      if (Number.isFinite(cmd.takeProfit)) pl.takeProfit = cmd.takeProfit;
-      return { ok: true };
+  leave(uid) {
+    this.engine.removeHuman(uid);
+    this.humanCount = this.engine.getState().humanIds.size;
+  }
+
+  /** Единственная точка входа для действий игрока. */
+  send(playerId, command) {
+    const state = this.engine.getState();
+    const check = validateCommand(state, playerId, command);
+    if (!check.ok) {
+      this.rejections.unshift({ tick: state.tick, playerId, command, reason: check.reason });
+      this.rejections = this.rejections.slice(0, 20);
+      return check;
     }
-    if (cmd.type === "LIMIT") {
-      const pl = this.market.players[playerId];
-      pl.limits = pl.limits || [];
-      pl.limits.push({ id: `L${pl.limits.length}-${this.market.tick}`,
-        side: cmd.side, notional: cmd.notional, limitPrice: cmd.limitPrice, filled: false });
-      return { ok: true };
+
+    switch (command.type) {
+      case "TRADE":
+        this.engine.submit(playerId, {
+          action: command.action,
+          notional: command.notional,
+          fraction: command.fraction,
+          reason: command.reason ?? "команда игрока",
+        });
+        break;
+      case "LIMIT":
+        this.engine.placeLimitOrder({
+          playerId, side: command.side,
+          notional: command.notional, limitPrice: command.limitPrice,
+        });
+        break;
+      case "CANCEL_LIMIT":
+        this.engine.cancelLimitOrder(command.orderId);
+        break;
+      case "PROTECT":
+        this.engine.setProtection(playerId, command.stopLoss ?? null, command.takeProfit ?? null);
+        if (command.clear) this.engine.clearProtection(playerId, command.clear);
+        break;
+      default:
+        break;
     }
-    if (cmd.type === "CANCEL_LIMIT") {
-      const pl = this.market.players[playerId];
-      pl.limits = (pl.limits || []).filter((l) => l.id !== cmd.orderId);
-      return { ok: true };
-    }
-    this.pendingCommands.push({ i: playerId, cmd });
     return { ok: true };
   }
 
-  step() {
-    if (this.halted) return this.halted;
-    const m = this.market;
-    const intents = [];
-    intents.push(...pendingIntents(m));
-    intents.push(...npcIntents(m, this.history, 0));
-    for (const { i, cmd } of this.pendingCommands) {
-      const it = commandToIntent(m, i, cmd);
-      if (it) intents.push(it);
-    }
-    this.pendingCommands = [];
+  advance(steps) { this.engine.advance(steps); }
+  get paused() { return this.engine.paused; }
+  set paused(value) { this.engine.paused = value; }
 
-    const result = m.clear(intents);
-    this.history.push(m.mark);
-    if (this.history.length > 5000) this.history.shift();
-
-    const inv = checkInvariants(m, { intents: intents.length });
-    if (!inv.ok) { this.halted = inv.report; return inv.report; }
-    return result;
+  snapshotFor(viewerId, opts = {}) {
+    return createSnapshot(this.engine.getState(), viewerId, { devMode: this.devMode, ...opts });
   }
 
-  advance(n) { for (let k = 0; k < n && !this.halted; k++) this.step(); return this; }
-  snapshot(viewerId, opts) { return createSnapshot(this.market, viewerId, opts); }
+  /**
+   * Чекпоинт для Firestore (см. ARCHITECTURE.md, раздел 7 «Восстановление
+   * после сбоя»). ВНИМАНИЕ: это снимок для аудита/ручного восстановления,
+   * а не точный дамп для бесшовного продолжения — состояние ГПСЧ (rng)
+   * не сериализуется, поэтому после восстановления память ботов (кто когда
+   * решает) переинициализируется заново с новым seed. Позиции, кэш и цена
+   * восстанавливаются точно; поведение толпы — приблизительно.
+   * Это осознанный компромисс для MVP, а не пропущенный баг.
+   */
+  serializeForCheckpoint() {
+    const state = this.engine.getState();
+    const { rng, ...rest } = state;
+    return {
+      id: this.id,
+      devMode: this.devMode,
+      humanIds: Array.from(state.humanIds),
+      state: JSON.parse(JSON.stringify(rest)),
+    };
+  }
 }
+
 module.exports = { Room };

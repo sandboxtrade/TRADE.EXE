@@ -1,36 +1,38 @@
-"use strict";
 /**
- * Конфигурация модели V4.
- *
- * ВАЖНО: значения ниже НЕ подбирались "на глаз". Каждое обосновано
- * измерением в аудитах MODEL-V3/V4. Ссылки — в комментариях.
- * Менять их можно только вместе с перепрогоном test/audit.js.
+ * Ядро ценообразования. Перенесено из market-sandbox.jsx без изменения логики
+ * (см. ARCHITECTURE.md, раздел 6). Импортируется и клиентом, и Cloud Functions,
+ * и тик-процессом на Cloud Run — это ЕДИНСТВЕННОЕ место, где живут эти числа.
  */
+
 const CONFIG = {
-  // --- Ценовая кривая p(Q) = P0 * (1 + beta * tanh(Q / kappa)) ---
-  P0: 100,          // базовая цена
-  beta: 0.75,       // диапазон цены: [P0*(1-beta), P0*(1+beta)] = [25, 175]
-                    // Ограниченность с ОБЕИХ сторон -> убыток обеих сторон
-                    // конечен -> equity >= 0 без ликвидаций (MODEL-V2, разд. I)
-
-  // kappa НЕ задаётся вручную. kappa = C / (P0 * THETA).
-  // Это даёт масштабную инвариантность: движение цены зависит только от
-  // ДОЛИ совокупного капитала (MODEL-V2, разд. 3: 12 конфигураций,
-  // идентичный результат до 6-го знака).
-  THETA: 0.5,
-
-  // --- Клиринг ---
-  CLIP_MAX_ITER: 200,   // предел итераций обрезки; эмпирически хватает <= 14
-  EPS: 1e-12,
-
-  // --- NPC ---
-  // Доля NPC, реагирующих БЕЗ задержки. Найдена численно в SELFPUMP-FIX:
-  // при 0% самораскачка даёт +0.0385 (t=20.7), при 60% — отрицательна на
-  // всех размерах. Лаг реакции был единственной причиной эксплойта.
-  NPC_INSTANT_FRACTION: 0.60,
-
-  // --- Инварианты ---
-  TOL_CAPITAL: 1e-6,
-  TOL_NONNEG: 1e-9,
+  market: {
+    assetSymbol: "SIM",
+    totalPlayers: 100,
+    startingCapital: 100,
+    capitalOptions: [100, 500, 1000, 10000],
+    initialPrice: 100,
+    tickMs: 100,
+    minPrice: 0.01,
+  },
+  price: { maxTickMove: 0.02, sensitivity: 0.12, pressureDecay: 0.45, pressureFloor: 0.01 },
+  liquidity: { base: 250, freeCashWeight: 0.45, poolWeight: 0.35, openInterestPenalty: 0.9, min: 120 },
+  impact: { coefficient: 0.1, maxImpact: 0.02 },
+  risk: { shortLiquidationRatio: 0.05 },
+  history: { maxPoints: 6000 },
 };
-module.exports = { CONFIG };
+
+const REFERENCE_CAPITAL = CONFIG.market.totalPlayers * CONFIG.market.startingCapital;
+
+/**
+ * Масштаб сессии — см. оригинальный комментарий в market-sandbox.jsx.
+ * Абсолютные константы движка откалиброваны под рынок в $10 000; при
+ * другом размере сессии их нужно домножать на scale.
+ */
+const scaleOf = (state) => state.totalCapital / REFERENCE_CAPITAL;
+const minTrade = (state) => 0.5 * scaleOf(state);
+
+/** Локальный практический режим — один человек. В онлайн-режиме playerId
+ *  участника назначается при входе в комнату (обычно Firebase uid). */
+const HUMAN_ID = "p-000";
+
+module.exports = { CONFIG, REFERENCE_CAPITAL, scaleOf, minTrade, HUMAN_ID };
