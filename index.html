@@ -41,6 +41,48 @@
 </head>
 <body>
   <div id="root"></div>
+
+  <!-- ВРЕМЕННЫЙ ПЕРЕХВАТЧИК ОШИБОК.
+       Показывает текст ошибки прямо на экране вместо чёрного экрана.
+       После того как баг найден и исправлен, этот блок можно удалить. -->
+  <script>
+  (function () {
+    function show(title, text) {
+      var box = document.getElementById("errbox");
+      if (!box) {
+        box = document.createElement("pre");
+        box.id = "errbox";
+        box.style.cssText = "position:fixed;top:0;left:0;right:0;bottom:0;z-index:99999;" +
+          "margin:0;padding:16px;background:#111;color:#fff;font-size:11px;" +
+          "white-space:pre-wrap;overflow:auto;-webkit-user-select:text;user-select:text;";
+        document.body.appendChild(box);
+      }
+      box.textContent += title + "\n" + text + "\n\n----------------\n\n";
+    }
+    window.addEventListener("error", function (e) {
+      var err = e.error;
+      show("ОШИБКА: " + e.message,
+        "файл: " + e.filename + "\nстрока: " + e.lineno + ":" + e.colno +
+        "\n\n" + (err && err.stack ? err.stack : "(без стека)"));
+    });
+    window.addEventListener("unhandledrejection", function (e) {
+      var r = e.reason;
+      show("ОШИБКА (promise): " + (r && r.message ? r.message : r),
+        (r && r.stack) ? r.stack : "(без стека)");
+    });
+    var origError = console.error;
+    console.error = function () {
+      try {
+        show("console.error:", Array.prototype.map.call(arguments, function (a) {
+          if (a instanceof Error) return a.stack || a.message;
+          if (typeof a === "object") { try { return JSON.stringify(a); } catch (_) { return String(a); } }
+          return String(a);
+        }).join(" "));
+      } catch (_) {}
+      return origError.apply(console, arguments);
+    };
+  })();
+  </script>
   <!-- ?v=1 — при каждой новой версии app.js увеличивайте это число. -->
   <script type="text/babel" data-presets="react" data-type="module" src="./app.js?v=1"></script>
 </body>
