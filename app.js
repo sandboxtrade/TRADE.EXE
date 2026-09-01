@@ -874,49 +874,109 @@ const fmt = (v, d = 2) => {
 };
 const fmtSigned = (v, d = 2) => `${v >= 0 ? "+" : "−"}${fmt(Math.abs(v), d).replace("-", "")}`;
 
-/* --------------------------------- ГРАФИК --------------------------------- */
-const CW = 700, AXIS = 74, CH = 340, VH = 60, MAX_CANDLES = 60;
-const MIN_CANDLES = 12, MAX_VISIBLE = 240;   // границы щипкового масштаба
+/* --------------------------------- ГРАФИК ---------------------------------
+   Рисуется в реальных пикселях контейнера. Раньше был фиксированный viewBox
+   с preserveAspectRatio="none" — из-за этого картинка растягивалась под
+   размер экрана и свечи выглядели раздутыми. Теперь размер меряется через
+   ResizeObserver, и одна единица SVG равна одному пикселю.
+
+   Жесты (как на биржевых терминалах):
+     - один палец по горизонтали  — прокрутка истории;
+     - два пальца, разводим/сводим по горизонтали — ширина свечи (масштаб времени);
+     - два пальца по вертикали    — растяжение ценовой шкалы;
+     - двойное касание            — сброс к автомасштабу.
+   -------------------------------------------------------------------------- */
+const AXIS_W = 56;          // ширина ценовой шкалы справа
+const VOL_H = 44;           // высота стакана объёмов снизу
+const PAD_T = 10, PAD_B = 6;
+const BAR_MIN = 2.5, BAR_MAX = 34, BAR_DEFAULT = 8;
+const HISTORY_CANDLES = 600;
 const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
 
 function Chart({ state, timeframe, mode, entryPrice, stopLoss, takeProfit }) {
-  const bucketMs = TIMEFRAMES.find((t) => t.label === timeframe)?.ms ?? 1000;
-
-  /* ---------------------- масштаб пальцами (pinch) ----------------------
-     visible — сколько свечей влезает по ширине. Щипок двумя пальцами
-     меняет это число; одним пальцем страница по-прежнему скроллится,
-     поэтому touch-action оставлен pan-y, а preventDefault вызывается
-     только когда касаний ровно два. */
-  const [visible, setVisible] = useState(MAX_CANDLES);
   const box = useRef(null);
-  const pinch = useRef(null);
-  const visRef = useRef(MAX_CANDLES);
-  visRef.current = visible;
+  const [size, setSize] = useState({ w: 360, h: 300 });
 
-  // Слушатели вешаются вручную с passive:false. React регистрирует
-  // touchmove и wheel пассивно, и внутри них preventDefault() не работает —
-  // страница уезжала бы вместе с щипком.
+  // --- измерение контейнера ---
   useEffect(() => {
     const el = box.current;
     if (!el) return;
-    const dist = (t) => Math.hypot(
-      t[0].clientX - t[1].clientX, t[0].clientY - t[1].clientY);
+    const read = () => {
+      const r = el.getBoundingClientRect();
+      if (r.width > 0 && r.height > 0) {
+        setSize((p) => (Math.abs(p.w - r.width) < 1 && Math.abs(p.h - r.height) < 1
+          ? p : { w: r.width, h: r.height }));
+      }
+    };
+    read();
+    if (typeof ResizeObserver === "undefined") {
+      window.addEventListener("resize", read);
+      return () => window.removeEventListener("resize", read);
+    }
+    const ro = new ResizeObserver(read);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
+
+  // --- состояние вида ---
+  const [barW, setBarW] = useState(BAR_DEFAULT);   // ширина слота свечи, px
+  const [offset, setOffset] = useState(0);         // сдвиг вправо-налево, в свечах
+  const [yZoom, setYZoom] = useState(1);           // растяжение ценовой шкалы
+  const view = useRef({ barW, offset, yZoom });
+  view.current = { barW, offset, yZoom };
+  const auto = offset === 0 && Math.abs(yZoom - 1) < 0.01 && barW === BAR_DEFAULT;
+
+  // --- жесты ---
+  useEffect(() => {
+    const el = box.current;
+    if (!el) return;
+    let one = null, two = null, lastTap = 0;
+
+    const spread = (t) => ({
+      x: Math.abs(t[0].clientX - t[1].clientX),
+      y: Math.abs(t[0].clientY - t[1].clientY),
+    });
 
     const start = (e) => {
-      if (e.touches.length === 2) pinch.current = { d: dist(e.touches), v: visRef.current };
+      if (e.touches.length === 2) {
+        const s = spread(e.touches);
+        two = { x: Math.max(12, s.x), y: Math.max(12, s.y), ...view.current };
+        one = null;
+      } else if (e.touches.length === 1) {
+        one = { x: e.touches[0].clientX, offset: view.current.offset };
+        const now = Date.now();
+        if (now - lastTap < 300) {
+          setBarW(BAR_DEFAULT); setOffset(0); setYZoom(1);
+        }
+        lastTap = now;
+      }
     };
+
     const move = (e) => {
-      if (e.touches.length !== 2 || !pinch.current) return;
-      e.preventDefault();
-      const k = dist(e.touches) / Math.max(1, pinch.current.d);
-      // Разводим пальцы -> свечей меньше -> график крупнее.
-      setVisible(clamp(Math.round(pinch.current.v / k), MIN_CANDLES, MAX_VISIBLE));
+      if (e.touches.length === 2 && two) {
+        e.preventDefault();
+        const s = spread(e.touches);
+        // По горизонтали — время, по вертикали — цена. Ось выбирается
+        // по тому, какое расстояние изменилось заметнее.
+        const kx = Math.max(12, s.x) / two.x;
+        const ky = Math.max(12, s.y) / two.y;
+        if (Math.abs(kx - 1) > 0.04) setBarW(clamp(two.barW * kx, BAR_MIN, BAR_MAX));
+        if (Math.abs(ky - 1) > 0.04) setYZoom(clamp(two.yZoom / ky, 0.25, 4));
+        return;
+      }
+      if (e.touches.length === 1 && one) {
+        const dx = e.touches[0].clientX - one.x;
+        if (Math.abs(dx) < 6) return;
+        e.preventDefault();
+        setOffset(clamp(Math.round(one.offset + dx / view.current.barW),
+          0, HISTORY_CANDLES));
+      }
     };
-    const end = () => { pinch.current = null; };
+
+    const end = (e) => { if (e.touches.length === 0) { one = null; two = null; } };
     const wheel = (e) => {
       e.preventDefault();
-      setVisible((v) => clamp(Math.round(v * (e.deltaY > 0 ? 1.12 : 0.89)),
-        MIN_CANDLES, MAX_VISIBLE));
+      setBarW((w) => clamp(w * (e.deltaY > 0 ? 0.9 : 1.11), BAR_MIN, BAR_MAX));
     };
 
     el.addEventListener("touchstart", start, { passive: true });
@@ -933,129 +993,171 @@ function Chart({ state, timeframe, mode, entryPrice, stopLoss, takeProfit }) {
     };
   }, []);
 
-  const candles = buildCandles(state.priceHistory, bucketMs, visible);
+  // --- геометрия ---
+  const W = size.w, H = size.h;
+  const plotW = Math.max(40, W - AXIS_W);
+  const plotH = Math.max(60, H - VOL_H - PAD_T - PAD_B);
+  const volTop = PAD_T + plotH + 4;
 
-  /* ------------------- сглаживание вертикальной шкалы -------------------
-     Раньше min/max пересчитывались от нуля на каждом тике, и вся шкала
-     дёргалась вместе с ценой. Теперь считается цель, а фактические
-     границы подтягиваются к ней долями — график плывёт, а не прыгает. */
+  const bucketMs = TIMEFRAMES.find((t) => t.label === timeframe)?.ms ?? 1000;
+  const all = buildCandles(state.priceHistory, bucketMs, HISTORY_CANDLES);
+  const fit = Math.max(4, Math.ceil(plotW / barW));
+  const end = Math.max(1, all.length - offset);
+  const shown = all.slice(Math.max(0, end - fit), end);
+
+  // --- сглаживание ценовой шкалы ---
   const scale = useRef(null);
-
-  let tMin = Infinity, tMax = -Infinity, maxVol = 0;
-  for (const c of candles) {
-    tMin = Math.min(tMin, c.low); tMax = Math.max(tMax, c.high);
+  let lo = Infinity, hi = -Infinity, maxVol = 0;
+  for (const c of shown) {
+    lo = Math.min(lo, c.low); hi = Math.max(hi, c.high);
     maxVol = Math.max(maxVol, c.volume);
   }
-  for (const level of [entryPrice, stopLoss, takeProfit]) {
-    if (level && level > tMin * 0.94 && level < tMax * 1.06) {
-      tMin = Math.min(tMin, level); tMax = Math.max(tMax, level);
-    }
+  for (const lvl of [entryPrice, stopLoss, takeProfit]) {
+    if (lvl && lvl > lo * 0.94 && lvl < hi * 1.06) { lo = Math.min(lo, lvl); hi = Math.max(hi, lvl); }
   }
 
-  if (candles.length < 2 || !Number.isFinite(tMin) || !Number.isFinite(tMax)) {
+  if (shown.length < 2 || !Number.isFinite(lo) || !Number.isFinite(hi)) {
     return (
-      <div style={{ height: "100%", minHeight: 160 }}
-        className="flex items-center justify-center text-[12px]">
+      <div ref={box} className="w-full h-full flex items-center justify-center text-[12px]"
+        style={{ minHeight: 160 }}>
         <span style={{ color: FAINT }}>собираем свечи…</span>
       </div>
     );
   }
 
-  const tPad = Math.max((tMax - tMin) * 0.12, tMax * 0.0015);
-  const targetMin = tMin - tPad, targetMax = tMax + tPad;
+  const mid = (hi + lo) / 2;
+  const half = Math.max((hi - lo) / 2, mid * 0.0008) * 1.12 / yZoom;
+  const tMin = mid - half, tMax = mid + half;
 
   const prev = scale.current;
-  // Первый кадр и смена таймфрейма/зума — сразу в цель, без «наезда».
-  const jump = !prev || prev.tf !== timeframe || prev.visible !== visible;
-  const EASE = 0.16;
-  const min = jump ? targetMin : prev.min + (targetMin - prev.min) * EASE;
-  const max = jump ? targetMax : prev.max + (targetMax - prev.max) * EASE;
-  scale.current = { min, max, tf: timeframe, visible };
+  const jump = !prev || prev.tf !== timeframe || prev.z !== yZoom || prev.off !== offset;
+  const EASE = 0.18;
+  const min = jump ? tMin : prev.min + (tMin - prev.min) * EASE;
+  const max = jump ? tMax : prev.max + (tMax - prev.max) * EASE;
+  scale.current = { min, max, tf: timeframe, z: yZoom, off: offset };
 
   const span = max - min || 1;
-  const toY = (p) => CH - ((p - min) / span) * CH;
+  const toY = (p) => PAD_T + plotH - ((p - min) / span) * plotH;
+  // Свечи прижаты к правому краю окна.
+  const xAt = (i) => plotW - (shown.length - 1 - i) * barW - barW / 2;
+  const body = Math.max(1, Math.min(barW * 0.68, barW - 1.2));
+  const wick = Math.max(0.7, Math.min(1.4, barW * 0.12));
 
-  const slot = CW / visible;
-  const body = Math.max(1.2, slot * 0.55);
-  const offset = Math.max(0, visible - candles.length);
-  const grid = Array.from({ length: 5 }, (_, i) => min + (span * i) / 4);
+  // --- сетка: «круглые» уровни цены ---
+  const step = niceStep(span / 4);
+  const lines = [];
+  for (let p = Math.ceil(min / step) * step; p <= max; p += step) lines.push(p);
+
+  const digits = step < 0.1 ? 3 : step < 1 ? 2 : 1;
   const priceY = toY(state.price);
+  const up = state.price >= state.previousPrice;
 
-  const level = (value, label, dash) =>
+  const level = (value, label, dash, color) =>
     value && value > min && value < max ? (
-      <g>
-        <line x1={0} x2={CW} y1={toY(value)} y2={toY(value)} stroke={FAINT} strokeWidth={1} strokeDasharray={dash} />
-        <text x={4} y={toY(value) - 5} fill={FAINT} fontSize={11} fontFamily="monospace">{label}</text>
+      <g key={label}>
+        <line x1={0} x2={plotW} y1={toY(value)} y2={toY(value)}
+          stroke={color} strokeWidth={1} strokeDasharray={dash} opacity={0.75} />
+        <text x={4} y={toY(value) - 4} fill={color} fontSize={9} fontFamily="monospace"
+          opacity={0.9}>{label}</text>
       </g>
     ) : null;
 
   return (
-    <div ref={box} className="w-full h-full relative"
-      style={{ touchAction: "pan-y", height: "100%", minHeight: 160 }}>
-      {visible !== MAX_CANDLES && (
-        <button onClick={() => setVisible(MAX_CANDLES)}
+    <div ref={box} className="w-full h-full relative select-none"
+      style={{ minHeight: 160, touchAction: "none" }}>
+
+      {!auto && (
+        <button onClick={() => { setBarW(BAR_DEFAULT); setOffset(0); setYZoom(1); }}
           className="absolute top-1 left-1 z-10 px-2 py-1 rounded text-[10px] font-mono tap"
           style={{ backgroundColor: RAISED, color: DIM, border: `1px solid ${HAIR}` }}>
-          {visible} св. · сброс
+          {shown.length} св.{offset ? ` · −${offset}` : ""} · сброс
         </button>
       )}
-    <svg viewBox={`0 0 ${CW + AXIS} ${CH + VH + 4}`} preserveAspectRatio="none"
-      className="w-full" style={{ height: "100%", minHeight: 160 }}>
-      {grid.map((p, i) => (
-        <g key={i}>
-          <line x1={0} x2={CW} y1={toY(p)} y2={toY(p)} stroke={HAIR} strokeWidth={1} />
-          <text x={CW + 8} y={toY(p) + 4} fill={FAINT} fontSize={12} fontFamily="monospace">{p.toFixed(2)}</text>
-        </g>
-      ))}
 
-      {mode === "свечи"
-        ? candles.map((c, i) => {
-            const x = (offset + i) * slot + slot / 2;
-            const up = c.close >= c.open;
-            const color = up ? LONG : SHORT;
-            const top = toY(Math.max(c.open, c.close));
-            const bottom = toY(Math.min(c.open, c.close));
-            return (
-              <g key={c.t}>
-                <line x1={x} x2={x} y1={toY(c.high)} y2={toY(c.low)} stroke={color} strokeWidth={1} />
-                <rect x={x - body / 2} y={top} width={body} height={Math.max(1.2, bottom - top)} fill={color} />
-              </g>
-            );
-          })
-        : (() => {
-            const pts = candles.map((c, i) => `${(offset + i) * slot + slot / 2},${toY(c.close)}`).join(" ");
-            const trend = candles[candles.length - 1].close >= candles[0].open ? LONG : SHORT;
-            return (
-              <>
-                <polygon points={`${pts} ${CW},${CH} ${offset * slot},${CH}`} fill={trend} opacity={0.08} />
-                <polyline points={pts} fill="none" stroke={trend} strokeWidth={1.6} />
-              </>
-            );
-          })()}
+      <svg width={W} height={H} viewBox={`0 0 ${W} ${H}`}>
+        {/* сетка и ценовая шкала */}
+        {lines.map((p) => (
+          <g key={p}>
+            <line x1={0} x2={plotW} y1={toY(p)} y2={toY(p)} stroke={HAIR} strokeWidth={1} />
+            <text x={plotW + 6} y={toY(p) + 3.5} fill={FAINT} fontSize={10}
+              fontFamily="monospace">{p.toFixed(digits)}</text>
+          </g>
+        ))}
 
-      {level(entryPrice, `вход ${entryPrice?.toFixed(2)}`, "1 4")}
-      {level(stopLoss, `стоп ${stopLoss?.toFixed(2)}`, "4 4")}
-      {level(takeProfit, `тейк ${takeProfit?.toFixed(2)}`, "4 4")}
+        {mode === "свечи" ? (
+          <g>
+            {shown.map((c, i) => {
+              const x = xAt(i);
+              if (x < -barW) return null;
+              const grow = c.close >= c.open;
+              const color = grow ? LONG : SHORT;
+              const top = toY(Math.max(c.open, c.close));
+              const bottom = toY(Math.min(c.open, c.close));
+              return (
+                <g key={c.t}>
+                  <rect x={x - wick / 2} y={toY(c.high)} width={wick}
+                    height={Math.max(0.6, toY(c.low) - toY(c.high))} fill={color} />
+                  <rect x={x - body / 2} y={top} width={body}
+                    height={Math.max(1, bottom - top)} fill={color}
+                    rx={body > 5 ? 1 : 0} />
+                </g>
+              );
+            })}
+          </g>
+        ) : (() => {
+          const pts = shown.map((c, i) => `${xAt(i).toFixed(1)},${toY(c.close).toFixed(1)}`);
+          const trend = shown[shown.length - 1].close >= shown[0].open ? LONG : SHORT;
+          return (
+            <g>
+              <defs>
+                <linearGradient id="tx-area" x1="0" y1="0" x2="0" y2="1">
+                  <stop offset="0%" stopColor={trend} stopOpacity="0.22" />
+                  <stop offset="100%" stopColor={trend} stopOpacity="0" />
+                </linearGradient>
+              </defs>
+              <polygon fill="url(#tx-area)"
+                points={`${pts.join(" ")} ${xAt(shown.length - 1)},${PAD_T + plotH} ${xAt(0)},${PAD_T + plotH}`} />
+              <polyline points={pts.join(" ")} fill="none" stroke={trend}
+                strokeWidth={1.6} strokeLinejoin="round" strokeLinecap="round" />
+            </g>
+          );
+        })()}
 
-      {candles.map((c, i) => {
-        const x = (offset + i) * slot + slot / 2;
-        const h = maxVol === 0 ? 0 : (c.volume / maxVol) * (VH - 8);
-        return <rect key={`v${c.t}`} x={x - body / 2} y={CH + 4 + (VH - 8 - h)}
-          width={body} height={Math.max(0.5, h)}
-          fill={c.close >= c.open ? LONG : SHORT} opacity={0.35} />;
-      })}
+        {level(entryPrice, `вход ${entryPrice?.toFixed(2)}`, "1 3", DIM)}
+        {level(stopLoss, `стоп ${stopLoss?.toFixed(2)}`, "4 3", SHORT)}
+        {level(takeProfit, `тейк ${takeProfit?.toFixed(2)}`, "4 3", LONG)}
 
-      <g style={{ transition: "transform 90ms linear" }}>
-        <line x1={0} x2={CW} y1={priceY} y2={priceY} stroke={TEXT} strokeWidth={1}
-          strokeDasharray="3 3" opacity={0.4} />
-        <rect x={CW + 2} y={priceY - 12} width={AXIS - 4} height={24} rx={3}
-          fill={state.price >= state.previousPrice ? LONG : SHORT} />
-        <text x={CW + AXIS / 2} y={priceY + 5} textAnchor="middle" fill={BG}
-          fontSize={13} fontFamily="monospace" fontWeight="700">{state.price.toFixed(2)}</text>
-      </g>
-    </svg>
+        {/* объёмы */}
+        {shown.map((c, i) => {
+          const x = xAt(i);
+          if (x < -barW) return null;
+          const h = maxVol === 0 ? 0 : (c.volume / maxVol) * (VOL_H - 6);
+          return <rect key={`v${c.t}`} x={x - body / 2} y={volTop + (VOL_H - 6 - h)}
+            width={body} height={Math.max(0.5, h)}
+            fill={c.close >= c.open ? LONG : SHORT} opacity={0.28} rx={body > 5 ? 1 : 0} />;
+        })}
+
+        {/* текущая цена */}
+        <line x1={0} x2={plotW} y1={priceY} y2={priceY} stroke={TEXT} strokeWidth={1}
+          strokeDasharray="2 3" opacity={0.35} />
+        <rect x={plotW + 1} y={priceY - 9} width={AXIS_W - 2} height={18} rx={3}
+          fill={up ? LONG : SHORT} />
+        <text x={plotW + AXIS_W / 2} y={priceY + 4} textAnchor="middle" fill={BG}
+          fontSize={11} fontFamily="monospace" fontWeight="700">
+          {state.price.toFixed(2)}
+        </text>
+      </svg>
     </div>
   );
+}
+
+/** Ближайший «человеческий» шаг сетки: 1, 2, 2.5 или 5 на порядок. */
+function niceStep(raw) {
+  if (!Number.isFinite(raw) || raw <= 0) return 1;
+  const pow = Math.pow(10, Math.floor(Math.log10(raw)));
+  const n = raw / pow;
+  const mult = n <= 1 ? 1 : n <= 2 ? 2 : n <= 2.5 ? 2.5 : n <= 5 ? 5 : 10;
+  return mult * pow;
 }
 
 /* ------------------------------- ЭЛЕМЕНТЫ UI ------------------------------ */
