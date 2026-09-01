@@ -628,6 +628,7 @@ class LegacyRoom {
     const count = playerCount || CONFIG.market.totalPlayers;
     this._room = new RoomV4({ playerCount: count, startingCapital, seed, npcCount: count - 1 });
     this.devMode = devMode;
+    this._startingCapital = startingCapital;
     this.paused = false;
     this._buyPressure = 0;
     this._sellPressure = 0;
@@ -678,7 +679,7 @@ class LegacyRoom {
       totalPlayers: this._room.market.players.length,
       priceHistory: this._priceHistory,
       lastPoint: this._priceHistory[this._priceHistory.length - 1],
-      market: this._aggregate(base.participants || []),
+      market: { ...this._aggregate(base.participants || []), poolEquity: base.escrow },
       price: this._room.market.mark,
       previousPrice: this._priceHistory.length >= 2
         ? this._priceHistory[this._priceHistory.length - 2].price
@@ -692,7 +693,18 @@ class LegacyRoom {
       // Заявки других участников намеренно не передаются клиенту — так задумано
       // в архитектуре v4 (приватность, см. ARCHITECTURE.md), а не баг переходника.
       orders: [],
+      // "ликвидность" старого движка ~ параметр глубины кривой Q нового
+      liquidity: base.Q,
+      phase: this._phase(base),
     };
+  }
+
+  _phase(base) {
+    const [lo, hi] = base.priceRange || [0, 1];
+    const pos = hi > lo ? (base.mark - lo) / (hi - lo) : 0.5;
+    if (pos > 0.8) return "перегрев";
+    if (pos < 0.2) return "распродажа";
+    return "стабильно";
   }
 
   _rank(viewerId, participants) {
@@ -704,6 +716,7 @@ class LegacyRoom {
   _legacyPlayer(p) {
     return {
       ...p,
+      startingCapital: this._startingCapital,
       position: p.position ? {
         ...p.position,
         margin: p.position.invested,
