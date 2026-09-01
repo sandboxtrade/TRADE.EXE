@@ -1070,62 +1070,635 @@ function profileStats(profile) {
   };
 }
 
-/* --------------------------------- ЛОББИ --------------------------------- */
-function Lobby({ profile, onNew, onReset, onExit }) {
-  const st = profileStats(profile);
-  const affordable = CONFIG.market.capitalOptions.some((c) => c <= profile.wallet);
+
+/* ============================ АККАУНТ И ВХОД ==============================
+   ТРЕТИЙ ШОВ ПОД FIREBASE. Экраны ниже — это только интерфейс. Сейчас
+   аккаунт хранится локально и НИКАКОЙ проверки подлинности не происходит:
+   пароль не сохраняется и не сверяется, любой ввод считается успешным.
+   Это честная заглушка, а не защита.
+
+   При переезде на Firebase Auth меняется ровно одна вещь — реализация
+   authStore.signIn / signUp / signOut:
+     signIn  -> signInWithEmailAndPassword(auth, email, password)
+     signUp  -> createUserWithEmailAndPassword(auth, email, password)
+     signOut -> firebaseSignOut(auth)
+   Сами экраны не меняются: они уже возвращают {ok, reason} и умеют
+   показывать ошибку и состояние ожидания.
+   ========================================================================== */
+const ACCOUNT_KEY = "sandbox:account";
+
+const authStore = {
+  async current() {
+    try {
+      const raw = localStorage.getItem(ACCOUNT_KEY);
+      return raw ? JSON.parse(raw) : null;
+    } catch { return null; }
+  },
+  async signIn(email) {
+    const account = { email, at: Date.now() };
+    try { localStorage.setItem(ACCOUNT_KEY, JSON.stringify(account)); } catch {}
+    return { ok: true, account };
+  },
+  async signUp(email) { return this.signIn(email); },
+  async signOut() {
+    try { localStorage.removeItem(ACCOUNT_KEY); } catch {}
+  },
+};
+
+const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/;
+
+/** Логотип: рамка-«окно» с котировками внутри. Чистый SVG, без картинок. */
+function Logo({ size = 96 }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 100 100" fill="none">
+      <path d="M22 16H16v14M78 16h6v14M22 84H16V70M78 84h6V70"
+        stroke={TEXT} strokeWidth={5} strokeLinecap="square" />
+      <rect x="28" y="24" width="44" height="52" stroke={TEXT} strokeWidth={3} />
+      <g stroke={TEXT} strokeWidth={3}>
+        <path d="M38 34v32" /><path d="M50 28v44" /><path d="M62 38v24" />
+      </g>
+      <g fill={BG} stroke={TEXT} strokeWidth={3}>
+        <rect x="34" y="41" width="8" height="16" />
+        <rect x="46" y="35" width="8" height="24" />
+        <rect x="58" y="45" width="8" height="12" />
+      </g>
+      <g stroke={TEXT} strokeWidth={3} strokeLinecap="square">
+        <path d="M6 44h10M6 54h6M84 44h10M88 54h6" />
+      </g>
+    </svg>
+  );
+}
+
+/** Экран загрузки. Показывается, пока читаются аккаунт и профиль. */
+function Splash({ text = "загрузка" }) {
+  return (
+    <div className="w-full flex flex-col items-center justify-center gap-6"
+      style={{ height: "100dvh", backgroundColor: BG }}>
+      <Logo size={84} />
+      <div className="text-[11px] tracking-[0.35em]" style={{ color: FAINT }}>
+        {text.toUpperCase()}
+      </div>
+    </div>
+  );
+}
+
+const FEATURES = [
+  { icon: "candles", title: "РЕАЛЬНЫЙ РЫНОК",
+    text: "Цена формируется только действиями участников." },
+  { icon: "people", title: "ЖИВЫЕ ИГРОКИ",
+    text: "Торгуй против других участников в реальном времени." },
+  { icon: "shield", title: "НИЧЕГО ЛИШНЕГО",
+    text: "Никаких внешних факторов. Только ты и рынок." },
+];
+
+const FeatureIcon = ({ name }) => {
+  const c = { width: 44, height: 44, viewBox: "0 0 44 44", fill: "none",
+    stroke: TEXT, strokeWidth: 2, strokeLinecap: "round", strokeLinejoin: "round" };
+  if (name === "candles") return (
+    <svg {...c}>
+      <path d="M11 10v24M22 6v32M33 13v18" />
+      <rect x="7" y="16" width="8" height="13" fill={BG} />
+      <rect x="18" y="12" width="8" height="20" fill={BG} />
+      <rect x="29" y="19" width="8" height="9" fill={BG} />
+    </svg>
+  );
+  if (name === "people") return (
+    <svg {...c}>
+      <circle cx="15" cy="15" r="5" /><circle cx="29" cy="13" r="4" />
+      <path d="M6 34c0-6 4-9 9-9s9 3 9 9M26 34c0-5 3-8 7-8s6 3 6 8" />
+    </svg>
+  );
+  return (
+    <svg {...c}>
+      <path d="M22 5l14 5v11c0 8-6 14-14 18-8-4-14-10-14-18V10z" />
+      <path d="M16 21l5 5 8-9" />
+    </svg>
+  );
+};
+
+/** Онбординг: три слайда, переключаются кнопкой и точками. */
+function Onboarding({ onSignIn, onSignUp }) {
+  const [slide, setSlide] = useState(0);
+  const last = slide === 2;
 
   return (
     <div className="w-full flex flex-col" style={{ height: "100dvh", backgroundColor: BG, color: TEXT }}>
-      <div className="max-w-md w-full mx-auto flex-1 overflow-y-auto px-6 pt-10 pb-4">
-        <div className="flex items-center justify-between mb-2">
-          <span className="text-[11px] tracking-[0.4em]" style={{ color: FAINT }}>ЗАКРЫТЫЙ РЫНОК · ПРАКТИКА</span>
-          {onExit && (
-            <button onClick={onExit} className="text-[11px]" style={{ color: DIM }}>сменить режим</button>
-          )}
-        </div>
-        <div className="text-[28px] leading-none tracking-tight mb-10">trade.exe</div>
+      <div className="max-w-md w-full mx-auto flex-1 min-h-0 flex flex-col justify-center px-7">
 
-        <div className="text-[11px] tracking-[0.15em] mb-2" style={{ color: FAINT }}>БАЛАНС</div>
-        <div className="text-[44px] leading-none font-mono tracking-tight">{fmt(profile.wallet)}</div>
+        {slide === 0 && (
+          <div className="flex flex-col items-center">
+            <Logo size={104} />
+            <div className="text-[30px] tracking-tight mt-5">trade.exe</div>
+            <div className="text-[12px] tracking-[0.35em] text-center mt-10 leading-loose"
+              style={{ color: DIM }}>
+              ЗАКРЫТЫЙ РЫНОК<br />ДЛЯ ПРАКТИКИ
+            </div>
+          </div>
+        )}
+
+        {slide === 1 && (
+          <div className="flex flex-col items-center">
+            <Logo size={72} />
+            <div className="text-[22px] tracking-tight mt-3 mb-8">trade.exe</div>
+            <div className="w-full">
+              {FEATURES.map((f, i) => (
+                <div key={f.title}
+                  className={`flex items-start gap-5 py-6 ${i ? "border-t" : ""}`}
+                  style={{ borderColor: HAIR }}>
+                  <div className="shrink-0 mt-0.5"><FeatureIcon name={f.icon} /></div>
+                  <div className="min-w-0">
+                    <div className="text-[13px] tracking-[0.2em] font-semibold">{f.title}</div>
+                    <div className="text-[13px] mt-1.5 leading-snug" style={{ color: DIM }}>
+                      {f.text}
+                    </div>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {slide === 2 && (
+          <div className="flex flex-col items-center text-center">
+            <Logo size={84} />
+            <div className="text-[26px] tracking-tight mt-4">Готовы начать?</div>
+            <div className="text-[13px] mt-4 leading-relaxed max-w-[280px]" style={{ color: DIM }}>
+              Сессия — это закрытая комната на 100 участников с одинаковым взносом.
+              Общий капитал не меняется: всё, что кто-то заработал, кто-то потерял.
+            </div>
+          </div>
+        )}
+      </div>
+
+      <div className="max-w-md w-full mx-auto px-7 pb-8 shrink-0">
+        <div className="flex justify-center gap-2 mb-7">
+          {[0, 1, 2].map((i) => (
+            <button key={i} onClick={() => setSlide(i)} className="rounded-full"
+              style={{ width: i === slide ? 20 : 7, height: 7,
+                backgroundColor: i === slide ? TEXT : HAIR, transition: "width 150ms" }} />
+          ))}
+        </div>
+
+        <button onClick={() => (last ? onSignIn() : setSlide(slide + 1))}
+          className="w-full rounded-2xl py-5 text-[14px] tracking-[0.25em] font-bold"
+          style={{ backgroundColor: TEXT, color: BG }}>
+          {last ? "ВОЙТИ" : "ДАЛЕЕ"}
+        </button>
+        <button onClick={last ? onSignUp : () => onSignIn()}
+          className="w-full py-4 text-[12px] tracking-[0.25em]" style={{ color: DIM }}>
+          {last ? "СОЗДАТЬ АККАУНТ" : "ПРОПУСТИТЬ"}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+/** Поле ввода с подписью и, для паролей, кнопкой показа. */
+function Field({ label, value, onChange, placeholder, secret, type = "text" }) {
+  const [shown, setShown] = useState(false);
+  return (
+    <div className="mb-4">
+      <div className="text-[10px] tracking-[0.2em] mb-2" style={{ color: FAINT }}>{label}</div>
+      <div className="flex items-center rounded-xl px-4"
+        style={{ backgroundColor: RAISED, border: `1px solid ${HAIR}` }}>
+        <input value={value} onChange={(e) => onChange(e.target.value)}
+          placeholder={placeholder} type={secret && !shown ? "password" : type}
+          autoCapitalize="none" autoCorrect="off" spellCheck="false"
+          className="flex-1 min-w-0 bg-transparent outline-none py-4 text-[14px]"
+          style={{ color: TEXT }} />
+        {secret && (
+          <button onClick={() => setShown((v) => !v)} className="pl-3 text-[11px]"
+            style={{ color: shown ? TEXT : FAINT }}>
+            {shown ? "скрыть" : "показать"}
+          </button>
+        )}
+      </div>
+    </div>
+  );
+}
+
+const Check = ({ on, onClick, children }) => (
+  <button onClick={onClick} className="flex items-start gap-3 text-left w-full">
+    <span className="w-[18px] h-[18px] rounded shrink-0 mt-0.5 flex items-center justify-center"
+      style={{ backgroundColor: on ? TEXT : "transparent", border: `1px solid ${on ? TEXT : DIM}` }}>
+      {on && <Icon name="check" size={12} color={BG} />}
+    </span>
+    <span className="text-[12px] leading-snug" style={{ color: DIM }}>{children}</span>
+  </button>
+);
+
+/** Вход и регистрация. Один экран, две вкладки. */
+function AuthScreen({ mode, onMode, onBack, onDone }) {
+  const [email, setEmail] = useState("");
+  const [pass, setPass] = useState("");
+  const [pass2, setPass2] = useState("");
+  const [remember, setRemember] = useState(true);
+  const [agree, setAgree] = useState(false);
+  const [error, setError] = useState(null);
+  const [busy, setBusy] = useState(false);
+  const signup = mode === "signup";
+
+  const submit = async () => {
+    setError(null);
+    if (!EMAIL_RE.test(email.trim())) return setError("Проверьте адрес почты");
+    if (pass.length < 6) return setError("Пароль от 6 символов");
+    if (signup && pass !== pass2) return setError("Пароли не совпадают");
+    if (signup && !agree) return setError("Нужно принять условия");
+    setBusy(true);
+    const res = signup
+      ? await authStore.signUp(email.trim(), pass)
+      : await authStore.signIn(email.trim(), pass);
+    setBusy(false);
+    if (!res.ok) return setError(res.reason || "Не удалось войти");
+    onDone(res.account);
+  };
+
+  const tab = (key, label) => (
+    <button onClick={() => { onMode(key); setError(null); }}
+      className="flex-1 rounded-xl py-3.5 text-[12px] tracking-[0.2em] font-semibold"
+      style={{ backgroundColor: mode === key ? RAISED : "transparent",
+        color: mode === key ? TEXT : FAINT,
+        border: `1px solid ${mode === key ? "#3A3A40" : "transparent"}` }}>
+      {label}
+    </button>
+  );
+
+  return (
+    <div className="w-full flex flex-col" style={{ height: "100dvh", backgroundColor: BG, color: TEXT }}>
+      <div className="max-w-md w-full mx-auto flex-1 min-h-0 overflow-y-auto no-scrollbar px-6 pt-6 pb-6">
+        <button onClick={onBack} className="text-[20px] leading-none py-2"
+          style={{ color: TEXT }}>←</button>
+
+        <div className="text-center mt-6">
+          <div className="text-[13px] tracking-[0.3em]" style={{ color: DIM }}>
+            {signup ? "СОЗДАЙТЕ АККАУНТ" : "ДОБРО ПОЖАЛОВАТЬ"}
+          </div>
+          <div className="text-[14px] mt-2" style={{ color: DIM }}>
+            {signup ? "Начните торговать" : "Войдите в свой аккаунт"}
+          </div>
+        </div>
+
+        <div className="flex gap-1 p-1 rounded-2xl mt-7 mb-7"
+          style={{ backgroundColor: SURFACE, border: `1px solid ${HAIR}` }}>
+          {tab("signin", "ВОЙТИ")}
+          {tab("signup", "РЕГИСТРАЦИЯ")}
+        </div>
+
+        <Field label="EMAIL" value={email} onChange={setEmail}
+          placeholder="you@example.com" type="email" />
+        <Field label="ПАРОЛЬ" value={pass} onChange={setPass}
+          placeholder="Введите пароль" secret />
+        {signup && (
+          <Field label="ПОДТВЕРДИТЕ ПАРОЛЬ" value={pass2} onChange={setPass2}
+            placeholder="Повторите пароль" secret />
+        )}
+
+        {!signup ? (
+          <div className="flex items-center justify-between mt-1 mb-6">
+            <Check on={remember} onClick={() => setRemember((v) => !v)}>Запомнить меня</Check>
+            <button className="text-[12px] whitespace-nowrap" style={{ color: DIM }}>
+              Забыли пароль?
+            </button>
+          </div>
+        ) : (
+          <div className="mt-1 mb-6">
+            <Check on={agree} onClick={() => setAgree((v) => !v)}>
+              Я принимаю Пользовательское соглашение и Политику конфиденциальности
+            </Check>
+          </div>
+        )}
+
+        {error && (
+          <div className="text-[12px] mb-4 text-center" style={{ color: SHORT }}>{error}</div>
+        )}
+
+        <button onClick={submit} disabled={busy}
+          className="w-full rounded-2xl py-5 text-[14px] tracking-[0.25em] font-bold disabled:opacity-40"
+          style={{ backgroundColor: TEXT, color: BG }}>
+          {busy ? "ПОДОЖДИТЕ…" : signup ? "СОЗДАТЬ АККАУНТ" : "ВОЙТИ"}
+        </button>
+
+        {!signup && (
+          <>
+            <div className="flex items-center gap-4 my-6">
+              <div className="flex-1 h-px" style={{ backgroundColor: HAIR }} />
+              <span className="text-[11px] tracking-[0.2em]" style={{ color: FAINT }}>ИЛИ</span>
+              <div className="flex-1 h-px" style={{ backgroundColor: HAIR }} />
+            </div>
+            <div className="grid grid-cols-2 gap-3">
+              {["Google", "Apple"].map((p) => (
+                <button key={p} onClick={() => setError(`Вход через ${p} появится вместе с сервером`)}
+                  className="rounded-2xl py-4 text-[13px] font-semibold"
+                  style={{ backgroundColor: RAISED, color: TEXT, border: `1px solid ${HAIR}` }}>
+                  {p}
+                </button>
+              ))}
+            </div>
+          </>
+        )}
+
+        <div className="text-[11px] text-center mt-8 leading-relaxed" style={{ color: FAINT }}>
+          {signup
+            ? "Уже есть аккаунт? Нажмите «Войти» выше."
+            : "Нажимая «Войти», вы соглашаетесь с Условиями и Политикой конфиденциальности."}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* --------------------------------- ЛОББИ ---------------------------------
+   Главный экран. Три смысловых блока: баланс, дневная динамика, история.
+   Всё, что не является результатом игрока, намеренно бесцветно — зелёный
+   и красный работают только как знак результата.
+   ------------------------------------------------------------------------ */
+
+/** Мелкие иконки. Рисуются вручную, чтобы не тянуть иконочный пакет. */
+const Icon = ({ name, size = 16, color = TEXT }) => {
+  const common = { width: size, height: size, viewBox: "0 0 24 24", fill: "none",
+    stroke: color, strokeWidth: 1.8, strokeLinecap: "round", strokeLinejoin: "round" };
+  if (name === "bars") return (
+    <svg {...common}><path d="M6 20V10M12 20V4M18 20v-6" /></svg>
+  );
+  if (name === "gear") return (
+    <svg {...common}><circle cx="12" cy="12" r="3" />
+      <path d="M19.4 15a1.6 1.6 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.6 1.6 0 0 0-1.8-.3 1.6 1.6 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1A1.6 1.6 0 0 0 9 19.4a1.6 1.6 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.6 1.6 0 0 0 .3-1.8 1.6 1.6 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1A1.6 1.6 0 0 0 4.6 9a1.6 1.6 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.6 1.6 0 0 0 1.8.3H9a1.6 1.6 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.6 1.6 0 0 0 1 1.5 1.6 1.6 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.6 1.6 0 0 0-.3 1.8V9a1.6 1.6 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.6 1.6 0 0 0-1.5 1z" /></svg>
+  );
+  if (name === "flag") return (
+    <svg {...common}><path d="M4 21V4h11l-1.5 4H20v8h-8l-1-3H4" /></svg>
+  );
+  if (name === "trend") return (
+    <svg {...common}><path d="M3 17l6-6 4 4 8-8" /><path d="M15 7h6v6" /></svg>
+  );
+  if (name === "star") return (
+    <svg {...common}><path d="M12 3l2.7 5.6 6.1.9-4.4 4.3 1 6.1-5.4-2.9-5.4 2.9 1-6.1L3.2 9.5l6.1-.9z" /></svg>
+  );
+  if (name === "chevron") return (
+    <svg {...common}><path d="M9 6l6 6-6 6" /></svg>
+  );
+  if (name === "check") return (
+    <svg {...common}><path d="M5 12l5 5 9-10" /></svg>
+  );
+  if (name === "caret") return (
+    <svg {...common}><path d="M6 9l6 6 6-6" /></svg>
+  );
+  return null;
+};
+
+/** Кнопка-иконка в шапке. */
+const IconButton = ({ name, onClick, active }) => (
+  <button onClick={onClick}
+    className="w-11 h-11 rounded-xl flex items-center justify-center shrink-0"
+    style={{ backgroundColor: active ? TEXT : RAISED, border: `1px solid ${active ? TEXT : HAIR}` }}>
+    <Icon name={name} size={18} color={active ? BG : TEXT} />
+  </button>
+);
+
+const LOBBY_RANGES = [
+  { key: "СЕГОДНЯ", ms: 24 * 3600e3 },
+  { key: "НЕДЕЛЯ", ms: 7 * 24 * 3600e3 },
+  { key: "ВСЁ ВРЕМЯ", ms: Infinity },
+];
+
+/**
+ * Кривая накопленного результата. Строится из истории сессий: точка ставится
+ * после каждой закрытой сессии, значение — сумма PnL к этому моменту.
+ * Это НЕ котировка и не симуляция — только фактические результаты игрока.
+ */
+function EquityCurve({ sessions, rangeMs }) {
+  const W = 320, H = 150, PADR = 46, PADB = 20;
+  const now = Date.now();
+  const list = [...sessions]
+    .filter((x) => Number.isFinite(x.at) && now - x.at <= rangeMs)
+    .sort((a, b) => a.at - b.at);
+
+  if (list.length === 0) {
+    return (
+      <div className="flex items-center justify-center text-[12px]"
+        style={{ height: H, color: FAINT }}>
+        закрытых сессий за этот период нет
+      </div>
+    );
+  }
+
+  let acc = 0;
+  const pts = list.map((x) => { acc += x.pnl; return { t: x.at, v: acc }; });
+  pts.unshift({ t: pts[0].t - 1, v: 0 });
+
+  const vs = pts.map((p) => p.v);
+  const rawMax = Math.max(...vs, 0), rawMin = Math.min(...vs, 0);
+  const pad = Math.max((rawMax - rawMin) * 0.25, 1);
+  const max = rawMax + pad, min = rawMin - pad;
+  const t0 = pts[0].t, t1 = pts[pts.length - 1].t;
+  const spanT = Math.max(1, t1 - t0);
+
+  const x = (t) => ((t - t0) / spanT) * (W - PADR);
+  const y = (v) => H - PADB - ((v - min) / (max - min)) * (H - PADB - 6);
+  const line = pts.map((p) => `${x(p.t).toFixed(1)},${y(p.v).toFixed(1)}`).join(" ");
+  const color = acc >= 0 ? LONG : SHORT;
+  const grid = [max, (max + min) / 2 + (max - min) * 0.25, 0, min + (max - min) * 0.25, min];
+  const hhmm = (t) => new Date(t).toLocaleTimeString("ru-RU",
+    { hour: "2-digit", minute: "2-digit" });
+
+  return (
+    <svg viewBox={`0 0 ${W} ${H}`} className="w-full" style={{ height: 150 }}>
+      {grid.map((g, i) => (
+        <g key={i}>
+          <line x1={0} x2={W - PADR} y1={y(g)} y2={y(g)}
+            stroke={Math.abs(g) < 1e-9 ? DIM : HAIR} strokeWidth={0.8}
+            strokeDasharray={Math.abs(g) < 1e-9 ? "" : "2 3"} />
+          <text x={W - PADR + 6} y={y(g) + 3.5} fill={FAINT} fontSize={9}
+            fontFamily="monospace">{fmtSigned(g, 0)}</text>
+        </g>
+      ))}
+
+      <polygon points={`${line} ${x(t1)},${H - PADB} ${x(t0)},${H - PADB}`}
+        fill={color} opacity={0.12} />
+      <polyline points={line} fill="none" stroke={color} strokeWidth={1.8} />
+      <circle cx={x(t1)} cy={y(acc)} r={3.2} fill={color} />
+
+      <text x={0} y={H - 5} fill={FAINT} fontSize={9} fontFamily="monospace">{hhmm(t0)}</text>
+      <text x={x(t1)} y={H - 5} fill={FAINT} fontSize={9} fontFamily="monospace"
+        textAnchor="end">{hhmm(t1)}</text>
+    </svg>
+  );
+}
+
+function Lobby({ profile, account, onNew, onReset, onExit, onSignOut }) {
+  const st = profileStats(profile);
+  const affordable = CONFIG.market.capitalOptions.some((c) => c <= profile.wallet);
+  const [range, setRange] = useState(LOBBY_RANGES[0]);
+  const [rangeOpen, setRangeOpen] = useState(false);
+  const [showAll, setShowAll] = useState(false);
+  const [menu, setMenu] = useState(false);
+
+  const now = Date.now();
+  const inRange = profile.sessions.filter(
+    (x) => Number.isFinite(x.at) && now - x.at <= range.ms);
+  const rangeTotal = inRange.reduce((sum, x) => sum + x.pnl, 0);
+  const history = showAll ? profile.sessions : profile.sessions.slice(0, 3);
+
+  const card = { backgroundColor: SURFACE, border: `1px solid ${HAIR}` };
+
+  return (
+    <div className="w-full flex flex-col" style={{ height: "100dvh", backgroundColor: BG, color: TEXT }}>
+      <div className="max-w-md w-full mx-auto flex-1 min-h-0 overflow-y-auto no-scrollbar px-5 pt-8 pb-4">
+
+        {/* ------------------------------- шапка ------------------------------ */}
+        <div className="flex items-start justify-between gap-3">
+          <div className="min-w-0">
+            <div className="text-[10px] tracking-[0.35em]" style={{ color: FAINT }}>
+              ЗАКРЫТЫЙ РЫНОК · ПРАКТИКА
+            </div>
+            <div className="text-[30px] leading-none tracking-tight mt-2">trade.exe</div>
+          </div>
+          <div className="flex gap-2">
+            <IconButton name="bars" active={showAll} onClick={() => setShowAll((v) => !v)} />
+            <IconButton name="gear" active={menu} onClick={() => setMenu((v) => !v)} />
+          </div>
+        </div>
+
+        {menu && (
+          <div className="mt-4 rounded-2xl p-2 flex flex-col" style={card}>
+            <button onClick={() => { onReset(); setMenu(false); }}
+              className="text-left px-3 py-3 rounded-xl text-[13px]"
+              style={{ color: TEXT }}>
+              Пополнить баланс до {fmt(STARTING_WALLET, 0)}
+            </button>
+            {onExit && (
+              <button onClick={onExit} className="text-left px-3 py-3 rounded-xl text-[13px]"
+                style={{ color: DIM }}>
+                Сменить режим
+              </button>
+            )}
+            {onSignOut && (
+              <button onClick={onSignOut} className="text-left px-3 py-3 rounded-xl text-[13px]"
+                style={{ color: SHORT }}>
+                Выйти из аккаунта{account?.email ? ` · ${account.email}` : ""}
+              </button>
+            )}
+          </div>
+        )}
+
+        {/* ------------------------------ баланс ------------------------------ */}
+        <div className="text-[10px] tracking-[0.3em] mt-8" style={{ color: FAINT }}>БАЛАНС</div>
+        <div className="flex items-center justify-between gap-3 mt-2">
+          <div className="text-[42px] leading-none font-mono tracking-tight truncate">
+            {fmt(profile.wallet, 0)}
+          </div>
+          <div className="flex items-center gap-2 px-3 py-2 rounded-full shrink-0" style={card}>
+            <span className="w-1.5 h-1.5 rounded-full" style={{ backgroundColor: LONG }} />
+            <span className="text-[10px] tracking-[0.2em]" style={{ color: TEXT }}>ОНЛАЙН</span>
+          </div>
+        </div>
         <div className="text-[13px] font-mono mt-2"
           style={{ color: st.total > 0 ? LONG : st.total < 0 ? SHORT : DIM }}>
           {st.count === 0 ? "сессий ещё не было" : `${fmtSigned(st.total)} за ${st.count} сесс.`}
         </div>
 
-        <div className="grid grid-cols-4 gap-3 mt-8">
-          <Metric label="СЕССИЙ" value={String(st.count)} />
-          <Metric label="ПРИБЫЛЬНЫХ" value={st.count ? `${st.wins}` : "—"}
-            color={st.wins > 0 ? LONG : TEXT} />
-          <Metric label="ЛУЧШАЯ" value={st.count ? fmtSigned(st.best, 0) : "—"}
-            color={st.best > 0 ? LONG : TEXT} />
-          <Metric label="ХУДШАЯ" value={st.count ? fmtSigned(st.worst, 0) : "—"}
-            color={st.worst < 0 ? SHORT : TEXT} />
+        {/* ---------------------------- статистика ---------------------------- */}
+        <div className="rounded-2xl px-4 py-4 mt-6" style={card}>
+          <div className="grid grid-cols-4 gap-2">
+            {[
+              ["СЕССИЙ", String(st.count), TEXT, "flag"],
+              ["ПРИБЫЛЬНЫХ", st.count ? String(st.wins) : "—", st.wins > 0 ? LONG : TEXT, "trend"],
+              ["ЛУЧШАЯ", st.count ? fmtSigned(st.best, 0) : "—", st.best > 0 ? LONG : TEXT, "star"],
+              ["ХУДШАЯ", st.count ? fmtSigned(st.worst, 0) : "—", st.worst < 0 ? SHORT : TEXT, "star"],
+            ].map(([label, value, color, icon]) => (
+              <div key={label} className="min-w-0">
+                <div className="text-[9px] tracking-[0.1em] mb-1.5 truncate" style={{ color: FAINT }}>
+                  {label}
+                </div>
+                <div className="text-[16px] font-mono truncate" style={{ color }}>{value}</div>
+                <div className="mt-3"><Icon name={icon} size={14} color={FAINT} /></div>
+              </div>
+            ))}
+          </div>
         </div>
 
-        <div className="text-[11px] tracking-[0.15em] mt-10 mb-1" style={{ color: FAINT }}>ИСТОРИЯ</div>
+        {/* ------------------------- дневная динамика ------------------------- */}
+        <div className="text-[10px] tracking-[0.3em] mt-8 mb-3" style={{ color: FAINT }}>
+          ДНЕВНАЯ ДИНАМИКА
+        </div>
+        <div className="rounded-2xl px-4 py-4" style={card}>
+          <div className="flex items-start justify-between gap-3">
+            <div className="min-w-0">
+              <div className="text-[20px] font-mono leading-none"
+                style={{ color: rangeTotal > 0 ? LONG : rangeTotal < 0 ? SHORT : TEXT }}>
+                {inRange.length ? fmtSigned(rangeTotal) : "—"}
+              </div>
+              <div className="text-[12px] mt-1.5" style={{ color: DIM }}>суммарный результат</div>
+            </div>
+            <div className="relative shrink-0">
+              <button onClick={() => setRangeOpen((v) => !v)}
+                className="flex items-center gap-2 px-3 py-2 rounded-xl text-[11px] tracking-[0.15em]"
+                style={{ backgroundColor: RAISED, color: TEXT, border: `1px solid ${HAIR}` }}>
+                {range.key}<Icon name="caret" size={13} color={DIM} />
+              </button>
+              {rangeOpen && (
+                <div className="absolute right-0 mt-1 rounded-xl overflow-hidden z-10"
+                  style={{ ...card, backgroundColor: RAISED }}>
+                  {LOBBY_RANGES.map((r) => (
+                    <button key={r.key} onClick={() => { setRange(r); setRangeOpen(false); }}
+                      className="block w-full text-left px-4 py-2.5 text-[11px] tracking-[0.15em] whitespace-nowrap"
+                      style={{ color: r.key === range.key ? TEXT : DIM }}>
+                      {r.key}
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
+          </div>
+
+          <div className="mt-3">
+            <EquityCurve sessions={profile.sessions} rangeMs={range.ms} />
+          </div>
+        </div>
+
+        {/* -------------------------------- история --------------------------- */}
+        <div className="flex items-center justify-between mt-8 mb-3">
+          <span className="text-[10px] tracking-[0.3em]" style={{ color: FAINT }}>ИСТОРИЯ</span>
+          {profile.sessions.length > 3 && (
+            <button onClick={() => setShowAll((v) => !v)}
+              className="text-[10px] tracking-[0.2em]" style={{ color: LONG }}>
+              {showAll ? "СВЕРНУТЬ" : "СМОТРЕТЬ ВСЕ"}
+            </button>
+          )}
+        </div>
+
         {profile.sessions.length === 0 ? (
-          <Blank>здесь появятся результаты ваших сессий</Blank>
+          <div className="rounded-2xl py-8 text-center text-[12px]" style={{ ...card, color: FAINT }}>
+            здесь появятся результаты ваших сессий
+          </div>
         ) : (
-          profile.sessions.slice(0, 12).map((x, i) => (
-            <div key={i} className="flex items-center justify-between py-2.5 border-b" style={{ borderColor: HAIR }}>
-              <div className="min-w-0">
-                <div className="text-[13px] font-mono">{fmt(x.capital, 0)} → {fmt(x.equity)}</div>
-                <div className="text-[11px]" style={{ color: FAINT }}>
-                  {clock(x.ticks * CONFIG.market.tickMs)} в рынке · место {x.rank} из {CONFIG.market.totalPlayers}
+          <div className="flex flex-col gap-2">
+            {history.map((x, i) => (
+              <div key={i} className="rounded-2xl px-4 py-3 flex items-center justify-between gap-3"
+                style={card}>
+                <div className="min-w-0">
+                  <div className="text-[14px] font-mono truncate">
+                    {fmt(x.capital, 0)} → {fmt(x.equity)}
+                  </div>
+                  <div className="text-[11px] mt-1 truncate" style={{ color: FAINT }}>
+                    {clock(x.ticks * CONFIG.market.tickMs)} в рынке · место {x.rank} из {CONFIG.market.totalPlayers}
+                  </div>
+                </div>
+                <div className="flex items-center gap-1.5 shrink-0">
+                  <span className="text-[14px] font-mono"
+                    style={{ color: x.pnl >= 0 ? LONG : SHORT }}>{fmtSigned(x.pnl)}</span>
+                  <Icon name="chevron" size={14} color={FAINT} />
                 </div>
               </div>
-              <div className="text-[14px] font-mono" style={{ color: x.pnl >= 0 ? LONG : SHORT }}>
-                {fmtSigned(x.pnl)}
-              </div>
-            </div>
-          ))
+            ))}
+          </div>
         )}
       </div>
 
-      <div className="max-w-md w-full mx-auto px-6 pb-8 pt-3">
+      {/* ------------------------------- действие ----------------------------- */}
+      <div className="max-w-md w-full mx-auto px-5 pb-6 pt-3 shrink-0">
         {affordable ? (
-          <button onClick={onNew} className="w-full rounded-lg py-4 text-[15px] tracking-[0.15em] font-semibold"
+          <button onClick={onNew}
+            className="w-full rounded-2xl py-5 text-[14px] tracking-[0.25em] font-bold"
             style={{ backgroundColor: TEXT, color: BG }}>
             НОВАЯ СЕССИЯ
           </button>
@@ -1134,8 +1707,9 @@ function Lobby({ profile, onNew, onReset, onExit }) {
             <div className="text-[12px] mb-3 text-center" style={{ color: FAINT }}>
               На балансе меньше минимального взноса.
             </div>
-            <button onClick={onReset} className="w-full rounded-lg py-4 text-[15px] tracking-[0.15em]"
-              style={{ backgroundColor: SURFACE, color: TEXT, border: `1px solid ${HAIR}` }}>
+            <button onClick={onReset}
+              className="w-full rounded-2xl py-5 text-[14px] tracking-[0.25em] font-bold"
+              style={{ backgroundColor: RAISED, color: TEXT, border: `1px solid #3A3A40` }}>
               ПОПОЛНИТЬ ДО {fmt(STARTING_WALLET, 0)}
             </button>
           </>
@@ -1311,6 +1885,8 @@ function SessionResult({ result, onDone }) {
    ========================================================================== */
 function PracticeApp({ onExit }) {
   const [profile, setProfile] = useState(null);
+  const [account, setAccount] = useState(undefined);   // undefined = ещё грузим, null = не вошёл
+  const [authStage, setAuthStage] = useState("intro"); // intro | signin | signup
   const [screen, setScreen] = useState("lobby");
   const [result, setResult] = useState(null);
   const [session, setSession] = useState(null);
@@ -1338,6 +1914,7 @@ function PracticeApp({ onExit }) {
   const toastTimer = useRef(null);
 
   useEffect(() => { loadProfile().then(setProfile); }, []);
+  useEffect(() => { authStore.current().then((a) => setAccount(a ?? null)); }, []);
   useEffect(() => () => clearTimeout(toastTimer.current), []);
 
   useEffect(() => {
@@ -1383,6 +1960,7 @@ function PracticeApp({ onExit }) {
       trades: snap.you.tradeCount,
       ticks: snap.tick,
       price: snap.price,
+      at: Date.now(),        // отметка времени для кривой "дневная динамика"
     };
 
     persist({
@@ -1400,16 +1978,24 @@ function PracticeApp({ onExit }) {
     setScreen("result");
   };
 
-  if (!profile) {
-    return (
-      <div className="w-full flex items-center justify-center"
-        style={{ height: "100dvh", backgroundColor: BG, color: FAINT }}>
-        <span className="text-[12px]">загрузка профиля…</span>
-      </div>
-    );
+  if (!profile || account === undefined) return <Splash />;
+
+  // Не вошёл — показываем онбординг, затем экран входа/регистрации.
+  if (!account) {
+    if (authStage === "intro") {
+      return <Onboarding onSignIn={() => setAuthStage("signin")}
+        onSignUp={() => setAuthStage("signup")} />;
+    }
+    return <AuthScreen mode={authStage}
+      onMode={setAuthStage}
+      onBack={() => setAuthStage("intro")}
+      onDone={(acc) => { setAccount(acc); setAuthStage("intro"); }} />;
   }
+  const signOut = async () => { await authStore.signOut(); setAccount(null); setAuthStage("intro"); };
+
   if (screen === "lobby") {
-    return <Lobby profile={profile} onNew={() => setScreen("setup")} onExit={onExit}
+    return <Lobby profile={profile} account={account} onSignOut={signOut}
+      onNew={() => setScreen("setup")} onExit={onExit}
       onReset={() => persist({ ...profile, wallet: STARTING_WALLET, deposited: profile.deposited + STARTING_WALLET })} />;
   }
   if (screen === "setup") {
@@ -1423,7 +2009,8 @@ function PracticeApp({ onExit }) {
     return <SessionResult result={result} onDone={() => { setResult(null); setScreen("lobby"); }} />;
   }
   if (!engineRef.current || !snapshot) {
-    return <Lobby profile={profile} onNew={() => setScreen("setup")} onExit={onExit}
+    return <Lobby profile={profile} account={account} onSignOut={signOut}
+      onNew={() => setScreen("setup")} onExit={onExit}
       onReset={() => persist({ ...profile, wallet: STARTING_WALLET })} />;
   }
 
