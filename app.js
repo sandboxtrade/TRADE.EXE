@@ -679,7 +679,26 @@ class LegacyRoom {
       priceHistory: this._priceHistory,
       lastPoint: this._priceHistory[this._priceHistory.length - 1],
       market: this._aggregate(base.participants || []),
+      price: this._room.market.mark,
+      previousPrice: this._priceHistory.length >= 2
+        ? this._priceHistory[this._priceHistory.length - 2].price
+        : this._room.market.mark,
+      initialPrice: CONFIG.market.initialPrice,
+      rank: this._rank(viewerId, base.participants || []),
+      yourOrders: base.you ? (base.you.limits || []) : [],
+      // v4 не хранит историю отдельных сделок игрока (только счётчик tradeCount) —
+      // список остаётся пустым, вкладка "сделки" будет пока без записей.
+      yourTrades: [],
+      // Заявки других участников намеренно не передаются клиенту — так задумано
+      // в архитектуре v4 (приватность, см. ARCHITECTURE.md), а не баг переходника.
+      orders: [],
     };
+  }
+
+  _rank(viewerId, participants) {
+    const sorted = [...participants].sort((a, b) => b.equity - a.equity);
+    const idx = sorted.findIndex((p) => p.id === viewerId);
+    return idx === -1 ? null : idx + 1;
   }
 
   _legacyPlayer(p) {
