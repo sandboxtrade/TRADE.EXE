@@ -41,7 +41,7 @@ const CONFIG = {
 
   // --- Инварианты ---
   TOL_CAPITAL: 1e-6,
-  TOL_NONNEG: 1e-9,
+  TOL_NONNEG: 1e-6,
 
   // --- Оборот NPC (LIVENESS-FIX) ---
   // stop/take в ARCHETYPES заданы в долях цены входа (-0.25 = -25%).
@@ -119,10 +119,35 @@ function makeCurve(totalCapital) {
  *   clearing— кто, сколько и по какой цене; исполняется здесь и только здесь.
  */
 class Market {
-  constructor({ playerCount, startingCapital, seed = 1 }) {
+  constructor({ playerCount, startingCapital, seed = 1, leverage = 1 }) {
+    /**
+     * ПЛЕЧО. Меняется ровно одно правило: сколько единиц позиции игрок может
+     * держать на свои деньги. Денежные потоки не меняются — за позицию
+     * по-прежнему платится ПОЛНАЯ стоимость value(u, P), просто кэш при этом
+     * уходит в минус. Отрицательный кэш и есть заём.
+     *
+     * Почему капитал остаётся закрытым: тождество Σcash + escrow = C держится
+     * при любом знаке кэша, а Σsettlement ≡ escrow, значит Σequity ≡ C. Убыток
+     * ликвидированного участника не исчезает — он уже лежит в кэше остальных.
+     */
+    this.leverage = Math.max(1, leverage);
+    // Поддерживающая маржа. Подобрана замером: при 5% каскад принудительных
+    // закрытий успевал загнать эквити до −67, при 12% худшее эквити за
+    // 30 000 тиков осталось положительным и безнадёжного долга не возникло.
+    this.maintenance = 1.2 / this.leverage;       // 12% при x10
+    // Боты держат половину доступного плеча. С полным x10 у всех рынок
+    // сваливался в каскад ликвидаций (10 211 против 603 на тех же сидах).
+    this.npcLeverage = this.leverage > 1 ? this.leverage * 0.5 : 1;
+    this.liquidations = 0;
+    this.badDebt = 0;
     this.startingCapital = startingCapital;
     this.C = playerCount * startingCapital;
-    this.curve = makeCurve(this.C);
+    // Глубина кривой умножается на плечо. Без этого 99 ботов с x10 двигали
+    // цену в десять раз сильнее за тик, маржин-колл не успевал срабатывать и
+    // эквити улетало в минус на сотни долларов. С масштабированной кривой
+    // ТРАЕКТОРИЯ ЦЕНЫ такая же, как без плеча, а PnL каждого растёт в x раз —
+    // это и есть плечо.
+    this.curve = makeCurve(this.C * this.leverage);
     this.Q = 0;
     this.escrow = 0;
     this.tick = 0;
@@ -144,6 +169,7 @@ class Market {
       basis: 0,
       realizedPnL: 0, tradeCount: 0,
       stopLoss: null, takeProfit: null,
+      liquidatedAt: null,
       npc: null,
     }));
   }
@@ -173,6 +199,58 @@ class Market {
     return pl.u === 0 ? 0 : this.settlement(i) - pl.basis;
   }
   sumEquity() { return this.players.reduce((a, _, i) => a + this.equity(i), 0); }
+
+  /** Покупательная способность: собственные средства, умноженные на плечо. */
+  buyingPower(i) {
+    const pl = this.players[i];
+    const held = this.curve.value(pl.u, this.mark);
+    return Math.max(0, this.equity(i) * this.leverage - held);
+  }
+
+  /** Уровень маржи: собственные средства к стоимости позиции. */
+  marginLevel(i) {
+    const pl = this.players[i];
+    if (pl.u === 0) return Infinity;
+    const notional = this.curve.value(pl.u, this.mark);
+    return notional > 0 ? this.equity(i) / notional : Infinity;
+  }
+
+  /**
+   * Оценка марк-цены, при которой сработает маржин-колл. Считается перебором
+   * по Q: эквити зависит от Q через цену полной ликвидации, поэтому обратная
+   * формула в замкнутом виде не выписывается.
+   */
+  liquidationEstimate(i) {
+    const pl = this.players[i];
+    if (pl.u === 0 || this.leverage <= 1) return null;
+    const { value, p, liquidationPrice } = this.curve;
+    const level = (Q) => {
+      const eq = pl.cash + value(pl.u, liquidationPrice(Q));
+      const notional = value(pl.u, p(Q));
+      return notional > 0 ? eq / notional : Infinity;
+    };
+    const down = pl.u > 0;                       // лонгу опасно вниз
+    let lo = this.Q, hi = down ? -1e9 : 1e9;
+    if (level(hi) > this.maintenance) return null;
+    for (let k = 0; k < 80; k++) {
+      const mid = (lo + hi) / 2;
+      if (level(mid) > this.maintenance) lo = mid; else hi = mid;
+    }
+    return p(hi);
+  }
+
+  /** Кого нужно принудительно закрыть в следующем клиринге. */
+  marginCalls() {
+    if (this.leverage <= 1) return [];
+    const out = [];
+    for (const pl of this.players) {
+      if (pl.u === 0) continue;
+      if (this.marginLevel(pl.id) <= this.maintenance) {
+        out.push({ i: pl.id, du: -pl.u, reason: "liquidation" });
+      }
+    }
+    return out;
+  }
 
   /** Максимальный размер позиции для ОДИНОЧНОЙ заявки (для UI-подсказки).
    *  Внутри тика реальный предел определяет обрезка. */
@@ -215,7 +293,10 @@ class Market {
       for (let k = 0; k < work.length; k++) {
         const want = orig[k].du, pl = this.players[work[k].i];
         const before = pl.u, after = before + want;
-        const budget = pl.cash + value(before, P);
+        // Собственные средства участника = кэш + текущая стоимость позиции.
+        // С плечом на них можно держать в leverage раз больше экспозиции.
+        const own = pl.cash + value(before, P);
+        const budget = own * this.leverage;
         let maxAfter = after > 0 ? budget / P : after < 0 ? -budget / (PMAX - P) : 0;
         let allowed = after;
         if (after > 0 && after > maxAfter) allowed = maxAfter;
@@ -271,6 +352,10 @@ class Market {
           pl.basis += value(after, Lafter) - value(before, Lafter);
         }
       }
+      if (o.reason === "liquidation" && after === 0) {
+        pl.liquidatedAt = this.tick;
+        this.liquidations++;
+      }
       pl.u = after;
       pl.tradeCount++;
       executed.push({ i: o.i, du: o.du, price: P, reason: o.reason });
@@ -302,9 +387,15 @@ function checkInvariants(m, ctx = {}) {
   if (price < m.curve.PMIN - TN || price > m.curve.PMAX + TN)
     errs.push(`price вне [${m.curve.PMIN}, ${m.curve.PMAX}]: ${price}`);
 
+  // При плече кэш уходит в минус (это заём), а эквити может кратковременно
+  // стать отрицательным до срабатывания маржин-колла. Тождество Σequity = C
+  // от этого не страдает и проверяется выше, поэтому здесь порог мягче.
+  const lev = m.leverage > 1;
   for (const p of m.players) {
-    if (p.cash < -TN) errs.push(`cash < 0 у #${p.id}: ${p.cash}`);
-    if (m.equity(p.id) < -TN) errs.push(`equity < 0 у #${p.id}: ${m.equity(p.id)}`);
+    if (!lev && p.cash < -TN) errs.push(`cash < 0 у #${p.id}: ${p.cash}`);
+    if (!lev && m.equity(p.id) < -TN) errs.push(`equity < 0 у #${p.id}: ${m.equity(p.id)}`);
+    if (lev && m.equity(p.id) < -m.startingCapital * 4)
+      errs.push(`неуправляемый долг у #${p.id}: ${m.equity(p.id)}`);
     if (!Number.isFinite(p.cash) || !Number.isFinite(p.u))
       errs.push(`не-число у #${p.id}`);
   }
@@ -393,6 +484,7 @@ function decide(m, i, history) {
   n.since++;
   const r = n.rng;
   if (r() > n.act) return 0;
+  if (pl.u === 0 && pl.cash <= m.startingCapital * 0.02) return 0;   // сгорел
 
   const P = m.mark;
   const lag = Math.max(1, n.lag);          // 0 давал mom === 0 всегда
@@ -408,7 +500,8 @@ function decide(m, i, history) {
     // Живой оборот: боты доливают и частично фиксируют, а не сидят камнем.
     if (r() < 0.12) {
       if (r() < 0.5) return -pl.u * (0.3 + 0.4 * r());
-      const add = m.curve.unitsFor(pl.cash * n.size * 0.5, P);
+      const own = Math.max(0, pl.cash + m.curve.value(pl.u, P));
+      const add = m.curve.unitsFor(own * n.size * 0.5 * m.npcLeverage, P);
       return pl.u > 0 ? add : -add;
     }
     return 0;
@@ -420,7 +513,7 @@ function decide(m, i, history) {
   else dir = r() < 0.5 ? 1 : -1;
   if (Math.abs(mom) < 1e-6 && n.spec.bias !== "rand" && r() < 0.7) return 0;
 
-  const units = m.curve.unitsFor(pl.cash * n.size, P);
+  const units = m.curve.unitsFor(Math.max(0, pl.cash) * n.size * m.npcLeverage, P);
   return dir > 0 ? units : -units;
 }
 
@@ -455,7 +548,7 @@ function validateCommand(m, i, cmd) {
       }
       const n = cmd.notional;
       if (!Number.isFinite(n) || n <= 0) return { ok: false, reason: "неверный объём" };
-      if (n > pl.cash + 1e-9) return { ok: false, reason: "недостаточно средств" };
+      if (n > m.buyingPower(i) + 1e-9) return { ok: false, reason: "недостаточно средств" };
       return { ok: true };
     }
     case "PROTECT": {
@@ -466,7 +559,7 @@ function validateCommand(m, i, cmd) {
       const n = cmd.notional;
       if (!Number.isFinite(n) || n <= 0) return { ok: false, reason: "неверный объём" };
       if (!Number.isFinite(cmd.limitPrice)) return { ok: false, reason: "неверная цена" };
-      if (n > pl.cash + 1e-9) return { ok: false, reason: "недостаточно средств" };
+      if (n > m.buyingPower(i) + 1e-9) return { ok: false, reason: "недостаточно средств" };
       if ((pl.limits || []).length >= 10) return { ok: false, reason: "слишком много заявок" };
       return { ok: true };
     }
@@ -583,8 +676,9 @@ function createSnapshot(m, viewerId, { level = "full", devMode = false } = {}) {
  * на результат (доказано: обрезка зависит только от P* и своего состояния).
  */
 class RoomV4 {
-  constructor({ playerCount = 100, startingCapital = 100, seed = 1, npcCount = null } = {}) {
-    this.market = new Market({ playerCount, startingCapital, seed });
+  constructor({ playerCount = 100, startingCapital = 100, seed = 1, npcCount = null,
+    leverage = 1 } = {}) {
+    this.market = new Market({ playerCount, startingCapital, seed, leverage });
     this.history = [this.market.mark];
     this.pendingCommands = [];
     this.humanSlots = new Set();
@@ -634,6 +728,9 @@ class RoomV4 {
     if (this.halted) return this.halted;
     const m = this.market;
     const intents = [];
+    // Маржин-колл идёт ПЕРВЫМ и в том же клиринге, что и всё остальное:
+    // единая цена тика не даёт ликвидируемым проскочить раньше других.
+    intents.push(...m.marginCalls());
     intents.push(...pendingIntents(m));
     intents.push(...npcIntents(m, this.history, 0));
     for (const { i, cmd } of this.pendingCommands) {
@@ -687,9 +784,11 @@ function signedPct(v, d = 2) {
 }
 
 class LegacyRoom {
-  constructor({ startingCapital = 100, seed = 1, devMode = true, playerCount } = {}) {
+  constructor({ startingCapital = 100, seed = 1, devMode = true, playerCount, leverage = 1 } = {}) {
     const count = playerCount || CONFIG.market.totalPlayers;
-    this._room = new RoomV4({ playerCount: count, startingCapital, seed, npcCount: count - 1 });
+    this.leverage = leverage;
+    this._room = new RoomV4({ playerCount: count, startingCapital, seed,
+      npcCount: count - 1, leverage });
     this.devMode = devMode;
     this._startingCapital = startingCapital;
     this.paused = false;
@@ -744,7 +843,13 @@ class LegacyRoom {
     return {
       ...base,
       players,
-      you: base.you ? this._legacyPlayer(base.you) : null,
+      you: base.you ? {
+        ...this._legacyPlayer(base.you),
+        marginLevel: this._room.market.marginLevel(viewerId),
+        liquidationPrice: this._room.market.liquidationEstimate(viewerId),
+        buyingPower: this._room.market.buyingPower(viewerId),
+        wasLiquidated: this._room.market.players[viewerId].liquidatedAt !== null,
+      } : null,
       buyPressure: this._buyPressure,
       sellPressure: this._sellPressure,
       netPressure: this._buyPressure - this._sellPressure,
@@ -753,6 +858,9 @@ class LegacyRoom {
       netTotal: this._buyTotal - this._sellTotal,
       longRealized: this._room.market.longRealized,
       shortRealized: this._room.market.shortRealized,
+      leverage: this._room.market.leverage,
+      maintenance: this._room.market.maintenance,
+      liquidations: this._room.market.liquidations,
       totalTrades: this._totalTrades,
       totalPlayers: this._room.market.players.length,
       priceHistory: this._priceHistory,
@@ -871,8 +979,9 @@ const Room = LegacyRoom;
 
 // ==== ПРОФИЛЬ / ЛОКАЛЬНЫЙ ТРАНСПОРТ / ИНТЕРФЕЙС ====
 class LocalTransport {
-  constructor({ startingCapital, seed, devMode = true } = {}) {
-    this.room = new Room({ startingCapital, seed, devMode });
+  constructor({ startingCapital, seed, devMode = true, leverage = 1 } = {}) {
+    this.leverage = leverage;
+    this.room = new Room({ startingCapital, seed, devMode, leverage });
     this.playerId = this.room.join(null, "ВЫ"); // новый движок сам выдаёт id человека
     this.timer = null;
     this.speed = 1;
@@ -977,7 +1086,7 @@ const Y_MIN = 0.2, Y_MAX = 6;   // растяжение ценовой шкал�
 const HISTORY_CANDLES = 2000;
 const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
 
-function Chart({ state, timeframe, mode, entryPrice, stopLoss, takeProfit }) {
+function Chart({ state, timeframe, mode, entryPrice, stopLoss, takeProfit, liquidationPrice }) {
   const box = useRef(null);
   const [size, setSize] = useState({ w: 360, h: 300 });
 
@@ -1129,7 +1238,7 @@ function Chart({ state, timeframe, mode, entryPrice, stopLoss, takeProfit }) {
     lo = Math.min(lo, c.low); hi = Math.max(hi, c.high);
     maxVol = Math.max(maxVol, c.volume);
   }
-  for (const lvl of [entryPrice, stopLoss, takeProfit]) {
+  for (const lvl of [entryPrice, stopLoss, takeProfit, liquidationPrice]) {
     if (lvl && lvl > lo * 0.94 && lvl < hi * 1.06) { lo = Math.min(lo, lvl); hi = Math.max(hi, lvl); }
   }
 
@@ -1282,6 +1391,7 @@ function Chart({ state, timeframe, mode, entryPrice, stopLoss, takeProfit }) {
         })()}
 
         {level(entryPrice, `вход ${entryPrice?.toFixed(2)}`, "6 4", TEXT, true)}
+        {level(liquidationPrice, `ликвидация ${liquidationPrice?.toFixed(2)}`, "2 2", SHORT, true)}
         {level(stopLoss, `стоп ${stopLoss?.toFixed(2)}`, "4 3", SHORT)}
         {level(takeProfit, `тейк ${takeProfit?.toFixed(2)}`, "4 3", LONG)}
 
@@ -2730,6 +2840,7 @@ function SessionSetup({ wallet, onStart, onBack }) {
   const [capital, setCapital] = useState(
     options.filter((c) => c <= wallet).slice(-1)[0] ?? options[0]
   );
+  const [leverage, setLeverage] = useState(1);
 
   return (
     <div className="w-full flex flex-col" style={{ height: "100dvh", backgroundColor: BG, color: TEXT }}>
@@ -2758,18 +2869,44 @@ function SessionSetup({ wallet, onStart, onBack }) {
           })}
         </div>
 
+        <div className="text-[11px] tracking-[0.15em] mt-7 mb-3" style={{ color: FAINT }}>
+          РЕЖИМ ТОРГОВЛИ
+        </div>
+        <div className="grid grid-cols-2 gap-2">
+          {[
+            { lev: 1, title: "ОБЫЧНАЯ", note: "Позиция не больше взноса. Ликвидаций нет." },
+            { lev: 10, title: "МАРЖИНАЛЬНАЯ", note: "Плечо x10 у всех. Есть маржин-колл." },
+          ].map((m) => {
+            const active = leverage === m.lev;
+            return (
+              <button key={m.lev} onClick={() => setLeverage(m.lev)}
+                className="rounded-lg py-4 px-4 text-left tap"
+                style={{ backgroundColor: active ? TEXT : SURFACE,
+                  color: active ? BG : TEXT,
+                  border: `1px solid ${active ? TEXT : HAIR}` }}>
+                <div className="text-[13px] tracking-[0.1em] font-semibold">{m.title}</div>
+                <div className="text-[11px] mt-1.5 leading-snug"
+                  style={{ color: active ? "#555" : FAINT }}>{m.note}</div>
+              </button>
+            );
+          })}
+        </div>
+
         <div className="text-[12px] mt-5 leading-relaxed" style={{ color: FAINT }}>
-          Столько же получает каждый из 99 ботов. Взнос списывается с баланса,
+          {leverage > 1
+            ? "В маржинальном режиме плечо x10 действует и на вас, и на всех ботов. Позиция закрывается принудительно, когда собственные средства падают до 12% от её стоимости."
+            : "Столько же получает каждый из 99 ботов."}
+          {" "} Взнос списывается с баланса,
           а в конце сессии на баланс возвращается ваш итоговый капитал.
           Размер сессии меняет только масштаб денег — поведение рынка от него не зависит.
         </div>
       </div>
 
       <div className="max-w-md w-full mx-auto px-6 pb-8">
-        <button onClick={() => onStart(capital)}
-          className="w-full rounded-lg py-4 text-[15px] tracking-[0.15em] font-semibold"
+        <button onClick={() => onStart(capital, leverage)}
+          className="w-full rounded-lg py-4 text-[15px] tracking-[0.15em] font-semibold tap"
           style={{ backgroundColor: TEXT, color: BG }}>
-          ВОЙТИ В РЫНОК · {fmt(capital, 0)}
+          ВОЙТИ В РЫНОК · {fmt(capital, 0)}{leverage > 1 ? " · x10" : ""}
         </button>
       </div>
     </div>
@@ -2787,7 +2924,7 @@ const ROOM_NAMES = [
   "Rune", "Sable", "Tessa", "Umka", "Vega", "Wolf", "Xena", "Yuri", "Zara",
 ];
 
-function Matchmaking({ capital, onReady, onCancel }) {
+function Matchmaking({ capital, leverage = 1, onReady, onCancel }) {
   const [joined, setJoined] = useState(1);
   const [feed, setFeed] = useState(["вы вошли в комнату"]);
   const total = CONFIG.market.totalPlayers;
@@ -2832,6 +2969,8 @@ function Matchmaking({ capital, onReady, onCancel }) {
           <Line left="Взнос каждого" right={fmt(capital, 0)} />
           <Line left="Капитал комнаты" right={fmt(capital * total, 0)} />
           <Line left="Актив" right={CONFIG.market.assetSymbol} />
+          <Line left="Режим" right={leverage > 1 ? `маржинальный · плечо x${leverage}` : "обычный"}
+            color={leverage > 1 ? LONG : TEXT} />
         </div>
 
         <div className="mt-8 h-[110px]">
@@ -2899,7 +3038,8 @@ function PracticeApp({ onExit }) {
   const [screen, setScreen] = useState("lobby");
   const [result, setResult] = useState(null);
   const [session, setSession] = useState(null);
-  const [pending, setPending] = useState(null);   // взнос, пока идёт подбор
+  const [pending, setPending] = useState(null);   // взнос и режим, пока идёт подбор
+  const [leverage, setLeverage] = useState(1);
   const engineRef = useRef(null);
 
   const [snapshot, setSnapshot] = useState(null);
@@ -2939,16 +3079,20 @@ function PracticeApp({ onExit }) {
   const persist = (next) => { setProfile(next); saveProfile(next); };
 
   /** Первая фаза: подбор участников. Реальная комната ещё не создана. */
-  const queueSession = (capital) => { setPending(capital); setScreen("matching"); };
+  const queueSession = (capital, leverage = 1) => {
+    setPending({ capital, leverage });
+    setScreen("matching");
+  };
 
-  const startSession = (capital) => {
+  const startSession = ({ capital, leverage }) => {
     // Приложение больше не создаёт движок напрямую — только транспорт.
     // При переезде на сервер здесь меняется одна строка на RemoteTransport.
-    engineRef.current = new LocalTransport({ startingCapital: capital });
+    engineRef.current = new LocalTransport({ startingCapital: capital, leverage });
     setSize(String(Math.round(capital * 0.3)));
     setPaused(false);
     setTab("Рынок");
     setSession(capital);
+    setLeverage(leverage);
     setScreen("game");
     persist({ ...profile, wallet: profile.wallet - capital });
     setPending(null);
@@ -2970,6 +3114,7 @@ function PracticeApp({ onExit }) {
       ticks: snap.tick,
       price: snap.price,
       at: Date.now(),        // отметка времени для кривой "дневная динамика"
+      leverage,
     };
 
     persist({
@@ -3017,7 +3162,8 @@ function PracticeApp({ onExit }) {
     return <SessionSetup wallet={profile.wallet} onStart={queueSession} onBack={() => setScreen("lobby")} />;
   }
   if (screen === "matching" && pending !== null) {
-    return <Matchmaking capital={pending} onReady={() => startSession(pending)}
+    return <Matchmaking capital={pending.capital} leverage={pending.leverage}
+      onReady={() => startSession(pending)}
       onCancel={() => { setPending(null); setScreen("lobby"); }} />;
   }
   if (screen === "result" && result) {
@@ -3104,6 +3250,10 @@ function PracticeApp({ onExit }) {
         <div className="flex items-center justify-between px-5 py-3">
           <span className="text-[11px] tracking-[0.3em]" style={{ color: FAINT }}>
             {CONFIG.market.assetSymbol} · {fmt(session, 0)}
+            {leverage > 1 && (
+              <span className="ml-2 px-1.5 py-0.5 rounded font-semibold"
+                style={{ backgroundColor: RAISED, color: LONG }}>x{leverage}</span>
+            )}
           </span>
           <div className="flex items-center gap-4">
             <button onClick={togglePause} className="flex items-center gap-1.5">
@@ -3157,6 +3307,21 @@ function PracticeApp({ onExit }) {
 
           {tab === "Рынок" && (
             <div className="flex flex-col h-full">
+              {leverage > 1 && pos && human.marginLevel < snap.maintenance * 1.6 && (
+                <div className="mx-2 mb-1 rounded-lg px-3 py-2 text-[11px] tx-pop"
+                  style={{ backgroundColor: RAISED, color: SHORT, border: `1px solid ${SHORT}` }}>
+                  Маржа {(human.marginLevel * 100).toFixed(0)}% — до принудительного
+                  закрытия {(snap.maintenance * 100).toFixed(0)}%.
+                  {human.liquidationPrice
+                    ? ` Ликвидация около ${fmt(human.liquidationPrice)}.` : ""}
+                </div>
+              )}
+              {leverage > 1 && !pos && human.wasLiquidated && (
+                <div className="mx-2 mb-1 rounded-lg px-3 py-2 text-[11px]"
+                  style={{ backgroundColor: RAISED, color: DIM, border: `1px solid ${HAIR}` }}>
+                  Позиция была закрыта принудительно по маржин-коллу.
+                </div>
+              )}
               <div className="px-5 pt-1 flex items-end justify-between">
                 <div>
                   <div className="text-[46px] leading-none font-mono tracking-tight">
@@ -3205,7 +3370,8 @@ function PracticeApp({ onExit }) {
 
               <div className="px-2 pt-1 flex-1 min-h-0">
                 <Chart state={state} timeframe={timeframe} mode={chartMode}
-                  entryPrice={pos?.entryPrice} stopLoss={human.stopLoss} takeProfit={human.takeProfit} />
+                  entryPrice={pos?.entryPrice} stopLoss={human.stopLoss} takeProfit={human.takeProfit}
+                  liquidationPrice={human.liquidationPrice} />
               </div>
 
               <div className="px-5 pb-4 grid grid-cols-4 gap-3">
@@ -3215,6 +3381,13 @@ function PracticeApp({ onExit }) {
                   value={pos ? `${pos.side === "long" ? "LONG" : "SHORT"} ${fmt(pos.margin, 0)}` : "—"}
                   color={pos ? (pos.side === "long" ? LONG : SHORT) : TEXT} />
                 <Metric label="PNL" value={pos ? fmtSigned(pnl) : "—"} color={pnlColor} />
+                {leverage > 1 && (
+                  <Metric label="МАРЖА"
+                    value={pos ? `${(human.marginLevel * 100).toFixed(0)}%` : "—"}
+                    color={!pos ? TEXT
+                      : human.marginLevel < snap.maintenance * 1.6 ? SHORT
+                      : human.marginLevel < snap.maintenance * 3 ? TEXT : LONG} />
+                )}
               </div>
             </div>
           )}
@@ -3396,6 +3569,10 @@ function PracticeApp({ onExit }) {
               <Line left="Оборот за тик" right={fmt((state.buyPressure ?? 0) + (state.sellPressure ?? 0))} />
               <Line left="Заработали лонги" right={fmtSigned(state.longRealized ?? 0)}
                 color={(state.longRealized ?? 0) >= 0 ? LONG : SHORT} />
+              <Line left="Плечо" right={`x${snap.leverage ?? 1}`} />
+              <Line left="Поддерживающая маржа"
+                right={`${((snap.maintenance ?? 0) * 100).toFixed(0)}%`} />
+              <Line left="Ликвидаций в сессии" right={String(snap.liquidations ?? 0)} />
               <Line left="Заработали шорты" right={fmtSigned(state.shortRealized ?? 0)}
                 color={(state.shortRealized ?? 0) >= 0 ? LONG : SHORT} />
               <Line left="Ликвидность" right={fmt(state.liquidity)} />
@@ -3553,7 +3730,9 @@ function PracticeApp({ onExit }) {
                   style={{ color: TEXT }} />
               </div>
               {[0.25, 0.5, 1].map((f) => (
-                <button key={f} onClick={() => setSize(String(Math.round(human.cash * f)))}
+                <button key={f}
+                  onClick={() => setSize(String(Math.round(
+                    (leverage > 1 ? human.buyingPower : human.cash) * f)))}
                   className="px-2.5 py-2.5 rounded font-mono text-[11px] font-semibold tap"
                   style={{ backgroundColor: RAISED, color: TEXT, border: `1px solid ${HAIR}` }}>
                   {f * 100}%
