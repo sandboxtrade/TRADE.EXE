@@ -876,31 +876,108 @@ const fmtSigned = (v, d = 2) => `${v >= 0 ? "+" : "−"}${fmt(Math.abs(v), d).re
 
 /* --------------------------------- ГРАФИК --------------------------------- */
 const CW = 700, AXIS = 74, CH = 340, VH = 60, MAX_CANDLES = 60;
+const MIN_CANDLES = 12, MAX_VISIBLE = 240;   // границы щипкового масштаба
+const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
 
 function Chart({ state, timeframe, mode, entryPrice, stopLoss, takeProfit }) {
   const bucketMs = TIMEFRAMES.find((t) => t.label === timeframe)?.ms ?? 1000;
-  const candles = buildCandles(state.priceHistory, bucketMs, MAX_CANDLES);
-  if (candles.length < 2) {
-    return <div style={{ height: "100%", minHeight: 160 }} className="flex items-center justify-center text-[12px]"
-      >{<span style={{ color: FAINT }}>собираем свечи…</span>}</div>;
-  }
 
-  let min = Infinity, max = -Infinity, maxVol = 0;
+  /* ---------------------- масштаб пальцами (pinch) ----------------------
+     visible — сколько свечей влезает по ширине. Щипок двумя пальцами
+     меняет это число; одним пальцем страница по-прежнему скроллится,
+     поэтому touch-action оставлен pan-y, а preventDefault вызывается
+     только когда касаний ровно два. */
+  const [visible, setVisible] = useState(MAX_CANDLES);
+  const box = useRef(null);
+  const pinch = useRef(null);
+  const visRef = useRef(MAX_CANDLES);
+  visRef.current = visible;
+
+  // Слушатели вешаются вручную с passive:false. React регистрирует
+  // touchmove и wheel пассивно, и внутри них preventDefault() не работает —
+  // страница уезжала бы вместе с щипком.
+  useEffect(() => {
+    const el = box.current;
+    if (!el) return;
+    const dist = (t) => Math.hypot(
+      t[0].clientX - t[1].clientX, t[0].clientY - t[1].clientY);
+
+    const start = (e) => {
+      if (e.touches.length === 2) pinch.current = { d: dist(e.touches), v: visRef.current };
+    };
+    const move = (e) => {
+      if (e.touches.length !== 2 || !pinch.current) return;
+      e.preventDefault();
+      const k = dist(e.touches) / Math.max(1, pinch.current.d);
+      // Разводим пальцы -> свечей меньше -> график крупнее.
+      setVisible(clamp(Math.round(pinch.current.v / k), MIN_CANDLES, MAX_VISIBLE));
+    };
+    const end = () => { pinch.current = null; };
+    const wheel = (e) => {
+      e.preventDefault();
+      setVisible((v) => clamp(Math.round(v * (e.deltaY > 0 ? 1.12 : 0.89)),
+        MIN_CANDLES, MAX_VISIBLE));
+    };
+
+    el.addEventListener("touchstart", start, { passive: true });
+    el.addEventListener("touchmove", move, { passive: false });
+    el.addEventListener("touchend", end, { passive: true });
+    el.addEventListener("touchcancel", end, { passive: true });
+    el.addEventListener("wheel", wheel, { passive: false });
+    return () => {
+      el.removeEventListener("touchstart", start);
+      el.removeEventListener("touchmove", move);
+      el.removeEventListener("touchend", end);
+      el.removeEventListener("touchcancel", end);
+      el.removeEventListener("wheel", wheel);
+    };
+  }, []);
+
+  const candles = buildCandles(state.priceHistory, bucketMs, visible);
+
+  /* ------------------- сглаживание вертикальной шкалы -------------------
+     Раньше min/max пересчитывались от нуля на каждом тике, и вся шкала
+     дёргалась вместе с ценой. Теперь считается цель, а фактические
+     границы подтягиваются к ней долями — график плывёт, а не прыгает. */
+  const scale = useRef(null);
+
+  let tMin = Infinity, tMax = -Infinity, maxVol = 0;
   for (const c of candles) {
-    min = Math.min(min, c.low); max = Math.max(max, c.high);
+    tMin = Math.min(tMin, c.low); tMax = Math.max(tMax, c.high);
     maxVol = Math.max(maxVol, c.volume);
   }
   for (const level of [entryPrice, stopLoss, takeProfit]) {
-    if (level && level > min * 0.94 && level < max * 1.06) { min = Math.min(min, level); max = Math.max(max, level); }
+    if (level && level > tMin * 0.94 && level < tMax * 1.06) {
+      tMin = Math.min(tMin, level); tMax = Math.max(tMax, level);
+    }
   }
-  const pad = Math.max((max - min) * 0.1, max * 0.0015);
-  min -= pad; max += pad;
+
+  if (candles.length < 2 || !Number.isFinite(tMin) || !Number.isFinite(tMax)) {
+    return (
+      <div style={{ height: "100%", minHeight: 160 }}
+        className="flex items-center justify-center text-[12px]">
+        <span style={{ color: FAINT }}>собираем свечи…</span>
+      </div>
+    );
+  }
+
+  const tPad = Math.max((tMax - tMin) * 0.12, tMax * 0.0015);
+  const targetMin = tMin - tPad, targetMax = tMax + tPad;
+
+  const prev = scale.current;
+  // Первый кадр и смена таймфрейма/зума — сразу в цель, без «наезда».
+  const jump = !prev || prev.tf !== timeframe || prev.visible !== visible;
+  const EASE = 0.16;
+  const min = jump ? targetMin : prev.min + (targetMin - prev.min) * EASE;
+  const max = jump ? targetMax : prev.max + (targetMax - prev.max) * EASE;
+  scale.current = { min, max, tf: timeframe, visible };
+
   const span = max - min || 1;
   const toY = (p) => CH - ((p - min) / span) * CH;
 
-  const slot = CW / MAX_CANDLES;
-  const body = Math.max(2, slot * 0.55);
-  const offset = Math.max(0, MAX_CANDLES - candles.length);
+  const slot = CW / visible;
+  const body = Math.max(1.2, slot * 0.55);
+  const offset = Math.max(0, visible - candles.length);
   const grid = Array.from({ length: 5 }, (_, i) => min + (span * i) / 4);
   const priceY = toY(state.price);
 
@@ -913,6 +990,15 @@ function Chart({ state, timeframe, mode, entryPrice, stopLoss, takeProfit }) {
     ) : null;
 
   return (
+    <div ref={box} className="w-full h-full relative"
+      style={{ touchAction: "pan-y", height: "100%", minHeight: 160 }}>
+      {visible !== MAX_CANDLES && (
+        <button onClick={() => setVisible(MAX_CANDLES)}
+          className="absolute top-1 left-1 z-10 px-2 py-1 rounded text-[10px] font-mono tap"
+          style={{ backgroundColor: RAISED, color: DIM, border: `1px solid ${HAIR}` }}>
+          {visible} св. · сброс
+        </button>
+      )}
     <svg viewBox={`0 0 ${CW + AXIS} ${CH + VH + 4}`} preserveAspectRatio="none"
       className="w-full" style={{ height: "100%", minHeight: 160 }}>
       {grid.map((p, i) => (
@@ -959,12 +1045,16 @@ function Chart({ state, timeframe, mode, entryPrice, stopLoss, takeProfit }) {
           fill={c.close >= c.open ? LONG : SHORT} opacity={0.35} />;
       })}
 
-      <line x1={0} x2={CW} y1={priceY} y2={priceY} stroke={TEXT} strokeWidth={1} strokeDasharray="3 3" opacity={0.4} />
-      <rect x={CW + 2} y={priceY - 12} width={AXIS - 4} height={24} rx={3}
-        fill={state.price >= state.previousPrice ? LONG : SHORT} />
-      <text x={CW + AXIS / 2} y={priceY + 5} textAnchor="middle" fill={BG}
-        fontSize={13} fontFamily="monospace" fontWeight="700">{state.price.toFixed(2)}</text>
+      <g style={{ transition: "transform 90ms linear" }}>
+        <line x1={0} x2={CW} y1={priceY} y2={priceY} stroke={TEXT} strokeWidth={1}
+          strokeDasharray="3 3" opacity={0.4} />
+        <rect x={CW + 2} y={priceY - 12} width={AXIS - 4} height={24} rx={3}
+          fill={state.price >= state.previousPrice ? LONG : SHORT} />
+        <text x={CW + AXIS / 2} y={priceY + 5} textAnchor="middle" fill={BG}
+          fontSize={13} fontFamily="monospace" fontWeight="700">{state.price.toFixed(2)}</text>
+      </g>
     </svg>
+    </div>
   );
 }
 
@@ -1091,6 +1181,12 @@ const GLOBAL_CSS = `
 @keyframes tx-sheet   { from { opacity: 0; transform: translateY(28px); }
                           to { opacity: 1; transform: none; } }
 @keyframes tx-spin    { to { transform: rotate(360deg); } }
+@keyframes tx-dome-spin { from { transform: rotateZ(0deg) scaleX(1); }
+                          50%  { transform: scaleX(.86); }
+                          to   { transform: scaleX(1); } }
+@keyframes tx-twinkle { 0%,100% { opacity: .18; } 50% { opacity: .9; } }
+@keyframes tx-wave    { 0%,100% { transform: translateY(0); }
+                        50% { transform: translateY(-4px); } }
 
 .tx-screen { animation: tx-fade-up .34s cubic-bezier(.22,.9,.3,1) both; }
 .tx-in     { animation: tx-fade-up .38s cubic-bezier(.22,.9,.3,1) both; }
@@ -1100,6 +1196,9 @@ const GLOBAL_CSS = `
 .tx-dot    { animation: tx-pulse 2s ease-in-out infinite; }
 .tx-spin   { animation: tx-spin 1.1s linear infinite; }
 .tx-line   { stroke-dasharray: var(--len); animation: tx-draw .7s ease-out both; }
+.tx-dome    { transform-origin: 80px 70px; animation: tx-dome-spin 7s ease-in-out infinite; }
+.tx-twinkle { animation: tx-twinkle 2.6s ease-in-out infinite; }
+.tx-wave    { animation: tx-wave 4.2s ease-in-out infinite; }
 
 /* Нажатие: лёгкое сжатие. Работает и на тач-устройствах. */
 .tap { transition: transform .12s ease, opacity .12s ease, background-color .18s ease,
@@ -1107,8 +1206,8 @@ const GLOBAL_CSS = `
 .tap:active { transform: scale(.97); opacity: .9; }
 
 @media (prefers-reduced-motion: reduce) {
-  .tx-screen, .tx-in, .tx-fade, .tx-pop, .tx-sheet, .tx-dot, .tx-line, .tx-spin
-    { animation: none !important; }
+  .tx-screen, .tx-in, .tx-fade, .tx-pop, .tx-sheet, .tx-dot, .tx-line, .tx-spin,
+  .tx-dome, .tx-twinkle, .tx-wave { animation: none !important; }
 }
 `;
 
@@ -1490,6 +1589,33 @@ const Icon = ({ name, size = 16, color = TEXT }) => {
   if (name === "chevron") return (
     <svg {...common}><path d="M9 6l6 6-6 6" /></svg>
   );
+  if (name === "home") return (
+    <svg {...common}><path d="M4 11l8-7 8 7v8a1 1 0 0 1-1 1h-4v-6H9v6H5a1 1 0 0 1-1-1z" /></svg>
+  );
+  if (name === "candles") return (
+    <svg {...common}><path d="M7 4v16M12 2v20M17 6v12" />
+      <rect x="4.5" y="8" width="5" height="8" /><rect x="9.5" y="6" width="5" height="12" />
+      <rect x="14.5" y="10" width="5" height="5" /></svg>
+  );
+  if (name === "trophy") return (
+    <svg {...common}><path d="M7 4h10v5a5 5 0 0 1-10 0z" />
+      <path d="M7 5H4v2a3 3 0 0 0 3 3M17 5h3v2a3 3 0 0 1-3 3" />
+      <path d="M10 14h4l.5 4h-5z" /><path d="M8 20h8" /></svg>
+  );
+  if (name === "clock") return (
+    <svg {...common}><circle cx="12" cy="12" r="8.5" /><path d="M12 7v5.5l3.5 2" /></svg>
+  );
+  if (name === "card") return (
+    <svg {...common}><rect x="2.5" y="5.5" width="19" height="13" rx="2" />
+      <path d="M2.5 10h19M6 15h4" /></svg>
+  );
+  if (name === "coin") return (
+    <svg {...common}><circle cx="12" cy="12" r="8.5" /><path d="M8 9h8M12 9v7" /></svg>
+  );
+  if (name === "dots") return (
+    <svg {...common}><circle cx="6" cy="12" r="1.2" fill={color} /><circle cx="12" cy="12" r="1.2" fill={color} />
+      <circle cx="18" cy="12" r="1.2" fill={color} /></svg>
+  );
   if (name === "check") return (
     <svg {...common}><path d="M5 12l5 5 9-10" /></svg>
   );
@@ -1713,202 +1839,627 @@ function StatsSheet({ profile, onClose }) {
   );
 }
 
-function Lobby({ profile, account, onNew, onReset, onExit, onSignOut }) {
+function ModeArt({ kind }) {
+  // Онлайн: вращающийся каркасный купол. Офлайн: точечная волна.
+  // Обе картинки — чистый SVG с CSS-анимацией, без внешних файлов.
+  if (kind === "online") {
+    const rings = [0.30, 0.48, 0.66, 0.84, 1.0];
+    return (
+      <svg viewBox="0 0 160 96" className="w-full" style={{ height: 96 }}>
+        <g className="tx-dome">
+          {rings.map((k, i) => (
+            <ellipse key={i} cx="80" cy="70" rx={64 * k} ry={22 * k}
+              fill="none" stroke={LONG} strokeWidth="0.7"
+              opacity={0.16 + i * 0.11} />
+          ))}
+          {Array.from({ length: 14 }, (_, i) => {
+            const a = (i / 14) * Math.PI * 2;
+            return (
+              <line key={i} x1="80" y1="70"
+                x2={80 + Math.cos(a) * 64} y2={70 + Math.sin(a) * 22}
+                stroke={LONG} strokeWidth="0.5" opacity="0.22" />
+            );
+          })}
+          {Array.from({ length: 22 }, (_, i) => {
+            const a = (i / 22) * Math.PI * 2;
+            const k = rings[i % rings.length];
+            return (
+              <circle key={i} cx={80 + Math.cos(a) * 64 * k} cy={70 + Math.sin(a) * 22 * k}
+                r="1.3" fill={LONG} opacity={0.35 + (i % 5) * 0.12}
+                className="tx-twinkle" style={{ animationDelay: `${(i % 7) * 260}ms` }} />
+            );
+          })}
+        </g>
+        <circle cx="80" cy="70" r="2.4" fill={LONG} className="tx-dot" />
+      </svg>
+    );
+  }
+  const rows = 7, cols = 22;
+  return (
+    <svg viewBox="0 0 160 96" className="w-full" style={{ height: 96 }}>
+      {Array.from({ length: rows }, (_, r) => (
+        <g key={r} className="tx-wave" style={{ animationDelay: `${r * 190}ms` }}>
+          {Array.from({ length: cols }, (_, c) => {
+            const depth = r / (rows - 1);
+            const x = 12 + (c / (cols - 1)) * 136;
+            const y = 40 + depth * 46 + Math.sin((c / cols) * Math.PI * 2 + r * 0.7) * 6 * (1 - depth * 0.4);
+            return <circle key={c} cx={x} cy={y} r={0.7 + depth * 1.1}
+              fill={TEXT} opacity={0.12 + depth * 0.45} />;
+          })}
+        </g>
+      ))}
+    </svg>
+  );
+}
+
+/** Карточка выбора режима. */
+function ModeCard({ kind, title, text, cta, primary, onClick, disabled }) {
+  return (
+    <div className="rounded-2xl p-3.5 flex flex-col flex-1 min-w-0"
+      style={{ backgroundColor: SURFACE, border: `1px solid ${HAIR}` }}>
+      <div className="text-[11px] tracking-[0.18em] font-semibold">{title}</div>
+      <div className="my-2 overflow-hidden rounded-xl"
+        style={{ backgroundColor: "#08080A" }}>
+        <ModeArt kind={kind} />
+      </div>
+      <div className="text-[11px] leading-snug mb-3 min-h-[30px]" style={{ color: DIM }}>{text}</div>
+      <button onClick={onClick} disabled={disabled}
+        className="w-full rounded-xl py-3 text-[11px] tracking-[0.15em] font-bold tap disabled:opacity-45"
+        style={primary
+          ? { backgroundColor: TEXT, color: BG }
+          : { backgroundColor: RAISED, color: TEXT, border: "1px solid #3A3A40" }}>
+        {cta}
+      </button>
+    </div>
+  );
+}
+
+/* ------------------------------ ПОПОЛНЕНИЕ -------------------------------
+   Интерфейс готов, платёжный провайдер не подключён. Кнопка «ПОПОЛНИТЬ»
+   намеренно ничего не списывает и не зачисляет — она сообщает, что оплаты
+   пока нет. Отдельная демо-кнопка начисляет практические доллары, чтобы
+   можно было продолжать играть.
+   ------------------------------------------------------------------------ */
+const PAY_METHODS = [
+  { id: "card", label: "Банковская карта", sub: "•••• 4242", icon: "card", tint: TEXT },
+  { id: "trc", label: "USDT (TRC20)", icon: "coin", tint: LONG },
+  { id: "erc", label: "USDT (ERC20)", icon: "coin", tint: LONG },
+  { id: "btc", label: "BTC", icon: "coin", tint: "#F7931A" },
+  { id: "other", label: "Другой способ", icon: "dots", tint: DIM },
+];
+
+function DepositScreen({ profile, onBack, onDemoTopUp }) {
+  const [amount, setAmount] = useState("100");
+  const [method, setMethod] = useState("card");
+  const [note, setNote] = useState(null);
+  const value = Number(amount.replace(/[^\d.]/g, "")) || 0;
+  const ok = value >= 10;
+
+  return (
+    <div className="w-full flex flex-col tx-screen"
+      style={{ height: "100dvh", backgroundColor: BG, color: TEXT }}>
+      <div className="max-w-md w-full mx-auto flex-1 min-h-0 overflow-y-auto no-scrollbar px-5 pt-5 pb-4">
+        <div className="flex items-center gap-4">
+          <button onClick={onBack} className="text-[20px] leading-none py-1 tap">←</button>
+          <div className="text-[11px] tracking-[0.25em]" style={{ color: DIM }}>
+            ПОПОЛНЕНИЕ БАЛАНСА
+          </div>
+        </div>
+
+        <div className="text-[10px] tracking-[0.25em] mt-6" style={{ color: FAINT }}>
+          ТЕКУЩИЙ БАЛАНС
+        </div>
+        <div className="text-[30px] font-mono leading-none mt-2 tx-pop">{fmt(profile.wallet, 0)}</div>
+
+        <div className="text-[10px] tracking-[0.25em] mt-6 mb-2" style={{ color: FAINT }}>
+          СУММА ПОПОЛНЕНИЯ
+        </div>
+        <div className="flex items-center rounded-xl px-4"
+          style={{ backgroundColor: RAISED, border: `1px solid ${HAIR}` }}>
+          <span className="text-[16px] font-mono" style={{ color: DIM }}>$</span>
+          <input value={amount} onChange={(e) => setAmount(e.target.value)}
+            inputMode="decimal"
+            className="flex-1 min-w-0 bg-transparent outline-none py-4 pl-1 text-[16px] font-mono"
+            style={{ color: TEXT }} />
+        </div>
+
+        <div className="grid grid-cols-4 gap-2 mt-2">
+          {[50, 100, 250, 500].map((v) => (
+            <button key={v} onClick={() => setAmount(String(v))}
+              className="rounded-xl py-3 text-[12px] font-mono font-semibold tap"
+              style={{ backgroundColor: String(v) === amount ? TEXT : RAISED,
+                color: String(v) === amount ? BG : TEXT,
+                border: `1px solid ${String(v) === amount ? TEXT : HAIR}` }}>
+              ${v}
+            </button>
+          ))}
+        </div>
+
+        <div className="text-[10px] tracking-[0.25em] mt-7 mb-2" style={{ color: FAINT }}>
+          СПОСОБ ОПЛАТЫ
+        </div>
+        <div className="rounded-2xl overflow-hidden"
+          style={{ backgroundColor: SURFACE, border: `1px solid ${HAIR}` }}>
+          {PAY_METHODS.map((m, i) => (
+            <button key={m.id} onClick={() => setMethod(m.id)}
+              className={`w-full flex items-center gap-3 px-4 py-3.5 text-left tap ${i ? "border-t" : ""}`}
+              style={{ borderColor: HAIR,
+                backgroundColor: method === m.id ? RAISED : "transparent" }}>
+              <span className="w-8 h-8 rounded-lg flex items-center justify-center shrink-0"
+                style={{ backgroundColor: "#0E0E11" }}>
+                <Icon name={m.icon} size={16} color={m.tint} />
+              </span>
+              <span className="flex-1 min-w-0">
+                <span className="block text-[13px] truncate">{m.label}</span>
+                {m.sub && (
+                  <span className="block text-[11px] font-mono" style={{ color: FAINT }}>{m.sub}</span>
+                )}
+              </span>
+              <span className="w-[18px] h-[18px] rounded-full shrink-0 flex items-center justify-center"
+                style={{ border: `1.5px solid ${method === m.id ? LONG : DIM}` }}>
+                {method === m.id && (
+                  <span className="w-2 h-2 rounded-full" style={{ backgroundColor: LONG }} />
+                )}
+              </span>
+            </button>
+          ))}
+        </div>
+
+        {note && (
+          <div className="text-[12px] text-center mt-5 leading-snug tx-pop" style={{ color: DIM }}>
+            {note}
+          </div>
+        )}
+      </div>
+
+      <div className="max-w-md w-full mx-auto px-5 pb-5 pt-2 shrink-0">
+        <button disabled={!ok}
+          onClick={() => setNote("Приём оплат ещё не подключён. Пока баланс можно пополнить только в демо-режиме.")}
+          className="w-full rounded-2xl py-4 text-[13px] tracking-[0.25em] font-bold tap disabled:opacity-40"
+          style={{ backgroundColor: TEXT, color: BG }}>
+          ПОПОЛНИТЬ
+        </button>
+        <button disabled={!ok} onClick={() => { onDemoTopUp(value); onBack(); }}
+          className="w-full py-3 mt-2 text-[11px] tracking-[0.2em] tap disabled:opacity-40"
+          style={{ color: DIM }}>
+          НАЧИСЛИТЬ {fmt(value, 0)} В ДЕМО-РЕЖИМЕ
+        </button>
+        <div className="text-[11px] text-center mt-1" style={{ color: FAINT }}>
+          Минимальная сумма — $10
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* -------------------------------- РЕЙТИНГ --------------------------------
+   Таблица собирается детерминированно из зерна периода, а результат игрока
+   берётся из его реальной истории. Это витрина под будущий серверный
+   лидерборд: когда появится Firestore, меняется только источник rows.
+   ------------------------------------------------------------------------ */
+const RANK_NAMES = ["MarketKing", "TraderOne", "AlphaWolf", "SigmaTrader", "FastHands",
+  "ByteBro", "ChartMaster", "GreenPips", "DarkPool", "NightDesk", "ColdEntry",
+  "TickHunter", "QuietSize", "RiskOff", "LateFill", "BlueTape", "SharpBid"];
+
+function RankingTab({ profile, period, onPeriod }) {
   const st = profileStats(profile);
+  const seed = { "ДЕНЬ": 11, "НЕДЕЛЯ": 27, "МЕСЯЦ": 53, "ВСЁ ВРЕМЯ": 91 }[period] || 11;
+  const rnd = mulberry32(seed);
+  const scale = { "ДЕНЬ": 1, "НЕДЕЛЯ": 3.4, "МЕСЯЦ": 9, "ВСЁ ВРЕМЯ": 21 }[period] || 1;
+
+  const bots = RANK_NAMES.map((name) => ({
+    name, pnl: Math.round((400 + rnd() * 12000) * scale) / 100,
+  }));
+  const rows = [...bots, { name: "вы", pnl: st.total, me: true }]
+    .sort((a, b) => b.pnl - a.pnl)
+    .map((r, i) => ({ ...r, place: i + 1 }));
+
+  const podium = [rows[1], rows[0], rows[2]];
+
+  return (
+    <div className="px-5 pt-5">
+      <div className="text-[11px] tracking-[0.25em] text-center" style={{ color: DIM }}>
+        РЕЙТИНГ ИГРОКОВ
+      </div>
+
+      <div className="flex gap-1 p-1 rounded-2xl mt-5"
+        style={{ backgroundColor: SURFACE, border: `1px solid ${HAIR}` }}>
+        {["ДЕНЬ", "НЕДЕЛЯ", "МЕСЯЦ", "ВСЁ ВРЕМЯ"].map((p) => (
+          <button key={p} onClick={() => onPeriod(p)}
+            className="flex-1 rounded-xl py-2.5 text-[10px] tracking-[0.12em] font-semibold tap"
+            style={{ backgroundColor: p === period ? RAISED : "transparent",
+              color: p === period ? TEXT : FAINT,
+              border: `1px solid ${p === period ? "#3A3A40" : "transparent"}` }}>
+            {p}
+          </button>
+        ))}
+      </div>
+
+      <div className="flex items-end gap-2 mt-5">
+        {podium.map((r, i) => {
+          const first = i === 1;
+          return (
+            <div key={r.name}
+              className="flex-1 min-w-0 rounded-2xl px-2 py-3 text-center tx-in"
+              style={{ backgroundColor: first ? RAISED : SURFACE,
+                border: `1px solid ${first ? "#3A3A40" : HAIR}`,
+                marginBottom: first ? 0 : 8, ...stagger(i) }}>
+              {first && <div className="text-[13px] leading-none mb-1">♛</div>}
+              <div className="text-[15px] font-mono">{r.place}</div>
+              <div className="w-7 h-7 rounded-full mx-auto my-2"
+                style={{ backgroundColor: first ? TEXT : "#26262B" }} />
+              <div className="text-[11px] truncate" style={{ color: r.me ? LONG : TEXT }}>
+                {r.name}
+              </div>
+              <div className="text-[11px] font-mono mt-0.5"
+                style={{ color: r.pnl >= 0 ? LONG : SHORT }}>{fmtSigned(r.pnl, 0)}</div>
+            </div>
+          );
+        })}
+      </div>
+
+      <div className="flex items-center px-4 mt-6 mb-1 text-[9px] tracking-[0.15em]"
+        style={{ color: FAINT }}>
+        <span className="w-7">#</span>
+        <span className="flex-1">ИГРОК</span>
+        <span>РЕЗУЛЬТАТ</span>
+      </div>
+      <div className="rounded-2xl overflow-hidden"
+        style={{ backgroundColor: SURFACE, border: `1px solid ${HAIR}` }}>
+        {rows.slice(3).map((r, i) => (
+          <div key={r.name}
+            className={`flex items-center px-4 py-3 ${i ? "border-t" : ""}`}
+            style={{ borderColor: HAIR, backgroundColor: r.me ? RAISED : "transparent" }}>
+            <span className="w-7 text-[12px] font-mono" style={{ color: FAINT }}>{r.place}</span>
+            <span className="flex-1 min-w-0 text-[13px] truncate"
+              style={{ color: r.me ? LONG : TEXT }}>{r.name}</span>
+            <span className="text-[13px] font-mono"
+              style={{ color: r.pnl >= 0 ? LONG : SHORT }}>{fmtSigned(r.pnl, 0)}</span>
+          </div>
+        ))}
+      </div>
+
+      <div className="text-[11px] text-center mt-4 leading-snug" style={{ color: FAINT }}>
+        Соперники показаны для примера: общий рейтинг появится вместе с онлайн-режимом.
+        Ваша строка считается по реальной истории сессий.
+      </div>
+    </div>
+  );
+}
+
+/* --------------------------------- РЫНКИ --------------------------------- */
+function MarketsTab({ onPlay }) {
+  const m = CONFIG.market;
+  const row = (label, value) => (
+    <div className="flex justify-between py-2 text-[12px]" style={{ borderColor: HAIR }}>
+      <span style={{ color: DIM }}>{label}</span>
+      <span className="font-mono">{value}</span>
+    </div>
+  );
+  return (
+    <div className="px-5 pt-5">
+      <div className="text-[11px] tracking-[0.25em] text-center" style={{ color: DIM }}>
+        ДОСТУПНЫЕ РЫНКИ
+      </div>
+
+      <div className="rounded-2xl p-4 mt-5 tx-in"
+        style={{ backgroundColor: SURFACE, border: `1px solid ${HAIR}`, ...stagger(0) }}>
+        <div className="flex items-start justify-between gap-3">
+          <div>
+            <div className="text-[17px] font-mono">{m.assetSymbol}</div>
+            <div className="text-[11px] mt-1" style={{ color: DIM }}>закрытый рынок · практика</div>
+          </div>
+          <span className="px-2.5 py-1 rounded-full text-[10px] tracking-[0.15em]"
+            style={{ backgroundColor: RAISED, color: LONG, border: `1px solid ${HAIR}` }}>
+            ОТКРЫТ
+          </span>
+        </div>
+        <div className="my-3 rounded-xl overflow-hidden" style={{ backgroundColor: "#08080A" }}>
+          <ModeArt kind="offline" />
+        </div>
+        {row("Участников в комнате", m.totalPlayers)}
+        {row("Стартовая цена", fmt(m.initialPrice))}
+        {row("Взнос", m.capitalOptions.map((c) => fmt(c, 0)).join(" · "))}
+        {row("Тик", `${m.tickMs} мс`)}
+        <button onClick={onPlay}
+          className="w-full rounded-xl py-3.5 mt-3 text-[12px] tracking-[0.2em] font-bold tap"
+          style={{ backgroundColor: TEXT, color: BG }}>
+          ИГРАТЬ
+        </button>
+      </div>
+
+      {["BTC/USD", "ETH/USD", "Индекс страха"].map((name, i) => (
+        <div key={name}
+          className="rounded-2xl px-4 py-4 mt-2 flex items-center justify-between tx-in"
+          style={{ backgroundColor: SURFACE, border: `1px solid ${HAIR}`, ...stagger(i + 1) }}>
+          <div>
+            <div className="text-[14px] font-mono" style={{ color: DIM }}>{name}</div>
+            <div className="text-[11px] mt-1" style={{ color: FAINT }}>появится позже</div>
+          </div>
+          <span className="px-2.5 py-1 rounded-full text-[10px] tracking-[0.15em]"
+            style={{ backgroundColor: "#0E0E11", color: FAINT }}>СКОРО</span>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+/* --------------------------------- ИСТОРИЯ -------------------------------- */
+function HistoryTab({ profile }) {
+  const list = profile.sessions;
+  const card = { backgroundColor: SURFACE, border: `1px solid ${HAIR}` };
+  return (
+    <div className="px-5 pt-5">
+      <div className="text-[11px] tracking-[0.25em] text-center" style={{ color: DIM }}>
+        ИСТОРИЯ СЕССИЙ
+      </div>
+      {list.length === 0 ? (
+        <div className="rounded-2xl py-12 text-center text-[12px] mt-5"
+          style={{ ...card, color: FAINT }}>
+          здесь появятся результаты ваших сессий
+        </div>
+      ) : (
+        <div className="flex flex-col gap-2 mt-5">
+          {list.map((x, i) => (
+            <div key={i}
+              className="rounded-2xl px-4 py-3 flex items-center justify-between gap-3 tx-in"
+              style={{ ...card, ...stagger(Math.min(i, 8)) }}>
+              <div className="min-w-0">
+                <div className="text-[14px] font-mono truncate">
+                  {fmt(x.capital, 0)} → {fmt(x.equity)}
+                </div>
+                <div className="text-[11px] mt-1 truncate" style={{ color: FAINT }}>
+                  {x.at ? new Date(x.at).toLocaleDateString("ru-RU", { day: "numeric", month: "short" }) + " · " : ""}
+                  {clock(x.ticks * CONFIG.market.tickMs)} в рынке · {x.trades} сделок · место {x.rank} из {CONFIG.market.totalPlayers}
+                </div>
+              </div>
+              <span className="text-[14px] font-mono shrink-0"
+                style={{ color: x.pnl >= 0 ? LONG : SHORT }}>{fmtSigned(x.pnl)}</span>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* ------------------------------- НИЖНЕЕ МЕНЮ ------------------------------ */
+const TABS = [
+  { key: "home", label: "ГЛАВНАЯ", icon: "home" },
+  { key: "markets", label: "РЫНКИ", icon: "candles" },
+  { key: "rank", label: "РЕЙТИНГ", icon: "trophy" },
+  { key: "history", label: "ИСТОРИЯ", icon: "clock" },
+];
+
+function TabBar({ active, onChange }) {
+  return (
+    <div className="max-w-md w-full mx-auto grid grid-cols-4 shrink-0 pt-2 pb-5"
+      style={{ borderTop: `1px solid ${HAIR}` }}>
+      {TABS.map((t) => {
+        const on = t.key === active;
+        return (
+          <button key={t.key} onClick={() => onChange(t.key)}
+            className="flex flex-col items-center gap-1.5 py-1.5 tap">
+            <Icon name={t.icon} size={19} color={on ? LONG : FAINT} />
+            <span className="text-[9px] tracking-[0.12em]" style={{ color: on ? LONG : FAINT }}>
+              {t.label}
+            </span>
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
+/* --------------------------------- ЛОББИ --------------------------------- */
+function Lobby({ profile, account, onNew, onReset, onExit, onSignOut, onTopUp }) {
+  const st = profileStats(profile);
+  const [tab, setTab] = useState("home");
   const [stats, setStats] = useState(false);
-  const affordable = CONFIG.market.capitalOptions.some((c) => c <= profile.wallet);
+  const [deposit, setDeposit] = useState(false);
   const [range, setRange] = useState(LOBBY_RANGES[0]);
   const [rangeOpen, setRangeOpen] = useState(false);
-  const [showAll, setShowAll] = useState(false);
   const [menu, setMenu] = useState(false);
+  const [period, setPeriod] = useState("ДЕНЬ");
+  const [notice, setNotice] = useState(null);
 
   const now = Date.now();
   const inRange = profile.sessions.filter(
     (x) => Number.isFinite(x.at) && now - x.at <= range.ms);
   const rangeTotal = inRange.reduce((sum, x) => sum + x.pnl, 0);
-  const history = showAll ? profile.sessions : profile.sessions.slice(0, 3);
-
+  const affordable = CONFIG.market.capitalOptions.some((c) => c <= profile.wallet);
   const card = { backgroundColor: SURFACE, border: `1px solid ${HAIR}` };
 
   if (stats) return <StatsSheet profile={profile} onClose={() => setStats(false)} />;
+  if (deposit) {
+    return <DepositScreen profile={profile} onBack={() => setDeposit(false)}
+      onDemoTopUp={onTopUp} />;
+  }
 
   return (
     <div className="w-full flex flex-col tx-screen"
       style={{ height: "100dvh", backgroundColor: BG, color: TEXT }}>
-      <div className="max-w-md w-full mx-auto flex-1 min-h-0 overflow-y-auto no-scrollbar px-5 pt-5 pb-3">
+      <div className="flex-1 min-h-0 overflow-y-auto no-scrollbar">
+        <div className="max-w-md w-full mx-auto pb-4">
 
-        {/* ------------------------------- шапка ------------------------------ */}
-        <div className="flex items-start justify-between gap-3 tx-in" style={stagger(0)}>
-          <div className="min-w-0">
-            <div className="text-[10px] tracking-[0.35em]" style={{ color: FAINT }}>
-              ЗАКРЫТЫЙ РЫНОК · ПРАКТИКА
-            </div>
-            <div className="text-[30px] leading-none tracking-tight mt-2">trade.exe</div>
-          </div>
-          <div className="flex gap-2">
-            <IconButton name="bars" active={stats} onClick={() => setStats(true)} />
-            <IconButton name="gear" active={menu} onClick={() => setMenu((v) => !v)} />
-          </div>
-        </div>
-
-        {menu && (
-          <div className="mt-4 rounded-2xl p-2 flex flex-col tx-pop" style={card}>
-            <button onClick={() => { onReset(); setMenu(false); }}
-              className="text-left px-3 py-3 rounded-xl text-[13px]"
-              style={{ color: TEXT }}>
-              Пополнить баланс до {fmt(STARTING_WALLET, 0)}
-            </button>
-            {onExit && (
-              <button onClick={onExit} className="text-left px-3 py-3 rounded-xl text-[13px]"
-                style={{ color: DIM }}>
-                Сменить режим
-              </button>
-            )}
-            {onSignOut && (
-              <button onClick={onSignOut} className="text-left px-3 py-3 rounded-xl text-[13px]"
-                style={{ color: SHORT }}>
-                Выйти из аккаунта{account?.email ? ` · ${account.email}` : ""}
-              </button>
-            )}
-          </div>
-        )}
-
-        {/* ------------------------------ баланс ------------------------------ */}
-        <div className="text-[10px] tracking-[0.3em] mt-6" style={{ color: FAINT }}>БАЛАНС</div>
-        <div className="flex items-center justify-between gap-3 mt-2">
-          <div className="text-[38px] leading-none font-mono tracking-tight truncate tx-pop">
-            {fmt(profile.wallet, 0)}
-          </div>
-          <div className="flex items-center gap-2 px-3 py-2 rounded-full shrink-0" style={card}>
-            <span className="w-1.5 h-1.5 rounded-full tx-dot" style={{ backgroundColor: LONG }} />
-            <span className="text-[10px] tracking-[0.2em]" style={{ color: TEXT }}>ОНЛАЙН</span>
-          </div>
-        </div>
-        <div className="text-[13px] font-mono mt-2"
-          style={{ color: st.total > 0 ? LONG : st.total < 0 ? SHORT : DIM }}>
-          {st.count === 0 ? "сессий ещё не было" : `${fmtSigned(st.total)} за ${st.count} сесс.`}
-        </div>
-
-        {/* ---------------------------- статистика ---------------------------- */}
-        <div className="rounded-2xl px-4 py-3.5 mt-5 tx-in" style={{ ...card, ...stagger(1) }}>
-          <div className="grid grid-cols-4 gap-2">
-            {[
-              ["СЕССИЙ", String(st.count), TEXT, "flag"],
-              ["ПРИБЫЛЬНЫХ", st.count ? String(st.wins) : "—", st.wins > 0 ? LONG : TEXT, "trend"],
-              ["ЛУЧШАЯ", st.count ? fmtSigned(st.best, 0) : "—", st.best > 0 ? LONG : TEXT, "star"],
-              ["ХУДШАЯ", st.count ? fmtSigned(st.worst, 0) : "—", st.worst < 0 ? SHORT : TEXT, "star"],
-            ].map(([label, value, color, icon]) => (
-              <div key={label} className="min-w-0">
-                <div className="text-[9px] tracking-[0.1em] mb-1.5 truncate" style={{ color: FAINT }}>
-                  {label}
+          {tab === "home" && (
+            <div className="px-5 pt-5">
+              {/* --------------------------- шапка --------------------------- */}
+              <div className="flex items-start justify-between gap-3 tx-in" style={stagger(0)}>
+                <div className="min-w-0">
+                  <Logo size={46} />
+                  <div className="text-[19px] tracking-tight mt-1">trade.exe</div>
                 </div>
-                <div className="text-[16px] font-mono truncate" style={{ color }}>{value}</div>
-                <div className="mt-2"><Icon name={icon} size={13} color={FAINT} /></div>
+                <div className="flex gap-2">
+                  <IconButton name="bars" active={false} onClick={() => setStats(true)} />
+                  <IconButton name="gear" active={menu} onClick={() => setMenu((v) => !v)} />
+                </div>
               </div>
-            ))}
-          </div>
-        </div>
 
-        {/* ------------------------- дневная динамика ------------------------- */}
-        <div className="text-[10px] tracking-[0.3em] mt-6 mb-2.5" style={{ color: FAINT }}>
-          ДНЕВНАЯ ДИНАМИКА
-        </div>
-        <div className="rounded-2xl px-4 py-3.5 tx-in" style={{ ...card, ...stagger(2) }}>
-          <div className="flex items-start justify-between gap-3">
-            <div className="min-w-0">
-              <div className="text-[20px] font-mono leading-none"
-                style={{ color: rangeTotal > 0 ? LONG : rangeTotal < 0 ? SHORT : TEXT }}>
-                {inRange.length ? fmtSigned(rangeTotal) : "—"}
-              </div>
-              <div className="text-[12px] mt-1.5" style={{ color: DIM }}>суммарный результат</div>
-            </div>
-            <div className="relative shrink-0">
-              <button onClick={() => setRangeOpen((v) => !v)}
-                className="flex items-center gap-2 px-3 py-2 rounded-xl text-[11px] tracking-[0.15em] tap"
-                style={{ backgroundColor: RAISED, color: TEXT, border: `1px solid ${HAIR}` }}>
-                {range.key}<Icon name="caret" size={13} color={DIM} />
-              </button>
-              {rangeOpen && (
-                <div className="absolute right-0 mt-1 rounded-xl overflow-hidden z-10 tx-pop"
-                  style={{ ...card, backgroundColor: RAISED }}>
-                  {LOBBY_RANGES.map((r) => (
-                    <button key={r.key} onClick={() => { setRange(r); setRangeOpen(false); }}
-                      className="block w-full text-left px-4 py-2.5 text-[11px] tracking-[0.15em] whitespace-nowrap"
-                      style={{ color: r.key === range.key ? TEXT : DIM }}>
-                      {r.key}
+              {menu && (
+                <div className="mt-4 rounded-2xl p-2 flex flex-col tx-pop" style={card}>
+                  <button onClick={() => { onReset(); setMenu(false); }}
+                    className="text-left px-3 py-3 rounded-xl text-[13px] tap" style={{ color: TEXT }}>
+                    Сбросить баланс до {fmt(STARTING_WALLET, 0)}
+                  </button>
+                  {onExit && (
+                    <button onClick={onExit} className="text-left px-3 py-3 rounded-xl text-[13px] tap"
+                      style={{ color: DIM }}>Сменить режим</button>
+                  )}
+                  {onSignOut && (
+                    <button onClick={onSignOut} className="text-left px-3 py-3 rounded-xl text-[13px] tap"
+                      style={{ color: SHORT }}>
+                      Выйти{account?.email ? ` · ${account.email}` : ""}
                     </button>
+                  )}
+                </div>
+              )}
+
+              {/* -------------------------- баланс --------------------------- */}
+              <div className="text-[10px] tracking-[0.3em] mt-5" style={{ color: FAINT }}>БАЛАНС</div>
+              <div className="flex items-end justify-between gap-3 mt-1.5">
+                <div className="text-[36px] leading-none font-mono tracking-tight truncate tx-pop">
+                  {fmt(profile.wallet, 0)}
+                </div>
+                <div className="flex items-center gap-2 px-3 py-1.5 rounded-full shrink-0" style={card}>
+                  <span className="w-1.5 h-1.5 rounded-full tx-dot" style={{ backgroundColor: LONG }} />
+                  <span className="text-[10px] tracking-[0.2em]">ОНЛАЙН</span>
+                </div>
+              </div>
+              <div className="text-[13px] font-mono mt-2"
+                style={{ color: st.total > 0 ? LONG : st.total < 0 ? SHORT : DIM }}>
+                {st.count === 0 ? "сессий ещё не было" : `${fmtSigned(st.total)} за ${st.count} сесс.`}
+              </div>
+
+              {/* --------------------------- режимы -------------------------- */}
+              <div className="flex gap-2.5 mt-5 tx-in" style={stagger(1)}>
+                <ModeCard kind="online" title="ОНЛАЙН РЫНОК"
+                  text="Торгуй с реальными игроками в реальном времени"
+                  cta="ИГРАТЬ ОНЛАЙН" primary
+                  onClick={() => setNotice("Онлайн-комнаты появятся после подключения сервера. Пока доступна офлайн-практика.")} />
+                <ModeCard kind="offline" title="ОФЛАЙН ПРАКТИКА"
+                  text="Практикуй стратегии без риска для баланса"
+                  cta="ИГРАТЬ ОФЛАЙН" onClick={onNew} disabled={!affordable} />
+              </div>
+
+              {notice && (
+                <div className="text-[12px] mt-3 rounded-xl px-4 py-3 leading-snug tx-pop"
+                  style={{ ...card, color: DIM }}>{notice}</div>
+              )}
+
+              {/* ------------------------- статистика ------------------------ */}
+              <div className="rounded-2xl px-4 py-3.5 mt-5 tx-in" style={{ ...card, ...stagger(2) }}>
+                <div className="grid grid-cols-4 gap-2">
+                  {[
+                    ["СЕССИЙ", String(st.count), TEXT, "flag"],
+                    ["ПРИБЫЛЬНЫХ", st.count ? String(st.wins) : "—", st.wins > 0 ? LONG : TEXT, "trend"],
+                    ["ЛУЧШАЯ", st.count ? fmtSigned(st.best, 0) : "—", st.best > 0 ? LONG : TEXT, "star"],
+                    ["ХУДШАЯ", st.count ? fmtSigned(st.worst, 0) : "—", st.worst < 0 ? SHORT : TEXT, "star"],
+                  ].map(([label, value, color, icon]) => (
+                    <div key={label} className="min-w-0">
+                      <div className="text-[9px] tracking-[0.1em] mb-1.5 truncate" style={{ color: FAINT }}>
+                        {label}
+                      </div>
+                      <div className="text-[16px] font-mono truncate" style={{ color }}>{value}</div>
+                      <div className="mt-2"><Icon name={icon} size={13} color={FAINT} /></div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+
+              {/* ---------------------- дневная динамика --------------------- */}
+              <div className="text-[10px] tracking-[0.3em] mt-6 mb-2.5" style={{ color: FAINT }}>
+                ДНЕВНАЯ ДИНАМИКА
+              </div>
+              <div className="rounded-2xl px-4 py-3.5 tx-in" style={{ ...card, ...stagger(3) }}>
+                <div className="flex items-start justify-between gap-3">
+                  <div className="min-w-0">
+                    <div className="text-[20px] font-mono leading-none"
+                      style={{ color: rangeTotal > 0 ? LONG : rangeTotal < 0 ? SHORT : TEXT }}>
+                      {inRange.length ? fmtSigned(rangeTotal) : "—"}
+                    </div>
+                    <div className="text-[12px] mt-1.5" style={{ color: DIM }}>суммарный результат</div>
+                  </div>
+                  <div className="relative shrink-0">
+                    <button onClick={() => setRangeOpen((v) => !v)}
+                      className="flex items-center gap-2 px-3 py-2 rounded-xl text-[11px] tracking-[0.15em] tap"
+                      style={{ backgroundColor: RAISED, color: TEXT, border: `1px solid ${HAIR}` }}>
+                      {range.key}<Icon name="caret" size={13} color={DIM} />
+                    </button>
+                    {rangeOpen && (
+                      <div className="absolute right-0 mt-1 rounded-xl overflow-hidden z-10 tx-pop"
+                        style={{ ...card, backgroundColor: RAISED }}>
+                        {LOBBY_RANGES.map((r) => (
+                          <button key={r.key} onClick={() => { setRange(r); setRangeOpen(false); }}
+                            className="block w-full text-left px-4 py-2.5 text-[11px] tracking-[0.15em] whitespace-nowrap tap"
+                            style={{ color: r.key === range.key ? TEXT : DIM }}>
+                            {r.key}
+                          </button>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                </div>
+                <div className="mt-3">
+                  <EquityCurve sessions={profile.sessions} rangeMs={range.ms} />
+                </div>
+              </div>
+
+              {/* ------------------------ последние сессии ------------------- */}
+              <div className="flex items-center justify-between mt-6 mb-2.5">
+                <span className="text-[10px] tracking-[0.3em]" style={{ color: FAINT }}>
+                  ПОСЛЕДНИЕ СЕССИИ
+                </span>
+                {profile.sessions.length > 0 && (
+                  <button onClick={() => setTab("history")}
+                    className="text-[10px] tracking-[0.2em] tap" style={{ color: LONG }}>
+                    СМОТРЕТЬ ВСЕ
+                  </button>
+                )}
+              </div>
+              {profile.sessions.length === 0 ? (
+                <div className="rounded-2xl py-7 text-center text-[12px]" style={{ ...card, color: FAINT }}>
+                  здесь появятся результаты ваших сессий
+                </div>
+              ) : (
+                <div className="flex flex-col gap-2">
+                  {profile.sessions.slice(0, 2).map((x, i) => (
+                    <div key={i}
+                      className="rounded-2xl px-4 py-3 flex items-center justify-between gap-3 tx-in tap"
+                      style={{ ...card, ...stagger(4 + i) }}>
+                      <div className="min-w-0">
+                        <div className="text-[14px] font-mono truncate">
+                          {fmt(x.capital, 0)} → {fmt(x.equity)}
+                        </div>
+                        <div className="text-[11px] mt-1 truncate" style={{ color: FAINT }}>
+                          {clock(x.ticks * CONFIG.market.tickMs)} в рынке · место {x.rank} из {CONFIG.market.totalPlayers}
+                        </div>
+                      </div>
+                      <div className="flex items-center gap-1.5 shrink-0">
+                        <span className="text-[14px] font-mono"
+                          style={{ color: x.pnl >= 0 ? LONG : SHORT }}>{fmtSigned(x.pnl)}</span>
+                        <Icon name="chevron" size={14} color={FAINT} />
+                      </div>
+                    </div>
                   ))}
                 </div>
               )}
+
+              <button onClick={() => setDeposit(true)}
+                className="w-full rounded-2xl py-4 mt-5 text-[13px] tracking-[0.25em] font-bold tap"
+                style={{ backgroundColor: TEXT, color: BG }}>
+                ПОПОЛНИТЬ БАЛАНС
+              </button>
             </div>
-          </div>
-
-          <div className="mt-3">
-            <EquityCurve sessions={profile.sessions} rangeMs={range.ms} />
-          </div>
-        </div>
-
-        {/* -------------------------------- история --------------------------- */}
-        <div className="flex items-center justify-between mt-6 mb-2.5">
-          <span className="text-[10px] tracking-[0.3em]" style={{ color: FAINT }}>ИСТОРИЯ</span>
-          {profile.sessions.length > 3 && (
-            <button onClick={() => setShowAll((v) => !v)}
-              className="text-[10px] tracking-[0.2em]" style={{ color: LONG }}>
-              {showAll ? "СВЕРНУТЬ" : "СМОТРЕТЬ ВСЕ"}
-            </button>
           )}
+
+          {tab === "markets" && <MarketsTab onPlay={onNew} />}
+          {tab === "rank" && <RankingTab profile={profile} period={period} onPeriod={setPeriod} />}
+          {tab === "history" && <HistoryTab profile={profile} />}
         </div>
-
-        {profile.sessions.length === 0 ? (
-          <div className="rounded-2xl py-8 text-center text-[12px]" style={{ ...card, color: FAINT }}>
-            здесь появятся результаты ваших сессий
-          </div>
-        ) : (
-          <div className="flex flex-col gap-2">
-            {history.map((x, i) => (
-              <div key={i}
-                className="rounded-2xl px-4 py-3 flex items-center justify-between gap-3 tx-in tap"
-                style={{ ...card, ...stagger(3 + i) }}>
-                <div className="min-w-0">
-                  <div className="text-[14px] font-mono truncate">
-                    {fmt(x.capital, 0)} → {fmt(x.equity)}
-                  </div>
-                  <div className="text-[11px] mt-1 truncate" style={{ color: FAINT }}>
-                    {clock(x.ticks * CONFIG.market.tickMs)} в рынке · место {x.rank} из {CONFIG.market.totalPlayers}
-                  </div>
-                </div>
-                <div className="flex items-center gap-1.5 shrink-0">
-                  <span className="text-[14px] font-mono"
-                    style={{ color: x.pnl >= 0 ? LONG : SHORT }}>{fmtSigned(x.pnl)}</span>
-                  <Icon name="chevron" size={14} color={FAINT} />
-                </div>
-              </div>
-            ))}
-          </div>
-        )}
       </div>
 
-      {/* ------------------------------- действие ----------------------------- */}
-      <div className="max-w-md w-full mx-auto px-5 pb-6 pt-3 shrink-0">
-        {affordable ? (
-          <button onClick={onNew}
-            className="w-full rounded-2xl py-4 text-[14px] tracking-[0.25em] font-bold tap"
-            style={{ backgroundColor: TEXT, color: BG }}>
-            НОВАЯ СЕССИЯ
-          </button>
-        ) : (
-          <>
-            <div className="text-[12px] mb-3 text-center" style={{ color: FAINT }}>
-              На балансе меньше минимального взноса.
-            </div>
-            <button onClick={onReset}
-              className="w-full rounded-2xl py-5 text-[14px] tracking-[0.25em] font-bold"
-              style={{ backgroundColor: RAISED, color: TEXT, border: `1px solid #3A3A40` }}>
-              ПОПОЛНИТЬ ДО {fmt(STARTING_WALLET, 0)}
-            </button>
-          </>
-        )}
-      </div>
+      <TabBar active={tab} onChange={(k) => { setTab(k); setNotice(null); }} />
     </div>
   );
 }
@@ -1983,6 +2534,7 @@ function Matchmaking({ capital, onReady, onCancel }) {
 
   useEffect(() => {
     let count = 1;
+    let ready = null;               // отложенный старт, снимается при размонтировании
     const timer = setInterval(() => {
       // Набор ускоряется к концу — так очередь не кажется линейной полосой.
       count = Math.min(total, count + 3 + Math.floor(Math.random() * 9));
@@ -1992,10 +2544,12 @@ function Matchmaking({ capital, onReady, onCancel }) {
         ...prev].slice(0, 5));
       if (count >= total) {
         clearInterval(timer);
-        setTimeout(onReady, 700);
+        ready = setTimeout(onReady, 700);
       }
     }, 130);
-    return () => clearInterval(timer);
+    // Без снятия таймера отмена подбора в последние 700 мс всё равно
+    // запускала сессию уже из лобби.
+    return () => { clearInterval(timer); if (ready) clearTimeout(ready); };
   }, []);
 
   const pct = joined / total;
@@ -2186,10 +2740,16 @@ function PracticeApp({ onExit }) {
       onBack={() => setAuthStage("intro")}
       onDone={(acc) => { setAccount(acc); setAuthStage("intro"); }} />;
   }
+  const topUp = (value) => persist({
+    ...profile,
+    wallet: profile.wallet + value,
+    deposited: profile.deposited + value,
+  });
+
   const signOut = async () => { await authStore.signOut(); setAccount(null); setAuthStage("intro"); };
 
   if (screen === "lobby") {
-    return <Lobby profile={profile} account={account} onSignOut={signOut}
+    return <Lobby profile={profile} account={account} onSignOut={signOut} onTopUp={topUp}
       onNew={() => setScreen("setup")} onExit={onExit}
       onReset={() => persist({ ...profile, wallet: STARTING_WALLET, deposited: profile.deposited + STARTING_WALLET })} />;
   }
@@ -2204,7 +2764,7 @@ function PracticeApp({ onExit }) {
     return <SessionResult result={result} onDone={() => { setResult(null); setScreen("lobby"); }} />;
   }
   if (!engineRef.current || !snapshot) {
-    return <Lobby profile={profile} account={account} onSignOut={signOut}
+    return <Lobby profile={profile} account={account} onSignOut={signOut} onTopUp={topUp}
       onNew={() => setScreen("setup")} onExit={onExit}
       onReset={() => persist({ ...profile, wallet: STARTING_WALLET })} />;
   }
