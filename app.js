@@ -126,11 +126,22 @@ class Market {
     this.Q = 0;
     this.escrow = 0;
     this.tick = 0;
+    // Суммарный зафиксированный результат всех участников по сторонам.
+    // Сумма longRealized + shortRealized всегда <= 0 по построению рынка:
+    // закрытый рынок с нулевой суммой, разница осядет в открытых позициях.
+    this.longRealized = 0;
+    this.shortRealized = 0;
     this.seed = seed;
     this.players = Array.from({ length: playerCount }, (_, i) => ({
       id: i, name: null, isHuman: false,
       cash: startingCapital, u: 0,
       entryPrice: null, invested: 0,
+      // basis — стоимость позиции в момент открытия, посчитанная ПО ТОЙ ЖЕ
+      // цене, по которой её потом оценивает settlement(). invested считается
+      // по цене клиринга, и из-за разрыва между ценой клиринга и ценой полной
+      // ликвидации PnL стартовал не с нуля и мог иметь знак, обратный движению
+      // цены (лонг в плюсе при падении). См. комментарий к unrealized().
+      basis: 0,
       realizedPnL: 0, tradeCount: 0,
       stopLoss: null, takeProfit: null,
       npc: null,
@@ -146,9 +157,20 @@ class Market {
     return this.curve.value(this.players[i].u, this.liquidationPrice);
   }
   equity(i) { return this.players[i].cash + this.settlement(i); }
+  /**
+   * Нереализованный результат = текущая стоимость закрытия минус стоимость
+   * закрытия в момент входа. Обе величины считаются по цене полной
+   * ликвидации, поэтому:
+   *   - при открытии PnL строго равен нулю;
+   *   - знак PnL совпадает со знаком движения марк-цены, потому что цена
+   *     ликвидации L(Q) монотонна по Q, как и марк-цена p(Q).
+   * Раньше вычиталась invested (деньги, уплаченные по цене клиринга), а
+   * разрыв между двумя ценами достигал нескольких процентов — отсюда и
+   * лонг в плюсе при падающей цене.
+   */
   unrealized(i) {
     const pl = this.players[i];
-    return pl.u === 0 ? 0 : this.settlement(i) - pl.invested;
+    return pl.u === 0 ? 0 : this.settlement(i) - pl.basis;
   }
   sumEquity() { return this.players.reduce((a, _, i) => a + this.equity(i), 0); }
 
@@ -206,6 +228,14 @@ class Market {
     }
 
     const executed = [];
+    // Цена, по которой позиции будут оценены СРАЗУ ПОСЛЕ этого тика.
+    // basis считается по ней, иначе PnL стартовал бы не с нуля.
+    const Qafter = this.Q + work.reduce((a, o) => a + o.du, 0);
+    const Lafter = this.curve.liquidationPrice(Qafter);
+    // Цена входа для интерфейса — МАРК-цена после тика, а не цена клиринга.
+    // Клиринговая цена — средняя по отрезку сдвига, она отличается от той,
+    // что видит игрок на графике, и линия входа не совпадала с нулём PnL.
+    const Pafter = this.curve.p(Qafter);
     for (const o of work) {
       if (Math.abs(o.du) < 1e-15) continue;
       const pl = this.players[o.i];
@@ -216,23 +246,29 @@ class Market {
 
       // учёт реализованного PnL и средней цены входа
       if (before !== 0 && (after === 0 || Math.sign(after) !== Math.sign(before))) {
-        pl.realizedPnL += vb - pl.invested;      // закрыли старую экспозицию целиком
-        pl.invested = 0; pl.entryPrice = null;
+        const booked = vb - pl.invested;          // закрыли старую экспозицию целиком
+        pl.realizedPnL += booked;
+        if (before > 0) this.longRealized += booked; else this.shortRealized += booked;
+        pl.invested = 0; pl.entryPrice = null; pl.basis = 0;
         pl.stopLoss = null; pl.takeProfit = null;
       } else if (before !== 0 && Math.abs(after) < Math.abs(before)) {
-        const frac = 1 - Math.abs(after) / Math.abs(before);
+        const keep = Math.abs(after) / Math.abs(before);
+        const frac = 1 - keep;
         const closedCost = pl.invested * frac;
-        pl.realizedPnL += (vb - va) - closedCost;
+        const booked = (vb - va) - closedCost;
+        pl.realizedPnL += booked;
+        if (before > 0) this.longRealized += booked; else this.shortRealized += booked;
         pl.invested -= closedCost;
+        pl.basis *= keep;
       }
       if (after !== 0) {
         if (before === 0 || Math.sign(after) !== Math.sign(before)) {
-          pl.invested = va; pl.entryPrice = P;
+          pl.invested = va; pl.entryPrice = Pafter;
+          pl.basis = value(after, Lafter);
         } else if (Math.abs(after) > Math.abs(before)) {
           pl.invested += va - vb;
-          pl.entryPrice = pl.invested / Math.abs(after) *
-            (after > 0 ? 1 : 1); // средняя стоимость единицы
-          pl.entryPrice = P;     // цена последнего клиринга как ориентир UI
+          pl.entryPrice = Pafter;   // марк-цена после тика — ориентир UI
+          pl.basis += value(after, Lafter) - value(before, Lafter);
         }
       }
       pl.u = after;
@@ -659,6 +695,8 @@ class LegacyRoom {
     this.paused = false;
     this._buyPressure = 0;
     this._sellPressure = 0;
+    this._buyTotal = 0;      // накопленный оборот покупок за всю сессию
+    this._sellTotal = 0;     // накопленный оборот продаж за всю сессию
     this._totalTrades = 0;
     this._priceHistory = this._room.history.map((price, i) => ({
       price, t: i * CONFIG.market.tickMs, volume: 0,
@@ -687,6 +725,8 @@ class LegacyRoom {
     }
     this._buyPressure = buy;
     this._sellPressure = sell;
+    this._buyTotal += buy;
+    this._sellTotal += sell;
     this._priceHistory.push({
       price: this._room.market.mark,
       t: this._room.market.tick * CONFIG.market.tickMs,
@@ -708,6 +748,11 @@ class LegacyRoom {
       buyPressure: this._buyPressure,
       sellPressure: this._sellPressure,
       netPressure: this._buyPressure - this._sellPressure,
+      buyTotal: this._buyTotal,
+      sellTotal: this._sellTotal,
+      netTotal: this._buyTotal - this._sellTotal,
+      longRealized: this._room.market.longRealized,
+      shortRealized: this._room.market.shortRealized,
       totalTrades: this._totalTrades,
       totalPlayers: this._room.market.players.length,
       priceHistory: this._priceHistory,
@@ -729,6 +774,44 @@ class LegacyRoom {
       // "ликвидность" старого движка ~ параметр глубины кривой Q нового
       liquidity: base.Q,
       phase: this._phase(base),
+      context: this._context(base),
+    };
+  }
+
+  /** Показатели режима рынка. Раньше они существовали только в отчёте HALT,
+   *  поэтому во вкладке отладки всегда стояли нули. */
+  _context(base) {
+    const h = this._priceHistory;
+    const n = h.length;
+    const at = (k) => h[Math.max(0, n - 1 - k)].price;
+    const now = at(0);
+
+    // Волатильность: среднеквадратичная доходность за последние 40 тиков.
+    const win = Math.min(40, n - 1);
+    let sum = 0, sum2 = 0;
+    for (let k = 0; k < win; k++) {
+      const r = (at(k) - at(k + 1)) / Math.max(at(k + 1), 1e-9);
+      sum += r; sum2 += r * r;
+    }
+    const mean = win ? sum / win : 0;
+    const volatility = win ? Math.sqrt(Math.max(0, sum2 / win - mean * mean)) : 0;
+
+    // Перекос толпы: доля капитала в лонгах против шортов.
+    const parts = base.participants || [];
+    let L = 0, S = 0;
+    for (const p of parts) {
+      if (!p.position) continue;
+      if (p.position.side === "long") L += p.position.invested;
+      else S += p.position.invested;
+    }
+    const imbalance = L + S > 0 ? (L - S) / (L + S) : 0;
+
+    return {
+      speed: n > 10 ? (now - at(10)) / Math.max(at(10), 1e-9) : 0,
+      volatility,
+      imbalance,
+      longExposure: L,
+      shortExposure: S,
     };
   }
 
@@ -3102,8 +3185,10 @@ function PracticeApp({ onExit }) {
               <div className="px-5 pt-4 grid grid-cols-4 gap-3">
                 <Metric label="LONG" value={fmt(stats.longExposure, 0)} color={LONG} />
                 <Metric label="SHORT" value={fmt(stats.shortExposure, 0)} color={SHORT} />
-                <Metric label="BUY PRESS" value={fmt(state.buyPressure, 0)} />
-                <Metric label="SELL PRESS" value={fmt(state.sellPressure, 0)} />
+                <Metric label="ЗАРАБОТАЛИ ЛОНГИ" value={fmtSigned(state.longRealized ?? 0, 0)}
+                  color={(state.longRealized ?? 0) >= 0 ? LONG : SHORT} />
+                <Metric label="ЗАРАБОТАЛИ ШОРТЫ" value={fmtSigned(state.shortRealized ?? 0, 0)}
+                  color={(state.shortRealized ?? 0) >= 0 ? LONG : SHORT} />
               </div>
 
               <div className="flex items-center justify-between px-5 pt-5">
@@ -3304,16 +3389,23 @@ function PracticeApp({ onExit }) {
                 color={Math.abs(snap.debug?.capitalDrift ?? 0) < 1e-5 ? LONG : SHORT} />
 
               <div className="text-[11px] tracking-[0.15em] mt-8 mb-3" style={{ color: FAINT }}>МЕХАНИКА ЦЕНЫ</div>
-              <Line left="Давление покупок" right={fmt(state.buyPressure)} />
-              <Line left="Давление продаж" right={fmt(state.sellPressure)} />
-              <Line left="Чистое давление" right={fmt(state.netPressure)}
-                color={state.netPressure >= 0 ? LONG : SHORT} />
+              <Line left="Оборот покупок (всего)" right={fmt(state.buyTotal ?? 0, 0)} />
+              <Line left="Оборот продаж (всего)" right={fmt(state.sellTotal ?? 0, 0)} />
+              <Line left="Чистый оборот (всего)" right={fmtSigned(state.netTotal ?? 0, 0)}
+                color={(state.netTotal ?? 0) >= 0 ? LONG : SHORT} />
+              <Line left="Оборот за тик" right={fmt((state.buyPressure ?? 0) + (state.sellPressure ?? 0))} />
+              <Line left="Заработали лонги" right={fmtSigned(state.longRealized ?? 0)}
+                color={(state.longRealized ?? 0) >= 0 ? LONG : SHORT} />
+              <Line left="Заработали шорты" right={fmtSigned(state.shortRealized ?? 0)}
+                color={(state.shortRealized ?? 0) >= 0 ? LONG : SHORT} />
               <Line left="Ликвидность" right={fmt(state.liquidity)} />
               <Line left="Капитализация" right={fmt(stats.marketCap)} />
               <Line left="Фаза рынка" right={state.phase} />
-              <Line left="Скорость (10 тиков)" right={signedPct(snap.debug?.context?.speed ?? 0)} />
-              <Line left="Волатильность" right={((snap.debug?.context?.volatility ?? 0) * 100).toFixed(3) + "%"} />
-              <Line left="Перекос толпы" right={signedPct(snap.debug?.context?.imbalance ?? 0, 0)} />
+              <Line left="Скорость (10 тиков)" right={signedPct(snap.context?.speed ?? 0)} />
+              <Line left="Волатильность (40 тиков)"
+                right={((snap.context?.volatility ?? 0) * 100).toFixed(3) + "%"} />
+              <Line left="Перекос толпы" right={signedPct(snap.context?.imbalance ?? 0, 0)}
+                color={(snap.context?.imbalance ?? 0) >= 0 ? LONG : SHORT} />
               <Line left="Всего сделок" right={String(snap.totalTrades)} />
 
               <div className="text-[11px] tracking-[0.15em] mt-8 mb-2" style={{ color: FAINT }}>
