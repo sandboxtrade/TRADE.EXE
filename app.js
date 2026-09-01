@@ -692,7 +692,7 @@ class LegacyRoom {
       t: this._room.market.tick * CONFIG.market.tickMs,
       volume: buy + sell,   // оборот тика — высота столбика объёма на графике
     });
-    if (this._priceHistory.length > 1200) this._priceHistory.shift();
+    if (this._priceHistory.length > 6000) this._priceHistory.shift();
     return result;
   }
 
@@ -889,8 +889,8 @@ const fmtSigned = (v, d = 2) => `${v >= 0 ? "+" : "−"}${fmt(Math.abs(v), d).re
 const AXIS_W = 56;          // ширина ценовой шкалы справа
 const VOL_H = 44;           // высота стакана объёмов снизу
 const PAD_T = 10, PAD_B = 6;
-const BAR_MIN = 2.5, BAR_MAX = 34, BAR_DEFAULT = 8;
-const HISTORY_CANDLES = 600;
+const BAR_MIN = 1.0, BAR_MAX = 40, BAR_DEFAULT = 8;
+const HISTORY_CANDLES = 2000;
 const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
 
 function Chart({ state, timeframe, mode, entryPrice, stopLoss, takeProfit }) {
@@ -1002,6 +1002,8 @@ function Chart({ state, timeframe, mode, entryPrice, stopLoss, takeProfit }) {
   const bucketMs = TIMEFRAMES.find((t) => t.label === timeframe)?.ms ?? 1000;
   const all = buildCandles(state.priceHistory, bucketMs, HISTORY_CANDLES);
   const fit = Math.max(4, Math.ceil(plotW / barW));
+  // Ширина свечи, при которой в окно влезает вся накопленная история.
+  const fitAllBarW = clamp(plotW / Math.max(4, all.length), BAR_MIN, BAR_MAX);
   const end = Math.max(1, all.length - offset);
   const shown = all.slice(Math.max(0, end - fit), end);
 
@@ -1065,6 +1067,21 @@ function Chart({ state, timeframe, mode, entryPrice, stopLoss, takeProfit }) {
   return (
     <div ref={box} className="w-full h-full relative select-none"
       style={{ minHeight: 160, touchAction: "none" }}>
+
+      {/* Кнопки масштаба. Жесты работают не на всех устройствах и не у всех
+          получаются с первого раза, поэтому отдаление доступно и нажатием. */}
+      <div className="absolute right-1 z-10 flex flex-col gap-1"
+        style={{ bottom: VOL_H + 4 }}>
+        <button onClick={() => setBarW((w) => clamp(w * 1.35, BAR_MIN, BAR_MAX))}
+          className="w-8 h-8 rounded-lg text-[15px] leading-none font-mono tap"
+          style={{ backgroundColor: RAISED, color: TEXT, border: `1px solid ${HAIR}` }}>+</button>
+        <button onClick={() => setBarW((w) => clamp(w / 1.35, BAR_MIN, BAR_MAX))}
+          className="w-8 h-8 rounded-lg text-[15px] leading-none font-mono tap"
+          style={{ backgroundColor: RAISED, color: TEXT, border: `1px solid ${HAIR}` }}>−</button>
+        <button onClick={() => { setOffset(0); setYZoom(1); setBarW(fitAllBarW); }}
+          className="w-8 h-8 rounded-lg text-[9px] leading-none tap"
+          style={{ backgroundColor: RAISED, color: DIM, border: `1px solid ${HAIR}` }}>всё</button>
+      </div>
 
       {!auto && (
         <button onClick={() => { setBarW(BAR_DEFAULT); setOffset(0); setYZoom(1); }}
