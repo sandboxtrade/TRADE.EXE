@@ -633,7 +633,9 @@ class LegacyRoom {
     this._buyPressure = 0;
     this._sellPressure = 0;
     this._totalTrades = 0;
-    this._priceHistory = this._room.history.map((price, i) => ({ price, time: i }));
+    this._priceHistory = this._room.history.map((price, i) => ({
+      price, t: i * CONFIG.market.tickMs, volume: 0,
+    }));
   }
 
   join(_ignoredId, name) {
@@ -658,7 +660,11 @@ class LegacyRoom {
     }
     this._buyPressure = buy;
     this._sellPressure = sell;
-    this._priceHistory.push({ price: this._room.market.mark, time: this._room.market.tick });
+    this._priceHistory.push({
+      price: this._room.market.mark,
+      t: this._room.market.tick * CONFIG.market.tickMs,
+      volume: buy + sell,   // оборот тика — высота столбика объёма на графике
+    });
     if (this._priceHistory.length > 1200) this._priceHistory.shift();
     return result;
   }
@@ -788,6 +794,13 @@ class LocalTransport {
  * тика в онлайн-комнате задаёт только сервер (ARCHITECTURE.md, раздел 4).
  */
 
+/* -------------------------------- СВЕЧИ ---------------------------------- */
+const TIMEFRAMES = [
+  { label: "1с", ms: 1000 }, { label: "5с", ms: 5000 }, { label: "15с", ms: 15000 },
+  { label: "1м", ms: 60000 }, { label: "5м", ms: 300000 },
+];
+
+// Свечи строятся ТОЛЬКО из price stream движка, отдельной генерации нет.
 function buildCandles(points, bucketMs, maxCandles) {
   if (points.length === 0) return [];
   const candles = [];
@@ -987,10 +1000,8 @@ const emptyProfile = () => ({
  * быть read-only для владельца и полностью закрыты на запись.
  */
 const profileStore = {
-  // ОФФЛАЙН-ВЕРСИЯ: window.storage существует только внутри интерфейса
-  // Claude.ai, на обычном сайте (GitHub Pages) его нет. Здесь используется
-  // обычный localStorage браузера — работает точно так же, хранится
-  // локально на этом устройстве.
+  // ОФФЛАЙН: window.storage есть только внутри Claude.ai, на обычном сайте
+  // его нет — используем обычный localStorage браузера.
   async load() {
     try {
       const found = localStorage.getItem(PROFILE_KEY);
