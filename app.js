@@ -890,6 +890,7 @@ const AXIS_W = 56;          // ширина ценовой шкалы справ
 const VOL_H = 44;           // высота стакана объёмов снизу
 const PAD_T = 10, PAD_B = 6;
 const BAR_MIN = 1.0, BAR_MAX = 40, BAR_DEFAULT = 8;
+const Y_MIN = 0.2, Y_MAX = 6;   // растяжение ценовой шкалы
 const HISTORY_CANDLES = 2000;
 const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
 
@@ -924,7 +925,7 @@ function Chart({ state, timeframe, mode, entryPrice, stopLoss, takeProfit }) {
   const [yZoom, setYZoom] = useState(1);           // растяжение ценовой шкалы
   const view = useRef({ barW, offset, yZoom });
   view.current = { barW, offset, yZoom };
-  const auto = offset === 0 && Math.abs(yZoom - 1) < 0.01 && barW === BAR_DEFAULT;
+  const auto = offset === 0 && Math.abs(yZoom - 1) < 0.02 && Math.abs(barW - BAR_DEFAULT) < 0.1;
 
   // --- жесты ---
   useEffect(() => {
@@ -940,7 +941,7 @@ function Chart({ state, timeframe, mode, entryPrice, stopLoss, takeProfit }) {
     const start = (e) => {
       if (e.touches.length === 2) {
         const s = spread(e.touches);
-        two = { x: Math.max(12, s.x), y: Math.max(12, s.y), ...view.current };
+        two = { d: Math.max(12, Math.hypot(s.x, s.y)), ...view.current };
         one = null;
       } else if (e.touches.length === 1) {
         one = { x: e.touches[0].clientX, offset: view.current.offset };
@@ -956,12 +957,11 @@ function Chart({ state, timeframe, mode, entryPrice, stopLoss, takeProfit }) {
       if (e.touches.length === 2 && two) {
         e.preventDefault();
         const s = spread(e.touches);
-        // По горизонтали — время, по вертикали — цена. Ось выбирается
-        // по тому, какое расстояние изменилось заметнее.
-        const kx = Math.max(12, s.x) / two.x;
-        const ky = Math.max(12, s.y) / two.y;
-        if (Math.abs(kx - 1) > 0.04) setBarW(clamp(two.barW * kx, BAR_MIN, BAR_MAX));
-        if (Math.abs(ky - 1) > 0.04) setYZoom(clamp(two.yZoom / ky, 0.25, 4));
+        // Как при просмотре фотографии: щипок тянет обе оси разом.
+        // Отдельная подстройка только по цене — потягиванием за шкалу справа.
+        const k = Math.max(12, Math.hypot(s.x, s.y)) / two.d;
+        setBarW(clamp(two.barW * k, BAR_MIN, BAR_MAX));
+        setYZoom(clamp(two.yZoom * k, Y_MIN, Y_MAX));
         return;
       }
       if (e.touches.length === 1 && one) {
@@ -976,7 +976,9 @@ function Chart({ state, timeframe, mode, entryPrice, stopLoss, takeProfit }) {
     const end = (e) => { if (e.touches.length === 0) { one = null; two = null; } };
     const wheel = (e) => {
       e.preventDefault();
-      setBarW((w) => clamp(w * (e.deltaY > 0 ? 0.9 : 1.11), BAR_MIN, BAR_MAX));
+      const k = e.deltaY > 0 ? 0.9 : 1.11;
+      setBarW((w) => clamp(w * k, BAR_MIN, BAR_MAX));
+      setYZoom((z) => clamp(z * k, Y_MIN, Y_MAX));
     };
 
     el.addEventListener("touchstart", start, { passive: true });
@@ -990,6 +992,36 @@ function Chart({ state, timeframe, mode, entryPrice, stopLoss, takeProfit }) {
       el.removeEventListener("touchend", end);
       el.removeEventListener("touchcancel", end);
       el.removeEventListener("wheel", wheel);
+    };
+  }, []);
+
+  // --- потягивание за ценовую шкалу справа ---
+  const axis = useRef(null);
+  useEffect(() => {
+    const el = axis.current;
+    if (!el) return;
+    let grab = null;
+    const start = (e) => {
+      if (e.touches.length !== 1) return;
+      grab = { y: e.touches[0].clientY, z: view.current.yZoom };
+    };
+    const move = (e) => {
+      if (!grab || e.touches.length !== 1) return;
+      e.preventDefault();
+      // Тянем вниз — шкала растягивается, вверх — сжимается.
+      const dy = e.touches[0].clientY - grab.y;
+      setYZoom(clamp(grab.z * Math.pow(2, dy / 160), Y_MIN, Y_MAX));
+    };
+    const end = () => { grab = null; };
+    el.addEventListener("touchstart", start, { passive: true });
+    el.addEventListener("touchmove", move, { passive: false });
+    el.addEventListener("touchend", end, { passive: true });
+    el.addEventListener("touchcancel", end, { passive: true });
+    return () => {
+      el.removeEventListener("touchstart", start);
+      el.removeEventListener("touchmove", move);
+      el.removeEventListener("touchend", end);
+      el.removeEventListener("touchcancel", end);
     };
   }, []);
 
@@ -1040,8 +1072,15 @@ function Chart({ state, timeframe, mode, entryPrice, stopLoss, takeProfit }) {
 
   const span = max - min || 1;
   const toY = (p) => PAD_T + plotH - ((p - min) / span) * plotH;
-  // Свечи прижаты к правому краю окна.
-  const xAt = (i) => plotW - (shown.length - 1 - i) * barW - barW / 2;
+  // Позиция считается по времени, а не по номеру свечи. Раньше при
+  // появлении новой свечи весь ряд мгновенно прыгал влево на целую свечу;
+  // теперь он едет непрерывно, доля за долей текущего бакета.
+  // При прокрутке назад якорем становится последняя видимая свеча, иначе
+  // справа оставалась бы пустота размером со сдвиг.
+  const last = shown[shown.length - 1];
+  const tAnchor = offset === 0 && state.lastPoint
+    ? Math.max(state.lastPoint.t, last.t) : last.t;
+  const xAt = (i) => plotW - barW / 2 - ((tAnchor - shown[i].t) / bucketMs) * barW;
   const body = Math.max(1, Math.min(barW * 0.68, barW - 1.2));
   const wick = Math.max(0.7, Math.min(1.4, barW * 0.12));
 
@@ -1054,13 +1093,28 @@ function Chart({ state, timeframe, mode, entryPrice, stopLoss, takeProfit }) {
   const priceY = toY(state.price);
   const up = state.price >= state.previousPrice;
 
-  const level = (value, label, dash, color) =>
+  /** Уровень с подписью и меткой на ценовой шкале. */
+  const level = (value, label, dash, color, strong) =>
     value && value > min && value < max ? (
       <g key={label}>
         <line x1={0} x2={plotW} y1={toY(value)} y2={toY(value)}
-          stroke={color} strokeWidth={1} strokeDasharray={dash} opacity={0.75} />
-        <text x={4} y={toY(value) - 4} fill={color} fontSize={9} fontFamily="monospace"
-          opacity={0.9}>{label}</text>
+          stroke={color} strokeWidth={strong ? 1.6 : 1}
+          strokeDasharray={dash} opacity={strong ? 1 : 0.75} />
+        <rect x={2} y={toY(value) - 13} width={label.length * 5.6 + 8} height={12} rx={2}
+          fill={BG} opacity={0.75} />
+        <text x={6} y={toY(value) - 4} fill={color} fontSize={9} fontFamily="monospace">
+          {label}
+        </text>
+        {strong && (
+          <>
+            <rect x={plotW + 1} y={toY(value) - 8} width={AXIS_W - 2} height={16} rx={3}
+              fill={BG} stroke={color} strokeWidth={1} />
+            <text x={plotW + AXIS_W / 2} y={toY(value) + 4} textAnchor="middle"
+              fill={color} fontSize={10} fontFamily="monospace">
+              {value.toFixed(2)}
+            </text>
+          </>
+        )}
       </g>
     ) : null;
 
@@ -1090,6 +1144,10 @@ function Chart({ state, timeframe, mode, entryPrice, stopLoss, takeProfit }) {
           {shown.length} св.{offset ? ` · −${offset}` : ""} · сброс
         </button>
       )}
+
+      {/* Полоса ценовой шкалы: тянем по вертикали — меняется растяжение цены. */}
+      <div ref={axis} className="absolute top-0 right-0 z-10"
+        style={{ width: AXIS_W, height: PAD_T + plotH, touchAction: "none" }} />
 
       <svg width={W} height={H} viewBox={`0 0 ${W} ${H}`}>
         {/* сетка и ценовая шкала */}
@@ -1140,7 +1198,7 @@ function Chart({ state, timeframe, mode, entryPrice, stopLoss, takeProfit }) {
           );
         })()}
 
-        {level(entryPrice, `вход ${entryPrice?.toFixed(2)}`, "1 3", DIM)}
+        {level(entryPrice, `вход ${entryPrice?.toFixed(2)}`, "6 4", TEXT, true)}
         {level(stopLoss, `стоп ${stopLoss?.toFixed(2)}`, "4 3", SHORT)}
         {level(takeProfit, `тейк ${takeProfit?.toFixed(2)}`, "4 3", LONG)}
 
