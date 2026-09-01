@@ -1071,6 +1071,57 @@ function profileStats(profile) {
 }
 
 
+
+/* ============================ АНИМАЦИИ ====================================
+   Один <style> на всё приложение. Вставляется один раз при загрузке модуля.
+   Все анимации короткие (150-450 мс) и работают на transform/opacity, чтобы
+   не вызывать перерасчёт вёрстки на каждом кадре.
+   ========================================================================== */
+const GLOBAL_CSS = `
+@keyframes tx-fade-up { from { opacity: 0; transform: translateY(14px); }
+                          to { opacity: 1; transform: none; } }
+@keyframes tx-fade    { from { opacity: 0; } to { opacity: 1; } }
+@keyframes tx-pop     { 0% { opacity: 0; transform: scale(.94); }
+                        60% { transform: scale(1.01); }
+                        100% { opacity: 1; transform: scale(1); } }
+@keyframes tx-pulse   { 0%,100% { opacity: 1; transform: scale(1); }
+                        50% { opacity: .45; transform: scale(.82); } }
+@keyframes tx-draw    { from { stroke-dashoffset: var(--len); }
+                          to { stroke-dashoffset: 0; } }
+@keyframes tx-sheet   { from { opacity: 0; transform: translateY(28px); }
+                          to { opacity: 1; transform: none; } }
+@keyframes tx-spin    { to { transform: rotate(360deg); } }
+
+.tx-screen { animation: tx-fade-up .34s cubic-bezier(.22,.9,.3,1) both; }
+.tx-in     { animation: tx-fade-up .38s cubic-bezier(.22,.9,.3,1) both; }
+.tx-fade   { animation: tx-fade .3s ease both; }
+.tx-pop    { animation: tx-pop .32s cubic-bezier(.22,.9,.3,1) both; }
+.tx-sheet  { animation: tx-sheet .28s cubic-bezier(.22,.9,.3,1) both; }
+.tx-dot    { animation: tx-pulse 2s ease-in-out infinite; }
+.tx-spin   { animation: tx-spin 1.1s linear infinite; }
+.tx-line   { stroke-dasharray: var(--len); animation: tx-draw .7s ease-out both; }
+
+/* Нажатие: лёгкое сжатие. Работает и на тач-устройствах. */
+.tap { transition: transform .12s ease, opacity .12s ease, background-color .18s ease,
+                   color .18s ease, border-color .18s ease; }
+.tap:active { transform: scale(.97); opacity: .9; }
+
+@media (prefers-reduced-motion: reduce) {
+  .tx-screen, .tx-in, .tx-fade, .tx-pop, .tx-sheet, .tx-dot, .tx-line, .tx-spin
+    { animation: none !important; }
+}
+`;
+
+if (typeof document !== "undefined" && !document.getElementById("tx-css")) {
+  const tag = document.createElement("style");
+  tag.id = "tx-css";
+  tag.textContent = GLOBAL_CSS;
+  document.head.appendChild(tag);
+}
+
+/** Задержка появления для «лесенки» блоков. */
+const stagger = (i) => ({ animationDelay: `${i * 55}ms` });
+
 /* ============================ АККАУНТ И ВХОД ==============================
    ТРЕТИЙ ШОВ ПОД FIREBASE. Экраны ниже — это только интерфейс. Сейчас
    аккаунт хранится локально и НИКАКОЙ проверки подлинности не происходит:
@@ -1132,9 +1183,9 @@ function Logo({ size = 96 }) {
 /** Экран загрузки. Показывается, пока читаются аккаунт и профиль. */
 function Splash({ text = "загрузка" }) {
   return (
-    <div className="w-full flex flex-col items-center justify-center gap-6"
+    <div className="w-full flex flex-col items-center justify-center gap-6 tx-fade"
       style={{ height: "100dvh", backgroundColor: BG }}>
-      <Logo size={84} />
+      <div className="tx-dot"><Logo size={84} /></div>
       <div className="text-[11px] tracking-[0.35em]" style={{ color: FAINT }}>
         {text.toUpperCase()}
       </div>
@@ -1182,11 +1233,12 @@ function Onboarding({ onSignIn, onSignUp }) {
   const last = slide === 2;
 
   return (
-    <div className="w-full flex flex-col" style={{ height: "100dvh", backgroundColor: BG, color: TEXT }}>
+    <div className="w-full flex flex-col tx-screen"
+      style={{ height: "100dvh", backgroundColor: BG, color: TEXT }}>
       <div className="max-w-md w-full mx-auto flex-1 min-h-0 flex flex-col justify-center px-7">
 
         {slide === 0 && (
-          <div className="flex flex-col items-center">
+          <div key="s0" className="flex flex-col items-center tx-in">
             <Logo size={104} />
             <div className="text-[30px] tracking-tight mt-5">trade.exe</div>
             <div className="text-[12px] tracking-[0.35em] text-center mt-10 leading-loose"
@@ -1197,14 +1249,14 @@ function Onboarding({ onSignIn, onSignUp }) {
         )}
 
         {slide === 1 && (
-          <div className="flex flex-col items-center">
+          <div key="s1" className="flex flex-col items-center tx-in">
             <Logo size={72} />
             <div className="text-[22px] tracking-tight mt-3 mb-8">trade.exe</div>
             <div className="w-full">
               {FEATURES.map((f, i) => (
                 <div key={f.title}
-                  className={`flex items-start gap-5 py-6 ${i ? "border-t" : ""}`}
-                  style={{ borderColor: HAIR }}>
+                  className={`flex items-start gap-5 py-6 tx-in ${i ? "border-t" : ""}`}
+                  style={{ borderColor: HAIR, ...stagger(i + 1) }}>
                   <div className="shrink-0 mt-0.5"><FeatureIcon name={f.icon} /></div>
                   <div className="min-w-0">
                     <div className="text-[13px] tracking-[0.2em] font-semibold">{f.title}</div>
@@ -1219,7 +1271,7 @@ function Onboarding({ onSignIn, onSignUp }) {
         )}
 
         {slide === 2 && (
-          <div className="flex flex-col items-center text-center">
+          <div key="s2" className="flex flex-col items-center text-center tx-in">
             <Logo size={84} />
             <div className="text-[26px] tracking-tight mt-4">Готовы начать?</div>
             <div className="text-[13px] mt-4 leading-relaxed max-w-[280px]" style={{ color: DIM }}>
@@ -1234,18 +1286,19 @@ function Onboarding({ onSignIn, onSignUp }) {
         <div className="flex justify-center gap-2 mb-7">
           {[0, 1, 2].map((i) => (
             <button key={i} onClick={() => setSlide(i)} className="rounded-full"
-              style={{ width: i === slide ? 20 : 7, height: 7,
-                backgroundColor: i === slide ? TEXT : HAIR, transition: "width 150ms" }} />
+              style={{ width: i === slide ? 22 : 7, height: 7,
+                backgroundColor: i === slide ? TEXT : HAIR,
+                transition: "width 260ms cubic-bezier(.22,.9,.3,1), background-color 260ms" }} />
           ))}
         </div>
 
         <button onClick={() => (last ? onSignIn() : setSlide(slide + 1))}
-          className="w-full rounded-2xl py-5 text-[14px] tracking-[0.25em] font-bold"
+          className="w-full rounded-2xl py-5 text-[14px] tracking-[0.25em] font-bold tap"
           style={{ backgroundColor: TEXT, color: BG }}>
           {last ? "ВОЙТИ" : "ДАЛЕЕ"}
         </button>
         <button onClick={last ? onSignUp : () => onSignIn()}
-          className="w-full py-4 text-[12px] tracking-[0.25em]" style={{ color: DIM }}>
+          className="w-full py-4 text-[12px] tracking-[0.25em] tap" style={{ color: DIM }}>
           {last ? "СОЗДАТЬ АККАУНТ" : "ПРОПУСТИТЬ"}
         </button>
       </div>
@@ -1257,7 +1310,7 @@ function Onboarding({ onSignIn, onSignUp }) {
 function Field({ label, value, onChange, placeholder, secret, type = "text" }) {
   const [shown, setShown] = useState(false);
   return (
-    <div className="mb-4">
+    <div className="mb-4 tx-in">
       <div className="text-[10px] tracking-[0.2em] mb-2" style={{ color: FAINT }}>{label}</div>
       <div className="flex items-center rounded-xl px-4"
         style={{ backgroundColor: RAISED, border: `1px solid ${HAIR}` }}>
@@ -1315,7 +1368,7 @@ function AuthScreen({ mode, onMode, onBack, onDone }) {
 
   const tab = (key, label) => (
     <button onClick={() => { onMode(key); setError(null); }}
-      className="flex-1 rounded-xl py-3.5 text-[12px] tracking-[0.2em] font-semibold"
+      className="flex-1 rounded-xl py-3.5 text-[12px] tracking-[0.2em] font-semibold tap"
       style={{ backgroundColor: mode === key ? RAISED : "transparent",
         color: mode === key ? TEXT : FAINT,
         border: `1px solid ${mode === key ? "#3A3A40" : "transparent"}` }}>
@@ -1324,7 +1377,8 @@ function AuthScreen({ mode, onMode, onBack, onDone }) {
   );
 
   return (
-    <div className="w-full flex flex-col" style={{ height: "100dvh", backgroundColor: BG, color: TEXT }}>
+    <div className="w-full flex flex-col tx-screen"
+      style={{ height: "100dvh", backgroundColor: BG, color: TEXT }}>
       <div className="max-w-md w-full mx-auto flex-1 min-h-0 overflow-y-auto no-scrollbar px-6 pt-6 pb-6">
         <button onClick={onBack} className="text-[20px] leading-none py-2"
           style={{ color: TEXT }}>←</button>
@@ -1349,7 +1403,7 @@ function AuthScreen({ mode, onMode, onBack, onDone }) {
         <Field label="ПАРОЛЬ" value={pass} onChange={setPass}
           placeholder="Введите пароль" secret />
         {signup && (
-          <Field label="ПОДТВЕРДИТЕ ПАРОЛЬ" value={pass2} onChange={setPass2}
+          <Field key="p2" label="ПОДТВЕРДИТЕ ПАРОЛЬ" value={pass2} onChange={setPass2}
             placeholder="Повторите пароль" secret />
         )}
 
@@ -1369,11 +1423,11 @@ function AuthScreen({ mode, onMode, onBack, onDone }) {
         )}
 
         {error && (
-          <div className="text-[12px] mb-4 text-center" style={{ color: SHORT }}>{error}</div>
+          <div className="text-[12px] mb-4 text-center tx-pop" style={{ color: SHORT }}>{error}</div>
         )}
 
         <button onClick={submit} disabled={busy}
-          className="w-full rounded-2xl py-5 text-[14px] tracking-[0.25em] font-bold disabled:opacity-40"
+          className="w-full rounded-2xl py-5 text-[14px] tracking-[0.25em] font-bold disabled:opacity-40 tap"
           style={{ backgroundColor: TEXT, color: BG }}>
           {busy ? "ПОДОЖДИТЕ…" : signup ? "СОЗДАТЬ АККАУНТ" : "ВОЙТИ"}
         </button>
@@ -1388,7 +1442,7 @@ function AuthScreen({ mode, onMode, onBack, onDone }) {
             <div className="grid grid-cols-2 gap-3">
               {["Google", "Apple"].map((p) => (
                 <button key={p} onClick={() => setError(`Вход через ${p} появится вместе с сервером`)}
-                  className="rounded-2xl py-4 text-[13px] font-semibold"
+                  className="rounded-2xl py-4 text-[13px] font-semibold tap"
                   style={{ backgroundColor: RAISED, color: TEXT, border: `1px solid ${HAIR}` }}>
                   {p}
                 </button>
@@ -1448,7 +1502,7 @@ const Icon = ({ name, size = 16, color = TEXT }) => {
 /** Кнопка-иконка в шапке. */
 const IconButton = ({ name, onClick, active }) => (
   <button onClick={onClick}
-    className="w-11 h-11 rounded-xl flex items-center justify-center shrink-0"
+    className="w-11 h-11 rounded-xl flex items-center justify-center shrink-0 tap"
     style={{ backgroundColor: active ? TEXT : RAISED, border: `1px solid ${active ? TEXT : HAIR}` }}>
     <Icon name={name} size={18} color={active ? BG : TEXT} />
   </button>
@@ -1466,7 +1520,7 @@ const LOBBY_RANGES = [
  * Это НЕ котировка и не симуляция — только фактические результаты игрока.
  */
 function EquityCurve({ sessions, rangeMs }) {
-  const W = 320, H = 150, PADR = 46, PADB = 20;
+  const W = 320, H = 118, PADR = 46, PADB = 18;
   const now = Date.now();
   const list = [...sessions]
     .filter((x) => Number.isFinite(x.at) && now - x.at <= rangeMs)
@@ -1474,8 +1528,8 @@ function EquityCurve({ sessions, rangeMs }) {
 
   if (list.length === 0) {
     return (
-      <div className="flex items-center justify-center text-[12px]"
-        style={{ height: H, color: FAINT }}>
+      <div className="flex items-center justify-center text-[12px] tx-fade"
+        style={{ height: 64, color: FAINT }}>
         закрытых сессий за этот период нет
       </div>
     );
@@ -1501,7 +1555,7 @@ function EquityCurve({ sessions, rangeMs }) {
     { hour: "2-digit", minute: "2-digit" });
 
   return (
-    <svg viewBox={`0 0 ${W} ${H}`} className="w-full" style={{ height: 150 }}>
+    <svg viewBox={`0 0 ${W} ${H}`} className="w-full" style={{ height: 118 }}>
       {grid.map((g, i) => (
         <g key={i}>
           <line x1={0} x2={W - PADR} y1={y(g)} y2={y(g)}
@@ -1513,9 +1567,10 @@ function EquityCurve({ sessions, rangeMs }) {
       ))}
 
       <polygon points={`${line} ${x(t1)},${H - PADB} ${x(t0)},${H - PADB}`}
-        fill={color} opacity={0.12} />
-      <polyline points={line} fill="none" stroke={color} strokeWidth={1.8} />
-      <circle cx={x(t1)} cy={y(acc)} r={3.2} fill={color} />
+        fill={color} opacity={0.12} className="tx-fade" />
+      <polyline points={line} fill="none" stroke={color} strokeWidth={1.8}
+        className="tx-line" style={{ "--len": W * 1.6 }} />
+      <circle cx={x(t1)} cy={y(acc)} r={3.2} fill={color} className="tx-pop" />
 
       <text x={0} y={H - 5} fill={FAINT} fontSize={9} fontFamily="monospace">{hhmm(t0)}</text>
       <text x={x(t1)} y={H - 5} fill={FAINT} fontSize={9} fontFamily="monospace"
@@ -1524,8 +1579,143 @@ function EquityCurve({ sessions, rangeMs }) {
   );
 }
 
+
+/* ------------------------------ СТАТИСТИКА -------------------------------
+   Разбор всех закрытых сессий. Данные берутся только из profile.sessions,
+   ничего не пересчитывается по рынку.
+   ------------------------------------------------------------------------ */
+function StatsSheet({ profile, onClose }) {
+  const list = profile.sessions;
+  const n = list.length;
+
+  const sum = (f) => list.reduce((a, x) => a + f(x), 0);
+  const wins = list.filter((x) => x.pnl > 0).length;
+  const total = sum((x) => x.pnl);
+  const invested = sum((x) => x.capital);
+  const roi = invested ? total / invested : 0;
+  const avg = n ? total / n : 0;
+  const avgRank = n ? sum((x) => x.rank) / n : 0;
+  const bestRank = n ? Math.min(...list.map((x) => x.rank)) : 0;
+  const trades = sum((x) => x.trades);
+  const avgTime = n ? sum((x) => x.ticks) * CONFIG.market.tickMs / n : 0;
+
+  // Распределение мест по пятёркам процентилей: 1-20, 21-40, ...
+  const buckets = [0, 0, 0, 0, 0];
+  const T = CONFIG.market.totalPlayers;
+  list.forEach((x) => {
+    const b = Math.min(4, Math.floor(((x.rank - 1) / T) * 5));
+    buckets[b]++;
+  });
+  const maxB = Math.max(1, ...buckets);
+
+  const card = { backgroundColor: SURFACE, border: `1px solid ${HAIR}` };
+  const Cell = ({ label, value, color = TEXT }) => (
+    <div className="min-w-0">
+      <div className="text-[9px] tracking-[0.15em] mb-1.5 truncate" style={{ color: FAINT }}>
+        {label}
+      </div>
+      <div className="text-[17px] font-mono truncate" style={{ color }}>{value}</div>
+    </div>
+  );
+
+  return (
+    <div className="w-full flex flex-col tx-sheet"
+      style={{ height: "100dvh", backgroundColor: BG, color: TEXT }}>
+      <div className="max-w-md w-full mx-auto flex-1 min-h-0 overflow-y-auto no-scrollbar px-5 pt-5 pb-4">
+
+        <div className="flex items-center justify-between">
+          <div className="text-[10px] tracking-[0.3em]" style={{ color: FAINT }}>СТАТИСТИКА</div>
+          <button onClick={onClose} className="text-[11px] tracking-[0.2em] py-2 tap"
+            style={{ color: DIM }}>ЗАКРЫТЬ</button>
+        </div>
+
+        {n === 0 ? (
+          <div className="rounded-2xl py-12 text-center text-[12px] mt-6"
+            style={{ ...card, color: FAINT }}>
+            пока нечего разбирать — сыграйте первую сессию
+          </div>
+        ) : (
+          <>
+            <div className="mt-5 tx-in" style={stagger(0)}>
+              <div className="text-[40px] leading-none font-mono tracking-tight"
+                style={{ color: total > 0 ? LONG : total < 0 ? SHORT : TEXT }}>
+                {fmtSigned(total)}
+              </div>
+              <div className="text-[12px] mt-2" style={{ color: DIM }}>
+                за {n} {n === 1 ? "сессию" : "сессий"} · доходность {signedPct(roi)}
+              </div>
+            </div>
+
+            <div className="rounded-2xl px-4 py-4 mt-5 grid grid-cols-3 gap-y-5 gap-x-3 tx-in"
+              style={{ ...card, ...stagger(1) }}>
+              <Cell label="СЕССИЙ" value={String(n)} />
+              <Cell label="ПРИБЫЛЬНЫХ" value={String(wins)} color={wins ? LONG : TEXT} />
+              <Cell label="ВИНРЕЙТ" value={`${Math.round((wins / n) * 100)}%`} />
+              <Cell label="СРЕДНЯЯ" value={fmtSigned(avg)}
+                color={avg > 0 ? LONG : avg < 0 ? SHORT : TEXT} />
+              <Cell label="ЛУЧШАЯ" value={fmtSigned(Math.max(...list.map((x) => x.pnl)))}
+                color={LONG} />
+              <Cell label="ХУДШАЯ" value={fmtSigned(Math.min(...list.map((x) => x.pnl)))}
+                color={SHORT} />
+              <Cell label="СРЕД. МЕСТО" value={avgRank.toFixed(1)} />
+              <Cell label="ЛУЧШЕЕ МЕСТО" value={String(bestRank)} />
+              <Cell label="ВСЕГО СДЕЛОК" value={String(trades)} />
+              <Cell label="СРЕД. ВРЕМЯ" value={clock(avgTime)} />
+              <Cell label="ВЗНОСОВ" value={fmt(invested, 0)} />
+              <Cell label="СДЕЛОК/СЕССИЯ" value={(trades / n).toFixed(1)} />
+            </div>
+
+            <div className="text-[10px] tracking-[0.3em] mt-7 mb-2.5" style={{ color: FAINT }}>
+              РАСПРЕДЕЛЕНИЕ МЕСТ
+            </div>
+            <div className="rounded-2xl px-4 py-4 tx-in" style={{ ...card, ...stagger(2) }}>
+              {buckets.map((b, i) => (
+                <div key={i} className="flex items-center gap-3 py-1.5">
+                  <span className="text-[10px] font-mono w-[52px] shrink-0" style={{ color: FAINT }}>
+                    {i * (T / 5) + 1}–{(i + 1) * (T / 5)}
+                  </span>
+                  <div className="flex-1 h-1.5 rounded-full overflow-hidden"
+                    style={{ backgroundColor: HAIR }}>
+                    <div style={{ width: `${(b / maxB) * 100}%`, height: "100%",
+                      backgroundColor: i === 0 ? LONG : i === 4 ? SHORT : DIM,
+                      transition: "width 500ms cubic-bezier(.22,.9,.3,1)" }} />
+                  </div>
+                  <span className="text-[11px] font-mono w-5 text-right" style={{ color: DIM }}>{b}</span>
+                </div>
+              ))}
+            </div>
+
+            <div className="text-[10px] tracking-[0.3em] mt-7 mb-2.5" style={{ color: FAINT }}>
+              ВСЕ СЕССИИ
+            </div>
+            <div className="flex flex-col gap-2">
+              {list.map((x, i) => (
+                <div key={i}
+                  className="rounded-2xl px-4 py-3 flex items-center justify-between gap-3 tx-in"
+                  style={{ ...card, ...stagger(3 + Math.min(i, 8)) }}>
+                  <div className="min-w-0">
+                    <div className="text-[14px] font-mono truncate">
+                      {fmt(x.capital, 0)} → {fmt(x.equity)}
+                    </div>
+                    <div className="text-[11px] mt-1 truncate" style={{ color: FAINT }}>
+                      {clock(x.ticks * CONFIG.market.tickMs)} · {x.trades} сделок · место {x.rank} из {T}
+                    </div>
+                  </div>
+                  <span className="text-[14px] font-mono shrink-0"
+                    style={{ color: x.pnl >= 0 ? LONG : SHORT }}>{fmtSigned(x.pnl)}</span>
+                </div>
+              ))}
+            </div>
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
+
 function Lobby({ profile, account, onNew, onReset, onExit, onSignOut }) {
   const st = profileStats(profile);
+  const [stats, setStats] = useState(false);
   const affordable = CONFIG.market.capitalOptions.some((c) => c <= profile.wallet);
   const [range, setRange] = useState(LOBBY_RANGES[0]);
   const [rangeOpen, setRangeOpen] = useState(false);
@@ -1540,12 +1730,15 @@ function Lobby({ profile, account, onNew, onReset, onExit, onSignOut }) {
 
   const card = { backgroundColor: SURFACE, border: `1px solid ${HAIR}` };
 
+  if (stats) return <StatsSheet profile={profile} onClose={() => setStats(false)} />;
+
   return (
-    <div className="w-full flex flex-col" style={{ height: "100dvh", backgroundColor: BG, color: TEXT }}>
-      <div className="max-w-md w-full mx-auto flex-1 min-h-0 overflow-y-auto no-scrollbar px-5 pt-8 pb-4">
+    <div className="w-full flex flex-col tx-screen"
+      style={{ height: "100dvh", backgroundColor: BG, color: TEXT }}>
+      <div className="max-w-md w-full mx-auto flex-1 min-h-0 overflow-y-auto no-scrollbar px-5 pt-5 pb-3">
 
         {/* ------------------------------- шапка ------------------------------ */}
-        <div className="flex items-start justify-between gap-3">
+        <div className="flex items-start justify-between gap-3 tx-in" style={stagger(0)}>
           <div className="min-w-0">
             <div className="text-[10px] tracking-[0.35em]" style={{ color: FAINT }}>
               ЗАКРЫТЫЙ РЫНОК · ПРАКТИКА
@@ -1553,13 +1746,13 @@ function Lobby({ profile, account, onNew, onReset, onExit, onSignOut }) {
             <div className="text-[30px] leading-none tracking-tight mt-2">trade.exe</div>
           </div>
           <div className="flex gap-2">
-            <IconButton name="bars" active={showAll} onClick={() => setShowAll((v) => !v)} />
+            <IconButton name="bars" active={stats} onClick={() => setStats(true)} />
             <IconButton name="gear" active={menu} onClick={() => setMenu((v) => !v)} />
           </div>
         </div>
 
         {menu && (
-          <div className="mt-4 rounded-2xl p-2 flex flex-col" style={card}>
+          <div className="mt-4 rounded-2xl p-2 flex flex-col tx-pop" style={card}>
             <button onClick={() => { onReset(); setMenu(false); }}
               className="text-left px-3 py-3 rounded-xl text-[13px]"
               style={{ color: TEXT }}>
@@ -1581,13 +1774,13 @@ function Lobby({ profile, account, onNew, onReset, onExit, onSignOut }) {
         )}
 
         {/* ------------------------------ баланс ------------------------------ */}
-        <div className="text-[10px] tracking-[0.3em] mt-8" style={{ color: FAINT }}>БАЛАНС</div>
+        <div className="text-[10px] tracking-[0.3em] mt-6" style={{ color: FAINT }}>БАЛАНС</div>
         <div className="flex items-center justify-between gap-3 mt-2">
-          <div className="text-[42px] leading-none font-mono tracking-tight truncate">
+          <div className="text-[38px] leading-none font-mono tracking-tight truncate tx-pop">
             {fmt(profile.wallet, 0)}
           </div>
           <div className="flex items-center gap-2 px-3 py-2 rounded-full shrink-0" style={card}>
-            <span className="w-1.5 h-1.5 rounded-full" style={{ backgroundColor: LONG }} />
+            <span className="w-1.5 h-1.5 rounded-full tx-dot" style={{ backgroundColor: LONG }} />
             <span className="text-[10px] tracking-[0.2em]" style={{ color: TEXT }}>ОНЛАЙН</span>
           </div>
         </div>
@@ -1597,7 +1790,7 @@ function Lobby({ profile, account, onNew, onReset, onExit, onSignOut }) {
         </div>
 
         {/* ---------------------------- статистика ---------------------------- */}
-        <div className="rounded-2xl px-4 py-4 mt-6" style={card}>
+        <div className="rounded-2xl px-4 py-3.5 mt-5 tx-in" style={{ ...card, ...stagger(1) }}>
           <div className="grid grid-cols-4 gap-2">
             {[
               ["СЕССИЙ", String(st.count), TEXT, "flag"],
@@ -1610,17 +1803,17 @@ function Lobby({ profile, account, onNew, onReset, onExit, onSignOut }) {
                   {label}
                 </div>
                 <div className="text-[16px] font-mono truncate" style={{ color }}>{value}</div>
-                <div className="mt-3"><Icon name={icon} size={14} color={FAINT} /></div>
+                <div className="mt-2"><Icon name={icon} size={13} color={FAINT} /></div>
               </div>
             ))}
           </div>
         </div>
 
         {/* ------------------------- дневная динамика ------------------------- */}
-        <div className="text-[10px] tracking-[0.3em] mt-8 mb-3" style={{ color: FAINT }}>
+        <div className="text-[10px] tracking-[0.3em] mt-6 mb-2.5" style={{ color: FAINT }}>
           ДНЕВНАЯ ДИНАМИКА
         </div>
-        <div className="rounded-2xl px-4 py-4" style={card}>
+        <div className="rounded-2xl px-4 py-3.5 tx-in" style={{ ...card, ...stagger(2) }}>
           <div className="flex items-start justify-between gap-3">
             <div className="min-w-0">
               <div className="text-[20px] font-mono leading-none"
@@ -1631,12 +1824,12 @@ function Lobby({ profile, account, onNew, onReset, onExit, onSignOut }) {
             </div>
             <div className="relative shrink-0">
               <button onClick={() => setRangeOpen((v) => !v)}
-                className="flex items-center gap-2 px-3 py-2 rounded-xl text-[11px] tracking-[0.15em]"
+                className="flex items-center gap-2 px-3 py-2 rounded-xl text-[11px] tracking-[0.15em] tap"
                 style={{ backgroundColor: RAISED, color: TEXT, border: `1px solid ${HAIR}` }}>
                 {range.key}<Icon name="caret" size={13} color={DIM} />
               </button>
               {rangeOpen && (
-                <div className="absolute right-0 mt-1 rounded-xl overflow-hidden z-10"
+                <div className="absolute right-0 mt-1 rounded-xl overflow-hidden z-10 tx-pop"
                   style={{ ...card, backgroundColor: RAISED }}>
                   {LOBBY_RANGES.map((r) => (
                     <button key={r.key} onClick={() => { setRange(r); setRangeOpen(false); }}
@@ -1656,7 +1849,7 @@ function Lobby({ profile, account, onNew, onReset, onExit, onSignOut }) {
         </div>
 
         {/* -------------------------------- история --------------------------- */}
-        <div className="flex items-center justify-between mt-8 mb-3">
+        <div className="flex items-center justify-between mt-6 mb-2.5">
           <span className="text-[10px] tracking-[0.3em]" style={{ color: FAINT }}>ИСТОРИЯ</span>
           {profile.sessions.length > 3 && (
             <button onClick={() => setShowAll((v) => !v)}
@@ -1673,8 +1866,9 @@ function Lobby({ profile, account, onNew, onReset, onExit, onSignOut }) {
         ) : (
           <div className="flex flex-col gap-2">
             {history.map((x, i) => (
-              <div key={i} className="rounded-2xl px-4 py-3 flex items-center justify-between gap-3"
-                style={card}>
+              <div key={i}
+                className="rounded-2xl px-4 py-3 flex items-center justify-between gap-3 tx-in tap"
+                style={{ ...card, ...stagger(3 + i) }}>
                 <div className="min-w-0">
                   <div className="text-[14px] font-mono truncate">
                     {fmt(x.capital, 0)} → {fmt(x.equity)}
@@ -1698,7 +1892,7 @@ function Lobby({ profile, account, onNew, onReset, onExit, onSignOut }) {
       <div className="max-w-md w-full mx-auto px-5 pb-6 pt-3 shrink-0">
         {affordable ? (
           <button onClick={onNew}
-            className="w-full rounded-2xl py-5 text-[14px] tracking-[0.25em] font-bold"
+            className="w-full rounded-2xl py-4 text-[14px] tracking-[0.25em] font-bold tap"
             style={{ backgroundColor: TEXT, color: BG }}>
             НОВАЯ СЕССИЯ
           </button>
@@ -1807,7 +2001,8 @@ function Matchmaking({ capital, onReady, onCancel }) {
   const pct = joined / total;
 
   return (
-    <div className="w-full flex flex-col" style={{ height: "100dvh", backgroundColor: BG, color: TEXT }}>
+    <div className="w-full flex flex-col tx-screen"
+      style={{ height: "100dvh", backgroundColor: BG, color: TEXT }}>
       <div className="max-w-md w-full mx-auto flex-1 flex flex-col justify-center px-6">
         <div className="text-[11px] tracking-[0.3em]" style={{ color: FAINT }}>ПОДБОР УЧАСТНИКОВ</div>
         <div className="text-[64px] leading-none font-mono tracking-tight mt-3">
@@ -1816,7 +2011,7 @@ function Matchmaking({ capital, onReady, onCancel }) {
 
         <div className="h-1 w-full rounded-full mt-6 overflow-hidden" style={{ backgroundColor: HAIR }}>
           <div style={{ width: `${pct * 100}%`, height: "100%", backgroundColor: TEXT,
-            transition: "width 120ms linear" }} />
+            transition: "width 200ms cubic-bezier(.22,.9,.3,1)" }} />
         </div>
 
         <div className="mt-8">
@@ -1827,7 +2022,7 @@ function Matchmaking({ capital, onReady, onCancel }) {
 
         <div className="mt-8 h-[110px]">
           {feed.map((line, i) => (
-            <div key={`${line}-${i}`} className="text-[12px] font-mono py-1"
+            <div key={`${line}-${i}`} className="text-[12px] font-mono py-1 tx-in"
               style={{ color: i === 0 ? DIM : FAINT, opacity: 1 - i * 0.18 }}>
               {line}
             </div>
@@ -1836,7 +2031,7 @@ function Matchmaking({ capital, onReady, onCancel }) {
       </div>
 
       <div className="max-w-md w-full mx-auto px-6 pb-8">
-        <button onClick={onCancel} className="w-full rounded-lg py-4 text-[13px] tracking-[0.15em] font-semibold"
+        <button onClick={onCancel} className="w-full rounded-lg py-4 text-[13px] tracking-[0.15em] font-semibold tap"
           style={{ backgroundColor: RAISED, color: TEXT, border: `1px solid #3A3A40` }}>
           ОТМЕНИТЬ ПОДБОР
         </button>
@@ -2117,17 +2312,17 @@ function PracticeApp({ onExit }) {
             </div>
             {confirmingEnd ? (
               <div className="flex gap-2">
-                <button onClick={() => setConfirmingEnd(false)} className="flex-1 rounded-lg py-3 text-[13px] font-semibold"
+                <button onClick={() => setConfirmingEnd(false)} className="flex-1 rounded-lg py-3 text-[13px] font-semibold tap"
                   style={{ backgroundColor: RAISED, color: TEXT, border: `1px solid #3A3A40` }}>
                   Отмена
                 </button>
-                <button onClick={finishSession} className="flex-1 rounded-lg py-3 text-[13px] font-semibold"
+                <button onClick={finishSession} className="flex-1 rounded-lg py-3 text-[13px] font-semibold tap"
                   style={{ backgroundColor: SHORT, color: BG }}>
                   Да, завершить
                 </button>
               </div>
             ) : (
-              <button onClick={() => setConfirmingEnd(true)} className="rounded-lg py-3 text-[13px] font-semibold"
+              <button onClick={() => setConfirmingEnd(true)} className="rounded-lg py-3 text-[13px] font-semibold tap"
                 style={{ backgroundColor: RAISED, color: TEXT, border: `1px solid #3A3A40` }}>
                 Завершить сессию · {fmt(equity)} на баланс
               </button>
@@ -2225,7 +2420,7 @@ function PracticeApp({ onExit }) {
                   <div className="grid grid-cols-3 gap-2 mt-4">
                     {[[0.25, "25%"], [0.5, "50%"], [1, "всё"]].map(([f, l]) => (
                       <button key={l} onClick={() => doClose(f, `закрыто ${l}`)}
-                        className="rounded-lg py-3 text-[13px] font-semibold"
+                        className="rounded-lg py-3 text-[13px] font-semibold tap"
                         style={{ backgroundColor: RAISED, color: TEXT, border: `1px solid #3A3A40` }}>{l}</button>
                     ))}
                   </div>
@@ -2530,19 +2725,19 @@ function PracticeApp({ onExit }) {
               </div>
               {[0.25, 0.5, 1].map((f) => (
                 <button key={f} onClick={() => setSize(String(Math.round(human.cash * f)))}
-                  className="px-2.5 py-2.5 rounded font-mono text-[11px] font-semibold"
+                  className="px-2.5 py-2.5 rounded font-mono text-[11px] font-semibold tap"
                   style={{ backgroundColor: RAISED, color: TEXT, border: `1px solid ${HAIR}` }}>
                   {f * 100}%
                 </button>
               ))}
               <button onClick={() => setSheet(sheet === "risk" ? null : "risk")}
-                className="px-2.5 py-2.5 rounded text-[11px] font-semibold"
+                className="px-2.5 py-2.5 rounded text-[11px] font-semibold tap"
                 style={{ backgroundColor: sheet === "risk" ? TEXT : RAISED,
                   color: sheet === "risk" ? BG : TEXT, border: `1px solid ${HAIR}` }}>
                 SL/TP
               </button>
               <button onClick={() => setSheet(sheet === "limit" ? null : "limit")}
-                className="px-2.5 py-2.5 rounded text-[11px] font-semibold"
+                className="px-2.5 py-2.5 rounded text-[11px] font-semibold tap"
                 style={{ backgroundColor: sheet === "limit" ? TEXT : RAISED,
                   color: sheet === "limit" ? BG : TEXT, border: `1px solid ${HAIR}` }}>
                 лимит{myLimits.length ? ` ${myLimits.length}` : ""}
@@ -2586,7 +2781,7 @@ function PracticeApp({ onExit }) {
         <div className="grid grid-cols-5 border-t" style={{ borderColor: HAIR }}>
           {TAB_KEYS.map((key) => (
             <button key={key} onClick={() => setTab(key)}
-              className="py-3 text-[11px] font-semibold"
+              className="py-3 text-[11px] font-semibold tap"
               style={{ color: tab === key ? BG : DIM,
                 backgroundColor: tab === key ? TEXT : "transparent" }}>
               {key}
