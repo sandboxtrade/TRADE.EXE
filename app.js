@@ -1986,6 +1986,9 @@ const Icon = ({ name, size = 16, color = TEXT }) => {
     <svg {...common}><circle cx="6" cy="12" r="1.2" fill={color} /><circle cx="12" cy="12" r="1.2" fill={color} />
       <circle cx="18" cy="12" r="1.2" fill={color} /></svg>
   );
+  if (name === "plus") return (
+    <svg {...common}><path d="M12 5v14M5 12h14" /></svg>
+  );
   if (name === "check") return (
     <svg {...common}><path d="M5 12l5 5 9-10" /></svg>
   );
@@ -2691,10 +2694,12 @@ function Lobby({ profile, account, onNew, onReset, onExit, onSignOut, onTopUp })
                 <div className="text-[36px] leading-none font-mono tracking-tight truncate tx-pop">
                   {fmt(profile.wallet, 0)}
                 </div>
-                <div className="flex items-center gap-2 px-3 py-1.5 rounded-full shrink-0" style={card}>
-                  <span className="w-1.5 h-1.5 rounded-full tx-dot" style={{ backgroundColor: LONG }} />
-                  <span className="text-[10px] tracking-[0.2em]">ОНЛАЙН</span>
-                </div>
+                <button onClick={() => setDeposit(true)}
+                  className="flex items-center gap-2 px-4 py-2.5 rounded-full shrink-0 tap"
+                  style={{ backgroundColor: TEXT, color: BG }}>
+                  <Icon name="plus" size={14} color={BG} />
+                  <span className="text-[11px] tracking-[0.15em] font-bold">ПОПОЛНИТЬ</span>
+                </button>
               </div>
               <div className="text-[13px] font-mono mt-2"
                 style={{ color: st.total > 0 ? LONG : st.total < 0 ? SHORT : DIM }}>
@@ -2815,11 +2820,6 @@ function Lobby({ profile, account, onNew, onReset, onExit, onSignOut, onTopUp })
                 </div>
               )}
 
-              <button onClick={() => setDeposit(true)}
-                className="w-full rounded-2xl py-4 mt-5 text-[13px] tracking-[0.25em] font-bold tap"
-                style={{ backgroundColor: TEXT, color: BG }}>
-                ПОПОЛНИТЬ БАЛАНС
-              </button>
             </div>
           )}
 
