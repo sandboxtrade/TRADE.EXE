@@ -1891,4 +1891,31 @@ function PracticeApp({ onExit }) {
 }
 
 // ==== ТОЧКА ВХОДА ====
-createRoot(document.getElementById("root")).render(<PracticeApp />);
+// ВРЕМЕННО: ловушка ошибок отрисовки. Показывает текст ошибки на экране
+// с переносом строк, чтобы ничего не обрезалось. Убрать после починки.
+class ErrBoundary extends React.Component {
+  constructor(p) { super(p); this.state = { err: null, info: null }; }
+  static getDerivedStateFromError(err) { return { err }; }
+  componentDidCatch(err, info) { this.setState({ err, info }); }
+  render() {
+    if (!this.state.err) return this.props.children;
+    const e = this.state.err;
+    const text =
+      "СООБЩЕНИЕ:\n" + (e && e.message ? e.message : String(e)) +
+      "\n\nСТЕК:\n" + (e && e.stack ? e.stack : "(нет)") +
+      "\n\nКОМПОНЕНТЫ:\n" + (this.state.info && this.state.info.componentStack
+        ? this.state.info.componentStack : "(нет)");
+    return React.createElement("pre", {
+      style: {
+        margin: 0, padding: "16px", background: "#111", color: "#fff",
+        fontSize: "11px", lineHeight: 1.45,
+        whiteSpace: "pre-wrap", wordBreak: "break-all", overflowWrap: "anywhere",
+        minHeight: "100vh", WebkitUserSelect: "text", userSelect: "text",
+      },
+    }, text);
+  }
+}
+
+createRoot(document.getElementById("root")).render(
+  <ErrBoundary><PracticeApp /></ErrBoundary>
+);
