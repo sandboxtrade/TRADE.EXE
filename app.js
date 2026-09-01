@@ -42,6 +42,15 @@ const CONFIG = {
   // --- Инварианты ---
   TOL_CAPITAL: 1e-6,
   TOL_NONNEG: 1e-9,
+
+  // --- Оборот NPC (LIVENESS-FIX) ---
+  // stop/take в ARCHETYPES заданы в долях цены входа (-0.25 = -25%).
+  // Реальный ход цены в закрытом рынке ~3%, поэтому НИ ОДИН порог никогда
+  // не срабатывал: боты открывались в первые тики и держали позицию вечно.
+  // Замер: сделок за 25 тиков 76 -> 18 -> 2 -> 0 (полная остановка к 100-му тику).
+  NPC_PNL_SCALE: 0.15,   // масштаб порогов под реальный диапазон цены
+  NPC_HOLD_MIN: 40,      // выход по времени: никто не сидит в позиции вечно
+  NPC_HOLD_MAX: 400,
 };
 
 // ---- curve.js ----
@@ -326,7 +335,14 @@ function attachNPCs(m, startIdx, count, seed) {
       act: spec.act * (0.6 + 0.8 * r()),
       // Доля с НУЛЕВОЙ задержкой. Лаг реакции был единственной причиной
       // эксплойта самораскачки: при lag=0 её EV становится отрицательным.
-      lag: r() < CONFIG.NPC_INSTANT_FRACTION ? 0 : 1 + Math.floor(r() * 5),
+      // lag = 0 означал past = history[последний] = ТЕКУЩАЯ цена, то есть
+      // mom === 0 всегда: 60% ботов были слепыми. Минимум теперь 1 тик.
+      lag: r() < CONFIG.NPC_INSTANT_FRACTION ? 1 : 2 + Math.floor(r() * 5),
+      stop: spec.stop * CONFIG.NPC_PNL_SCALE,
+      take: spec.take * CONFIG.NPC_PNL_SCALE,
+      hold: Math.round(CONFIG.NPC_HOLD_MIN +
+        r() * (CONFIG.NPC_HOLD_MAX - CONFIG.NPC_HOLD_MIN)),
+      since: 0, lastU: 0,
       rng: mulberry32(seed * 7919 + k + 1),
     };
   }
@@ -336,20 +352,31 @@ function attachNPCs(m, startIdx, count, seed) {
 function decide(m, i, history) {
   const pl = m.players[i], n = pl.npc;
   if (!n) return 0;
+  // Сколько тиков бот находится в текущем состоянии (позиция не менялась).
+  if (n.lastU !== pl.u) { n.lastU = pl.u; n.since = 0; }
+  n.since++;
   const r = n.rng;
   if (r() > n.act) return 0;
 
   const P = m.mark;
-  const j = Math.max(0, history.length - 1 - n.lag);
+  const lag = Math.max(1, n.lag);          // 0 давал mom === 0 всегда
+  const j = Math.max(0, history.length - 1 - lag);
   const past = history.length ? history[j] : P;
   const mom = (P - past) / Math.max(past, 1e-9);
 
   if (pl.u !== 0 && pl.entryPrice !== null) {
     const pnl = pl.u > 0 ? (P - pl.entryPrice) / pl.entryPrice
                          : (pl.entryPrice - P) / pl.entryPrice;
-    if (pnl <= n.spec.stop || pnl >= n.spec.take) return -pl.u;
+    if (pnl <= n.stop || pnl >= n.take) return -pl.u;   // стоп / тейк
+    if (n.since >= n.hold) return -pl.u;                // выход по времени
+    // Живой оборот: боты доливают и частично фиксируют, а не сидят камнем.
+    if (r() < 0.12) {
+      if (r() < 0.5) return -pl.u * (0.3 + 0.4 * r());
+      const add = m.curve.unitsFor(pl.cash * n.size * 0.5, P);
+      return pl.u > 0 ? add : -add;
+    }
+    return 0;
   }
-  if (pl.u !== 0) return 0;
 
   let dir;
   if (n.spec.bias === "trend") dir = mom > 0 ? 1 : mom < 0 ? -1 : (r() < 0.5 ? 1 : -1);
@@ -854,7 +881,7 @@ function Chart({ state, timeframe, mode, entryPrice, stopLoss, takeProfit }) {
   const bucketMs = TIMEFRAMES.find((t) => t.label === timeframe)?.ms ?? 1000;
   const candles = buildCandles(state.priceHistory, bucketMs, MAX_CANDLES);
   if (candles.length < 2) {
-    return <div style={{ height: 380 }} className="flex items-center justify-center text-[12px]"
+    return <div style={{ height: "100%", minHeight: 160 }} className="flex items-center justify-center text-[12px]"
       >{<span style={{ color: FAINT }}>собираем свечи…</span>}</div>;
   }
 
@@ -886,7 +913,8 @@ function Chart({ state, timeframe, mode, entryPrice, stopLoss, takeProfit }) {
     ) : null;
 
   return (
-    <svg viewBox={`0 0 ${CW + AXIS} ${CH + VH + 4}`} className="w-full" style={{ height: 380 }}>
+    <svg viewBox={`0 0 ${CW + AXIS} ${CH + VH + 4}`} preserveAspectRatio="none"
+      className="w-full" style={{ height: "100%", minHeight: 160 }}>
       {grid.map((p, i) => (
         <g key={i}>
           <line x1={0} x2={CW} y1={toY(p)} y2={toY(p)} stroke={HAIR} strokeWidth={1} />
@@ -963,7 +991,9 @@ const Blank = ({ children }) => (
 function Toggle({ active, onClick, children }) {
   return (
     <button onClick={onClick} className="px-2.5 py-1.5 rounded text-[12px] transition"
-      style={{ color: active ? BG : DIM, backgroundColor: active ? TEXT : "transparent" }}>
+      style={{ color: active ? BG : TEXT,
+        backgroundColor: active ? TEXT : RAISED,
+        border: `1px solid ${active ? TEXT : HAIR}`, marginRight: 2 }}>
       {children}
     </button>
   );
@@ -1046,7 +1076,7 @@ function Lobby({ profile, onNew, onReset, onExit }) {
   const affordable = CONFIG.market.capitalOptions.some((c) => c <= profile.wallet);
 
   return (
-    <div className="w-full h-screen flex flex-col" style={{ backgroundColor: BG, color: TEXT }}>
+    <div className="w-full flex flex-col" style={{ height: "100dvh", backgroundColor: BG, color: TEXT }}>
       <div className="max-w-md w-full mx-auto flex-1 overflow-y-auto px-6 pt-10 pb-4">
         <div className="flex items-center justify-between mb-2">
           <span className="text-[11px] tracking-[0.4em]" style={{ color: FAINT }}>ЗАКРЫТЫЙ РЫНОК · ПРАКТИКА</span>
@@ -1054,7 +1084,7 @@ function Lobby({ profile, onNew, onReset, onExit }) {
             <button onClick={onExit} className="text-[11px]" style={{ color: DIM }}>сменить режим</button>
           )}
         </div>
-        <div className="text-[28px] leading-none tracking-tight mb-10">Market Sandbox</div>
+        <div className="text-[28px] leading-none tracking-tight mb-10">trade.exe</div>
 
         <div className="text-[11px] tracking-[0.15em] mb-2" style={{ color: FAINT }}>БАЛАНС</div>
         <div className="text-[44px] leading-none font-mono tracking-tight">{fmt(profile.wallet)}</div>
@@ -1123,7 +1153,7 @@ function SessionSetup({ wallet, onStart, onBack }) {
   );
 
   return (
-    <div className="w-full h-screen flex flex-col" style={{ backgroundColor: BG, color: TEXT }}>
+    <div className="w-full flex flex-col" style={{ height: "100dvh", backgroundColor: BG, color: TEXT }}>
       <div className="max-w-md w-full mx-auto flex-1 flex flex-col justify-center px-6">
         <button onClick={onBack} className="text-[12px] mb-8 text-left" style={{ color: DIM }}>← назад</button>
 
@@ -1167,11 +1197,85 @@ function SessionSetup({ wallet, onStart, onBack }) {
   );
 }
 
+/* --------------------------- ПОИСК ИГРОКОВ -------------------------------
+   Офлайн-сессия должна ощущаться как онлайн: перед входом в рынок игрок
+   видит, как комната набирается. Это чистая косметика поверх LocalTransport —
+   когда появится RemoteTransport, экран остаётся тот же, меняется только
+   источник счётчика (сейчас таймер, потом события сервера).
+   ------------------------------------------------------------------------ */
+const ROOM_NAMES = [
+  "Ivan", "Nord", "Kite", "Vera", "Osip", "Mira", "Zed", "Lika", "Orion",
+  "Rune", "Sable", "Tessa", "Umka", "Vega", "Wolf", "Xena", "Yuri", "Zara",
+];
+
+function Matchmaking({ capital, onReady, onCancel }) {
+  const [joined, setJoined] = useState(1);
+  const [feed, setFeed] = useState(["вы вошли в комнату"]);
+  const total = CONFIG.market.totalPlayers;
+
+  useEffect(() => {
+    let count = 1;
+    const timer = setInterval(() => {
+      // Набор ускоряется к концу — так очередь не кажется линейной полосой.
+      count = Math.min(total, count + 3 + Math.floor(Math.random() * 9));
+      setJoined(count);
+      const who = ROOM_NAMES[Math.floor(Math.random() * ROOM_NAMES.length)];
+      setFeed((prev) => [`${who}-${Math.floor(Math.random() * 900 + 100)} присоединился`,
+        ...prev].slice(0, 5));
+      if (count >= total) {
+        clearInterval(timer);
+        setTimeout(onReady, 700);
+      }
+    }, 130);
+    return () => clearInterval(timer);
+  }, []);
+
+  const pct = joined / total;
+
+  return (
+    <div className="w-full flex flex-col" style={{ height: "100dvh", backgroundColor: BG, color: TEXT }}>
+      <div className="max-w-md w-full mx-auto flex-1 flex flex-col justify-center px-6">
+        <div className="text-[11px] tracking-[0.3em]" style={{ color: FAINT }}>ПОДБОР УЧАСТНИКОВ</div>
+        <div className="text-[64px] leading-none font-mono tracking-tight mt-3">
+          {joined}<span className="text-[24px]" style={{ color: FAINT }}> / {total}</span>
+        </div>
+
+        <div className="h-1 w-full rounded-full mt-6 overflow-hidden" style={{ backgroundColor: HAIR }}>
+          <div style={{ width: `${pct * 100}%`, height: "100%", backgroundColor: TEXT,
+            transition: "width 120ms linear" }} />
+        </div>
+
+        <div className="mt-8">
+          <Line left="Взнос каждого" right={fmt(capital, 0)} />
+          <Line left="Капитал комнаты" right={fmt(capital * total, 0)} />
+          <Line left="Актив" right={CONFIG.market.assetSymbol} />
+        </div>
+
+        <div className="mt-8 h-[110px]">
+          {feed.map((line, i) => (
+            <div key={`${line}-${i}`} className="text-[12px] font-mono py-1"
+              style={{ color: i === 0 ? DIM : FAINT, opacity: 1 - i * 0.18 }}>
+              {line}
+            </div>
+          ))}
+        </div>
+      </div>
+
+      <div className="max-w-md w-full mx-auto px-6 pb-8">
+        <button onClick={onCancel} className="w-full rounded-lg py-4 text-[13px] tracking-[0.15em] font-semibold"
+          style={{ backgroundColor: RAISED, color: TEXT, border: `1px solid #3A3A40` }}>
+          ОТМЕНИТЬ ПОДБОР
+        </button>
+      </div>
+    </div>
+  );
+}
+
 /* ------------------------------ ИТОГ СЕССИИ ------------------------------- */
 function SessionResult({ result, onDone }) {
   const good = result.pnl >= 0;
   return (
-    <div className="w-full h-screen flex flex-col" style={{ backgroundColor: BG, color: TEXT }}>
+    <div className="w-full flex flex-col" style={{ height: "100dvh", backgroundColor: BG, color: TEXT }}>
       <div className="max-w-md w-full mx-auto flex-1 flex flex-col justify-center px-6">
         <div className="text-[11px] tracking-[0.4em] mb-3" style={{ color: FAINT }}>СЕССИЯ ЗАВЕРШЕНА</div>
         <div className="text-[52px] leading-none font-mono tracking-tight" style={{ color: good ? LONG : SHORT }}>
@@ -1210,6 +1314,7 @@ function PracticeApp({ onExit }) {
   const [screen, setScreen] = useState("lobby");
   const [result, setResult] = useState(null);
   const [session, setSession] = useState(null);
+  const [pending, setPending] = useState(null);   // взнос, пока идёт подбор
   const engineRef = useRef(null);
 
   const [snapshot, setSnapshot] = useState(null);
@@ -1247,6 +1352,9 @@ function PracticeApp({ onExit }) {
 
   const persist = (next) => { setProfile(next); saveProfile(next); };
 
+  /** Первая фаза: подбор участников. Реальная комната ещё не создана. */
+  const queueSession = (capital) => { setPending(capital); setScreen("matching"); };
+
   const startSession = (capital) => {
     // Приложение больше не создаёт движок напрямую — только транспорт.
     // При переезде на сервер здесь меняется одна строка на RemoteTransport.
@@ -1257,6 +1365,7 @@ function PracticeApp({ onExit }) {
     setSession(capital);
     setScreen("game");
     persist({ ...profile, wallet: profile.wallet - capital });
+    setPending(null);
   };
 
   /** Завершение сессии: итоговый капитал возвращается на баланс. */
@@ -1293,8 +1402,8 @@ function PracticeApp({ onExit }) {
 
   if (!profile) {
     return (
-      <div className="w-full h-screen flex items-center justify-center"
-        style={{ backgroundColor: BG, color: FAINT }}>
+      <div className="w-full flex items-center justify-center"
+        style={{ height: "100dvh", backgroundColor: BG, color: FAINT }}>
         <span className="text-[12px]">загрузка профиля…</span>
       </div>
     );
@@ -1304,7 +1413,11 @@ function PracticeApp({ onExit }) {
       onReset={() => persist({ ...profile, wallet: STARTING_WALLET, deposited: profile.deposited + STARTING_WALLET })} />;
   }
   if (screen === "setup") {
-    return <SessionSetup wallet={profile.wallet} onStart={startSession} onBack={() => setScreen("lobby")} />;
+    return <SessionSetup wallet={profile.wallet} onStart={queueSession} onBack={() => setScreen("lobby")} />;
+  }
+  if (screen === "matching" && pending !== null) {
+    return <Matchmaking capital={pending} onReady={() => startSession(pending)}
+      onCancel={() => { setPending(null); setScreen("lobby"); }} />;
   }
   if (screen === "result" && result) {
     return <SessionResult result={result} onDone={() => { setResult(null); setScreen("lobby"); }} />;
@@ -1382,7 +1495,7 @@ function PracticeApp({ onExit }) {
   const TAB_KEYS = ["Рынок", "Позиции", "Ордера", "Участники", "Отладка"];
 
   return (
-    <div className="w-full h-screen flex flex-col" style={{ backgroundColor: BG, color: TEXT }}>
+    <div className="w-full flex flex-col" style={{ height: "100dvh", backgroundColor: BG, color: TEXT }}>
       <div className="max-w-md w-full mx-auto flex flex-col h-full relative">
 
         {/* --------------------------------- шапка --------------------------- */}
@@ -1417,8 +1530,8 @@ function PracticeApp({ onExit }) {
             </div>
             {confirmingEnd ? (
               <div className="flex gap-2">
-                <button onClick={() => setConfirmingEnd(false)} className="flex-1 rounded-lg py-3 text-[13px]"
-                  style={{ backgroundColor: SURFACE, border: `1px solid ${HAIR}` }}>
+                <button onClick={() => setConfirmingEnd(false)} className="flex-1 rounded-lg py-3 text-[13px] font-semibold"
+                  style={{ backgroundColor: RAISED, color: TEXT, border: `1px solid #3A3A40` }}>
                   Отмена
                 </button>
                 <button onClick={finishSession} className="flex-1 rounded-lg py-3 text-[13px] font-semibold"
@@ -1427,8 +1540,8 @@ function PracticeApp({ onExit }) {
                 </button>
               </div>
             ) : (
-              <button onClick={() => setConfirmingEnd(true)} className="rounded-lg py-3 text-[13px]"
-                style={{ backgroundColor: SURFACE, border: `1px solid ${HAIR}` }}>
+              <button onClick={() => setConfirmingEnd(true)} className="rounded-lg py-3 text-[13px] font-semibold"
+                style={{ backgroundColor: RAISED, color: TEXT, border: `1px solid #3A3A40` }}>
                 Завершить сессию · {fmt(equity)} на баланс
               </button>
             )}
@@ -1436,10 +1549,12 @@ function PracticeApp({ onExit }) {
         )}
 
         {/* -------------------------------- контент -------------------------- */}
-        <div className="flex-1 overflow-y-auto">
+        {/* min-h-0 обязателен: без него flex-элемент не даёт себя сжать и
+            вся страница уезжает в скролл (проблема 1). */}
+        <div className="flex-1 min-h-0 overflow-y-auto no-scrollbar">
 
           {tab === "Рынок" && (
-            <>
+            <div className="flex flex-col h-full">
               <div className="px-5 pt-1 flex items-end justify-between">
                 <div>
                   <div className="text-[46px] leading-none font-mono tracking-tight">
@@ -1484,7 +1599,7 @@ function PracticeApp({ onExit }) {
                   className="text-[12px]" style={{ color: DIM }}>{chartMode}</button>
               </div>
 
-              <div className="px-2 pt-1">
+              <div className="px-2 pt-1 flex-1 min-h-0">
                 <Chart state={state} timeframe={timeframe} mode={chartMode}
                   entryPrice={pos?.entryPrice} stopLoss={human.stopLoss} takeProfit={human.takeProfit} />
               </div>
@@ -1497,7 +1612,7 @@ function PracticeApp({ onExit }) {
                   color={pos ? (pos.side === "long" ? LONG : SHORT) : TEXT} />
                 <Metric label="PNL" value={pos ? fmtSigned(pnl) : "—"} color={pnlColor} />
               </div>
-            </>
+            </div>
           )}
 
           {tab === "Позиции" && (
@@ -1523,8 +1638,8 @@ function PracticeApp({ onExit }) {
                   <div className="grid grid-cols-3 gap-2 mt-4">
                     {[[0.25, "25%"], [0.5, "50%"], [1, "всё"]].map(([f, l]) => (
                       <button key={l} onClick={() => doClose(f, `закрыто ${l}`)}
-                        className="rounded-lg py-3 text-[13px]"
-                        style={{ backgroundColor: SURFACE, border: `1px solid ${HAIR}` }}>{l}</button>
+                        className="rounded-lg py-3 text-[13px] font-semibold"
+                        style={{ backgroundColor: RAISED, color: TEXT, border: `1px solid #3A3A40` }}>{l}</button>
                     ))}
                   </div>
                 </>
@@ -1775,8 +1890,8 @@ function PracticeApp({ onExit }) {
                             <span className="text-[10px] w-10 shrink-0" style={{ color: FAINT }}>{label}</span>
                             {steps.map((d) => (
                               <button key={d} disabled={!pos} onClick={() => setRisk(kind, d)}
-                                className="flex-1 py-2.5 rounded text-[12px] font-mono disabled:opacity-25"
-                                style={{ backgroundColor: RAISED }}>
+                                className="flex-1 py-2.5 rounded text-[12px] font-mono font-semibold disabled:opacity-25"
+                                style={{ backgroundColor: RAISED, color: TEXT, border: `1px solid #3A3A40` }}>
                                 {sign}{(d * 100).toFixed(0)}%
                               </button>
                             ))}
@@ -1828,17 +1943,21 @@ function PracticeApp({ onExit }) {
               </div>
               {[0.25, 0.5, 1].map((f) => (
                 <button key={f} onClick={() => setSize(String(Math.round(human.cash * f)))}
-                  className="px-2.5 py-2.5 rounded font-mono text-[11px]"
-                  style={{ backgroundColor: SURFACE, color: DIM }}>{f * 100}%</button>
+                  className="px-2.5 py-2.5 rounded font-mono text-[11px] font-semibold"
+                  style={{ backgroundColor: RAISED, color: TEXT, border: `1px solid ${HAIR}` }}>
+                  {f * 100}%
+                </button>
               ))}
               <button onClick={() => setSheet(sheet === "risk" ? null : "risk")}
-                className="px-2.5 py-2.5 rounded text-[11px]"
-                style={{ backgroundColor: sheet === "risk" ? TEXT : SURFACE, color: sheet === "risk" ? BG : DIM }}>
+                className="px-2.5 py-2.5 rounded text-[11px] font-semibold"
+                style={{ backgroundColor: sheet === "risk" ? TEXT : RAISED,
+                  color: sheet === "risk" ? BG : TEXT, border: `1px solid ${HAIR}` }}>
                 SL/TP
               </button>
               <button onClick={() => setSheet(sheet === "limit" ? null : "limit")}
-                className="px-2.5 py-2.5 rounded text-[11px]"
-                style={{ backgroundColor: sheet === "limit" ? TEXT : SURFACE, color: sheet === "limit" ? BG : DIM }}>
+                className="px-2.5 py-2.5 rounded text-[11px] font-semibold"
+                style={{ backgroundColor: sheet === "limit" ? TEXT : RAISED,
+                  color: sheet === "limit" ? BG : TEXT, border: `1px solid ${HAIR}` }}>
                 лимит{myLimits.length ? ` ${myLimits.length}` : ""}
               </button>
             </div>
@@ -1858,7 +1977,7 @@ function PracticeApp({ onExit }) {
               </button>
               <button disabled={!pos} onClick={() => doClose(1, "позиция закрыта")}
                 className="rounded-lg py-3 disabled:opacity-25 flex flex-col items-center"
-                style={{ backgroundColor: SURFACE, border: `1px solid ${HAIR}` }}>
+                style={{ backgroundColor: RAISED, color: TEXT, border: `1px solid #3A3A40` }}>
                 <span className="font-bold text-[16px] tracking-wide">ЗАКРЫТЬ</span>
                 <span className="text-[9px] leading-tight" style={{ color: pos ? pnlColor : FAINT }}>
                   {pos ? fmtSigned(pnl) : "нет позиции"}
@@ -1879,8 +1998,10 @@ function PracticeApp({ onExit }) {
 
         <div className="grid grid-cols-5 border-t" style={{ borderColor: HAIR }}>
           {TAB_KEYS.map((key) => (
-            <button key={key} onClick={() => setTab(key)} className="py-3 text-[11px]"
-              style={{ color: tab === key ? TEXT : FAINT }}>
+            <button key={key} onClick={() => setTab(key)}
+              className="py-3 text-[11px] font-semibold"
+              style={{ color: tab === key ? BG : DIM,
+                backgroundColor: tab === key ? TEXT : "transparent" }}>
               {key}
             </button>
           ))}
