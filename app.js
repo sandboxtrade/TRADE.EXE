@@ -1866,7 +1866,8 @@ function Chart({ state, timeframe, mode, entryPrice, stopLoss, takeProfit,
           const kind = (g.side === "long") === above ? "tp" : "sl";
           g.onLevel(kind, price);
         } else {
-          setBarW(BAR_DEFAULT); setOffset(0); setYZoom(1);
+          // Без позиции двойной тап показывает всю историю сессии.
+          setBarW(g.fitAll || BAR_DEFAULT); setOffset(0); setYZoom(1);
         }
         lastTap = 0;
         return;
@@ -1979,7 +1980,8 @@ function Chart({ state, timeframe, mode, entryPrice, stopLoss, takeProfit,
   );
   const fit = Math.max(4, Math.ceil(plotW / barW));
   // Ширина свечи, при которой в окно влезает вся накопленная история.
-  // Оценка полной длины истории — «всё» должно уводить дальше окна выборки.
+  // Оценка полной длины истории: нужна двойному тапу, который показывает
+  // всю сессию целиком (кнопки масштаба убраны с экрана).
   const span0 = state.priceHistory.length
     ? state.priceHistory[state.priceHistory.length - 1].t - state.priceHistory[0].t : 0;
   const totalCandles = Math.max(4, Math.min(HISTORY_CANDLES, Math.ceil(span0 / bucketMs) + 1));
@@ -2001,7 +2003,7 @@ function Chart({ state, timeframe, mode, entryPrice, stopLoss, takeProfit,
   if (shown.length < 2 || !Number.isFinite(lo) || !Number.isFinite(hi)) {
     return (
       <div ref={box} className="w-full h-full flex items-center justify-center text-[12px]"
-        style={{ minHeight: 160 }}>
+        style={{ minHeight: 110 }}>
         <span style={{ color: FAINT }}>собираем свечи…</span>
       </div>
     );
@@ -2021,7 +2023,7 @@ function Chart({ state, timeframe, mode, entryPrice, stopLoss, takeProfit,
   const span = max - min || 1;
   const toY = (p) => PAD_T + plotH - ((p - min) / span) * plotH;
 
-  geo.current = { min, max, plotH, padT: PAD_T, side, entryPrice, onLevel,
+  geo.current = { min, max, plotH, padT: PAD_T, side, entryPrice, onLevel, fitAll: fitAllBarW,
     stopLoss: drag?.kind === "sl" ? drag.price : stopLoss,
     takeProfit: drag?.kind === "tp" ? drag.price : takeProfit };
   // Позиция считается по времени, а не по номеру свечи. Раньше при
@@ -2073,28 +2075,6 @@ function Chart({ state, timeframe, mode, entryPrice, stopLoss, takeProfit,
   return (
     <div ref={box} className="w-full h-full relative select-none"
       style={{ minHeight: 160, touchAction: "none" }}>
-
-      {/* Кнопки масштаба. Жесты работают не на всех устройствах и не у всех
-          получаются с первого раза, поэтому отдаление доступно и нажатием. */}
-      <div className="absolute right-1 z-10 flex flex-col gap-1"
-        style={{ bottom: VOL_H + 4 }}>
-        <button onClick={() => setBarW((w) => clamp(w * 1.35, BAR_MIN, BAR_MAX))}
-          className="w-8 h-8 rounded-lg text-[15px] leading-none font-mono tap"
-          style={{ backgroundColor: RAISED, color: TEXT, border: `1px solid ${HAIR}` }}>+</button>
-        <button onClick={() => setBarW((w) => clamp(w / 1.35, BAR_MIN, BAR_MAX))}
-          className="w-8 h-8 rounded-lg text-[15px] leading-none font-mono tap"
-          style={{ backgroundColor: RAISED, color: TEXT, border: `1px solid ${HAIR}` }}>−</button>
-        <button onClick={() => { setOffset(0); setYZoom(1); setBarW(fitAllBarW); }}
-          className="w-8 h-8 rounded-lg text-[9px] leading-none tap"
-          style={{ backgroundColor: RAISED, color: DIM, border: `1px solid ${HAIR}` }}>всё</button>
-      </div>
-
-      {side && !stopLoss && !takeProfit && !drag && (
-        <div className="absolute bottom-1 left-1 z-10 px-2 py-1 rounded text-[10px]"
-          style={{ backgroundColor: RAISED, color: FAINT, border: `1px solid ${HAIR}` }}>
-          двойной тап по графику — стоп или тейк
-        </div>
-      )}
 
       {!auto && (
         <button onClick={() => { setBarW(BAR_DEFAULT); setOffset(0); setYZoom(1); }}
@@ -3013,6 +2993,10 @@ const Icon = ({ name, size = 16, color = TEXT }) => {
     <svg {...common}><circle cx="6" cy="12" r="1.2" fill={color} /><circle cx="12" cy="12" r="1.2" fill={color} />
       <circle cx="18" cy="12" r="1.2" fill={color} /></svg>
   );
+  if (name === "user") return (
+    <svg {...common}><circle cx="12" cy="8" r="4" />
+      <path d="M4 21c0-4.4 3.6-7 8-7s8 2.6 8 7" /></svg>
+  );
   if (name === "eye") return (
     <svg {...common}><path d="M2 12s3.8-6.5 10-6.5S22 12 22 12s-3.8 6.5-10 6.5S2 12 2 12z" />
       <circle cx="12" cy="12" r="3" /></svg>
@@ -3094,8 +3078,14 @@ function EquityCurve({ sessions, rangeMs }) {
     let d = `M ${P[0][0].toFixed(1)},${P[0][1].toFixed(1)}`;
     for (let i = 0; i < P.length - 1; i++) {
       const p0 = P[i - 1] || P[i], p1 = P[i], p2 = P[i + 1], p3 = P[i + 2] || P[i + 1];
-      const c1x = p1[0] + (p2[0] - p0[0]) / 6, c1y = p1[1] + (p2[1] - p0[1]) / 6;
-      const c2x = p2[0] - (p3[0] - p1[0]) / 6, c2y = p2[1] - (p3[1] - p1[1]) / 6;
+      /* Контрольные точки ограничиваются отрезком между соседями: без этого
+         сплайн выбрасывало за пределы данных, и на плоском участке кривая
+         задиралась горбом. */
+      const lim = (v, a, b) => Math.min(Math.max(v, Math.min(a, b)), Math.max(a, b));
+      const c1x = p1[0] + (p2[0] - p0[0]) / 6;
+      const c1y = lim(p1[1] + (p2[1] - p0[1]) / 6, p1[1], p2[1]);
+      const c2x = p2[0] - (p3[0] - p1[0]) / 6;
+      const c2y = lim(p2[1] - (p3[1] - p1[1]) / 6, p1[1], p2[1]);
       d += ` C ${c1x.toFixed(1)},${c1y.toFixed(1)} ${c2x.toFixed(1)},${c2y.toFixed(1)}` +
            ` ${p2[0].toFixed(1)},${p2[1].toFixed(1)}`;
     }
@@ -3109,8 +3099,11 @@ function EquityCurve({ sessions, rangeMs }) {
   const levels = [0];
   for (let v = step; v <= max; v += step) levels.push(v);
   for (let v = -step; v >= min; v -= step) levels.push(v);
-  const shown = levels.filter((v) => v > min + (max - min) * 0.04
-    && v < max - (max - min) * 0.02);
+  // Ноль подписывается отдельно, поэтому близкие к нему уровни убираем —
+  // иначе «+$0» и соседняя подпись наезжали друг на друга.
+  const gap = (max - min) * 0.14;
+  const shown = levels.filter((v) => v > min + (max - min) * 0.05
+    && v < max - (max - min) * 0.03 && Math.abs(v) > gap);
 
   const hhmm = (t) => new Date(t).toLocaleTimeString("ru-RU",
     { hour: "2-digit", minute: "2-digit" });
@@ -3163,9 +3156,11 @@ function EquityCurve({ sessions, rangeMs }) {
         strokeLinejoin="round" clipPath={`url(#${uid}dn)`} className="tx-line"
         style={{ "--len": W * 2 }} />
 
-      <circle cx={x(t1)} cy={y(acc)} r={6} fill={up ? LONG : SHORT} opacity={0.18}
-        className="tx-dot" />
-      <circle cx={x(t1)} cy={y(acc)} r={3} fill={up ? LONG : SHORT} className="tx-pop" />
+      {/* Гало без анимации: CSS-transform у SVG-элемента считается от начала
+          координат картинки, а не от центра круга, поэтому пульсация уводила
+          кружок в сторону — он «летал» по карточке. */}
+      <circle cx={x(t1)} cy={y(acc)} r={5.5} fill={up ? LONG : SHORT} opacity={0.16} />
+      <circle cx={x(t1)} cy={y(acc)} r={2.8} fill={up ? LONG : SHORT} />
 
       <text x={0} y={H - 4} fill={FAINT} fontSize={8.5} fontFamily="monospace">{hhmm(t0)}</text>
       <text x={x(t1)} y={H - 4} fill={FAINT} fontSize={8.5} fontFamily="monospace"
@@ -3178,7 +3173,7 @@ function EquityCurve({ sessions, rangeMs }) {
    Разбор всех закрытых сессий. Данные берутся только из profile.sessions,
    ничего не пересчитывается по рынку.
    ------------------------------------------------------------------------ */
-function StatsSheet({ profile, onClose }) {
+function ProfileScreen({ profile, account, onClose, onSettings }) {
   const list = profile.sessions;
   const n = list.length;
 
@@ -3191,6 +3186,10 @@ function StatsSheet({ profile, onClose }) {
   const avgRank = n ? sum((x) => x.rank) / n : 0;
   const bestRank = n ? Math.min(...list.map((x) => x.rank)) : 0;
   const trades = sum((x) => x.trades);
+  // Суммарный заработок и убыток по отдельности: сумма всех плюсовых
+  // сессий и сумма всех минусовых. total — их разность.
+  const grossWin = list.filter((x) => x.pnl > 0).reduce((a, x) => a + x.pnl, 0);
+  const grossLoss = list.filter((x) => x.pnl < 0).reduce((a, x) => a + x.pnl, 0);
   const avgTime = n ? sum((x) => x.ticks) * CONFIG.market.tickMs / n : 0;
 
   // Распределение мест по пятёркам процентилей: 1-20, 21-40, ...
@@ -3218,9 +3217,26 @@ function StatsSheet({ profile, onClose }) {
       <div className="max-w-md w-full mx-auto flex-1 min-h-0 overflow-y-auto no-scrollbar px-5 pt-5 pb-4">
 
         <div className="flex items-center justify-between">
-          <div className="text-[10px] tracking-[0.3em]" style={{ color: FAINT }}>СТАТИСТИКА</div>
-          <button onClick={onClose} className="text-[11px] tracking-[0.2em] py-2 tap"
-            style={{ color: DIM }}>ЗАКРЫТЬ</button>
+          <button onClick={onClose} className="text-[20px] leading-none py-1 tap">←</button>
+          <div className="text-[10px] tracking-[0.3em]" style={{ color: DIM }}>ПРОФИЛЬ</div>
+          <button onClick={onSettings}
+            className="w-9 h-9 rounded-xl flex items-center justify-center tap"
+            style={{ backgroundColor: RAISED, border: `1px solid ${HAIR}` }}>
+            <Icon name="gear" size={16} color={TEXT} />
+          </button>
+        </div>
+
+        <div className="flex items-center gap-3 mt-5">
+          <div className="w-12 h-12 rounded-full flex items-center justify-center shrink-0"
+            style={{ backgroundColor: RAISED, border: `1px solid ${HAIR}` }}>
+            <Icon name="user" size={22} color={DIM} />
+          </div>
+          <div className="min-w-0">
+            <div className="text-[15px] truncate">{account?.email || "гость"}</div>
+            <div className="text-[11px] mt-0.5" style={{ color: FAINT }}>
+              уровень {profileProgress(profile).level} · баланс {fmt(profile.wallet, 0)}
+            </div>
+          </div>
         </div>
 
         {n === 0 ? (
@@ -3257,6 +3273,10 @@ function StatsSheet({ profile, onClose }) {
               <Cell label="СРЕД. ВРЕМЯ" value={clock(avgTime)} />
               <Cell label="ВЗНОСОВ" value={fmt(invested, 0)} />
               <Cell label="СДЕЛОК/СЕССИЯ" value={(trades / n).toFixed(1)} />
+              <Cell label="ЗАРАБОТАНО" value={fmtSigned(grossWin, 0)}
+                color={grossWin > 0 ? LONG : TEXT} />
+              <Cell label="ПОТЕРЯНО" value={fmtSigned(grossLoss, 0)}
+                color={grossLoss < 0 ? SHORT : TEXT} />
             </div>
 
             <div className="text-[10px] tracking-[0.3em] mt-7 mb-2.5" style={{ color: FAINT }}>
@@ -3688,51 +3708,11 @@ function MarketsTab({ onPlay }) {
   );
 }
 
-/* --------------------------------- ИСТОРИЯ -------------------------------- */
-function HistoryTab({ profile }) {
-  const list = profile.sessions;
-  const card = { backgroundColor: SURFACE, border: `1px solid ${HAIR}` };
-  return (
-    <div className="px-5 pt-5">
-      <div className="text-[11px] tracking-[0.25em] text-center" style={{ color: DIM }}>
-        ИСТОРИЯ СЕССИЙ
-      </div>
-      {list.length === 0 ? (
-        <div className="rounded-2xl py-12 text-center text-[12px] mt-5"
-          style={{ ...card, color: FAINT }}>
-          здесь появятся результаты ваших сессий
-        </div>
-      ) : (
-        <div className="flex flex-col gap-2 mt-5">
-          {list.map((x, i) => (
-            <div key={i}
-              className="rounded-2xl px-4 py-3 flex items-center justify-between gap-3 tx-in"
-              style={{ ...card, ...stagger(Math.min(i, 8)) }}>
-              <div className="min-w-0">
-                <div className="text-[14px] font-mono truncate">
-                  {fmt(x.capital, 0)} → {fmt(x.equity)}
-                </div>
-                <div className="text-[11px] mt-1 truncate" style={{ color: FAINT }}>
-                  {x.at ? new Date(x.at).toLocaleDateString("ru-RU", { day: "numeric", month: "short" }) + " · " : ""}
-                  {clock(x.ticks * CONFIG.market.tickMs)} в рынке · {x.trades} сделок · место {x.rank} из {CONFIG.market.totalPlayers}
-                </div>
-              </div>
-              <span className="text-[14px] font-mono shrink-0"
-                style={{ color: x.pnl >= 0 ? LONG : SHORT }}>{fmtSigned(x.pnl)}</span>
-            </div>
-          ))}
-        </div>
-      )}
-    </div>
-  );
-}
-
 /* ------------------------------- НИЖНЕЕ МЕНЮ ------------------------------ */
 const TABS = [
   { key: "home", label: "ГЛАВНАЯ", icon: "home" },
   { key: "markets", label: "РЫНКИ", icon: "candles" },
   { key: "rank", label: "РЕЙТИНГ", icon: "trophy" },
-  { key: "history", label: "ИСТОРИЯ", icon: "clock" },
 ];
 
 function TabBar({ active, onChange }) {
@@ -3950,15 +3930,105 @@ function plural(n, one, few, many) {
   return many;
 }
 
+
+/* ------------------------------- НАСТРОЙКИ -------------------------------
+   Отдельный экран, а не выпадающее меню. Язык пока только переключатель:
+   перевода в приложении нет, и кнопка это честно говорит.
+   ------------------------------------------------------------------------ */
+const LANGS = [
+  { code: "ru", label: "Русский" },
+  { code: "en", label: "English" },
+];
+
+function SettingsScreen({ account, onClose, onReset, onExit, onSignOut }) {
+  const [lang, setLang] = useState("ru");
+  const [confirmReset, setConfirmReset] = useState(false);
+  const card = { backgroundColor: SURFACE, border: `1px solid ${HAIR}` };
+
+  const Row = ({ label, sub, onClick, color = TEXT, last }) => (
+    <button onClick={onClick}
+      className={`w-full text-left px-4 py-3.5 tap ${last ? "" : "border-b"}`}
+      style={{ borderColor: HAIR }}>
+      <div className="text-[14px]" style={{ color }}>{label}</div>
+      {sub && <div className="text-[11px] mt-0.5" style={{ color: FAINT }}>{sub}</div>}
+    </button>
+  );
+
+  return (
+    <div className="w-full flex flex-col tx-screen"
+      style={{ height: "100dvh", backgroundColor: BG, color: TEXT }}>
+      <div className="max-w-md w-full mx-auto flex-1 min-h-0 overflow-y-auto no-scrollbar px-5 pt-5 pb-6">
+        <div className="flex items-center gap-4">
+          <button onClick={onClose} className="text-[20px] leading-none py-1 tap">←</button>
+          <div className="text-[11px] tracking-[0.25em]" style={{ color: DIM }}>НАСТРОЙКИ</div>
+        </div>
+
+        <div className="text-[10px] tracking-[0.25em] mt-7 mb-2" style={{ color: FAINT }}>ЯЗЫК</div>
+        <div className="grid grid-cols-2 gap-2">
+          {LANGS.map((l) => (
+            <button key={l.code} onClick={() => setLang(l.code)}
+              className="rounded-xl py-3.5 text-[13px] font-semibold tap"
+              style={{ backgroundColor: lang === l.code ? TEXT : SURFACE,
+                color: lang === l.code ? BG : TEXT,
+                border: `1px solid ${lang === l.code ? TEXT : HAIR}` }}>
+              {l.label}
+            </button>
+          ))}
+        </div>
+        <div className="text-[11px] mt-2" style={{ color: FAINT }}>
+          Перевод интерфейса ещё не сделан — переключатель пока ничего не меняет.
+        </div>
+
+        <div className="text-[10px] tracking-[0.25em] mt-7 mb-2" style={{ color: FAINT }}>АККАУНТ</div>
+        <div className="rounded-2xl overflow-hidden" style={card}>
+          <Row label={account?.email || "гость"} sub="почта аккаунта" />
+          {onExit && <Row label="Сменить режим" onClick={onExit} color={DIM} />}
+          <Row label="Выйти из аккаунта" onClick={onSignOut} color={SHORT} last />
+        </div>
+
+        <div className="text-[10px] tracking-[0.25em] mt-7 mb-2" style={{ color: FAINT }}>БАЛАНС</div>
+        <div className="rounded-2xl overflow-hidden" style={card}>
+          {confirmReset ? (
+            <div className="px-4 py-3.5">
+              <div className="text-[13px]" style={{ color: SHORT }}>
+                Обнулить баланс? История сессий останется.
+              </div>
+              <div className="grid grid-cols-2 gap-2 mt-3">
+                <button onClick={() => setConfirmReset(false)}
+                  className="rounded-xl py-3 text-[13px] font-semibold tap"
+                  style={{ backgroundColor: RAISED, color: TEXT, border: "1px solid #3A3A40" }}>
+                  Отмена
+                </button>
+                <button onClick={() => { onReset(); setConfirmReset(false); }}
+                  className="rounded-xl py-3 text-[13px] font-semibold tap"
+                  style={{ backgroundColor: SHORT, color: BG }}>
+                  Обнулить
+                </button>
+              </div>
+            </div>
+          ) : (
+            <Row label="Сбросить баланс до $0" sub="пополнить можно на экране пополнения"
+              onClick={() => setConfirmReset(true)} color={SHORT} last />
+          )}
+        </div>
+
+        <div className="text-[11px] text-center mt-8 leading-relaxed" style={{ color: FAINT }}>
+          trade.exe · закрытый рынок для практики
+        </div>
+      </div>
+    </div>
+  );
+}
+
 /* --------------------------------- ЛОББИ --------------------------------- */
 function Lobby({ profile, account, onNew, onReset, onExit, onSignOut, onTopUp }) {
   const st = profileStats(profile);
   const [tab, setTab] = useState("home");
-  const [stats, setStats] = useState(false);
+  const [profileOpen, setProfileOpen] = useState(false);
+  const [settingsOpen, setSettingsOpen] = useState(false);
   const [deposit, setDeposit] = useState(false);
   const [range, setRange] = useState(LOBBY_RANGES[0]);
   const [rangeOpen, setRangeOpen] = useState(false);
-  const [menu, setMenu] = useState(false);
   const [period, setPeriod] = useState("ДЕНЬ");
   const [notice, setNotice] = useState(null);
 
@@ -3969,7 +4039,15 @@ function Lobby({ profile, account, onNew, onReset, onExit, onSignOut, onTopUp })
   const affordable = CONFIG.market.capitalOptions.some((c) => c <= profile.wallet);
   const card = { backgroundColor: SURFACE, border: `1px solid ${HAIR}` };
 
-  if (stats) return <StatsSheet profile={profile} onClose={() => setStats(false)} />;
+  if (profileOpen) {
+    return <ProfileScreen profile={profile} account={account}
+      onClose={() => setProfileOpen(false)}
+      onSettings={() => { setProfileOpen(false); setSettingsOpen(true); }} />;
+  }
+  if (settingsOpen) {
+    return <SettingsScreen account={account} onClose={() => setSettingsOpen(false)}
+      onReset={onReset} onExit={onExit} onSignOut={onSignOut} />;
+  }
   if (deposit) {
     return <DepositScreen profile={profile} onBack={() => setDeposit(false)}
       onDemoTopUp={onTopUp} />;
@@ -3990,31 +4068,12 @@ function Lobby({ profile, account, onNew, onReset, onExit, onSignOut, onTopUp })
                   <div className="text-[19px] tracking-tight mt-1">trade.exe</div>
                 </div>
                 <div className="flex gap-2">
-                  <IconButton name="bars" active={false} onClick={() => setStats(true)} />
-                  <IconButton name="gear" active={menu} onClick={() => setMenu((v) => !v)} />
+                  <IconButton name="user" active={false} onClick={() => setProfileOpen(true)} />
+                  <IconButton name="gear" active={false} onClick={() => setSettingsOpen(true)} />
                 </div>
               </div>
 
               <LevelBar profile={profile} />
-
-              {menu && (
-                <div className="mt-4 rounded-2xl p-2 flex flex-col tx-pop" style={card}>
-                  <button onClick={() => { onReset(); setMenu(false); }}
-                    className="text-left px-3 py-3 rounded-xl text-[13px] tap" style={{ color: TEXT }}>
-                    Сбросить баланс до {fmt(STARTING_WALLET, 0)}
-                  </button>
-                  {onExit && (
-                    <button onClick={onExit} className="text-left px-3 py-3 rounded-xl text-[13px] tap"
-                      style={{ color: DIM }}>Сменить режим</button>
-                  )}
-                  {onSignOut && (
-                    <button onClick={onSignOut} className="text-left px-3 py-3 rounded-xl text-[13px] tap"
-                      style={{ color: SHORT }}>
-                      Выйти{account?.email ? ` · ${account.email}` : ""}
-                    </button>
-                  )}
-                </div>
-              )}
 
               {/* -------------------------- баланс --------------------------- */}
               <div className="text-[10px] tracking-[0.3em] mt-5" style={{ color: FAINT }}>БАЛАНС</div>
@@ -4114,7 +4173,7 @@ function Lobby({ profile, account, onNew, onReset, onExit, onSignOut, onTopUp })
                   ПОСЛЕДНИЕ СЕССИИ
                 </span>
                 {profile.sessions.length > 0 && (
-                  <button onClick={() => setTab("history")}
+                  <button onClick={() => setProfileOpen(true)}
                     className="text-[10px] tracking-[0.2em] tap" style={{ color: LONG }}>
                     СМОТРЕТЬ ВСЕ
                   </button>
@@ -4153,7 +4212,7 @@ function Lobby({ profile, account, onNew, onReset, onExit, onSignOut, onTopUp })
 
           {tab === "markets" && <MarketsTab onPlay={(e) => onNew(e)} />}
           {tab === "rank" && <RankingTab profile={profile} period={period} onPeriod={setPeriod} />}
-          {tab === "history" && <HistoryTab profile={profile} />}
+
         </div>
       </div>
 
@@ -4608,7 +4667,7 @@ function PracticeApp({ onExit }) {
   if (screen === "lobby") {
     return <Lobby profile={profile} account={account} onSignOut={signOut} onTopUp={topUp}
       onNew={(e) => { setPendingEyes(!!e); setScreen("setup"); }} onExit={onExit}
-      onReset={() => persist({ ...profile, wallet: STARTING_WALLET, deposited: profile.deposited + STARTING_WALLET })} />;
+      onReset={() => persist({ ...profile, wallet: 0 })} />;
   }
   if (screen === "setup") {
     return <SessionSetup wallet={profile.wallet} onStart={queueSession}
@@ -4625,7 +4684,7 @@ function PracticeApp({ onExit }) {
   if (!engineRef.current || !snapshot) {
     return <Lobby profile={profile} account={account} onSignOut={signOut} onTopUp={topUp}
       onNew={(e) => { setPendingEyes(!!e); setScreen("setup"); }} onExit={onExit}
-      onReset={() => persist({ ...profile, wallet: STARTING_WALLET })} />;
+      onReset={() => persist({ ...profile, wallet: 0 })} />;
   }
 
   const transport = engineRef.current;
@@ -4650,6 +4709,8 @@ function PracticeApp({ onExit }) {
   const pnlColor = pnl > 0 ? LONG : pnl < 0 ? SHORT : TEXT;
 
   const refresh = () => setSnapshot(transport.snapshot());
+  // Пауза осталась только во вкладке «Отладка»: с торгового экрана
+  // переключатель LIVE убран.
   const togglePause = () => {
     transport.setPaused(!transport.paused);
     setPaused(transport.paused);
@@ -4738,13 +4799,6 @@ function PracticeApp({ onExit }) {
                 {clock(left)}
               </span>
             )}
-            <button onClick={togglePause} className="flex items-center gap-1.5">
-              <span className="w-1.5 h-1.5 rounded-full"
-                style={{ backgroundColor: paused ? FAINT : TEXT }} />
-              <span className="text-[11px] tracking-[0.15em]" style={{ color: paused ? FAINT : DIM }}>
-                {paused ? "ПАУЗА" : "LIVE"}
-              </span>
-            </button>
             <button onClick={() => setShowSettings((v) => !v)}
               className="text-[11px] tracking-[0.15em]" style={{ color: showSettings ? TEXT : FAINT }}>
               ЕЩЁ
@@ -4797,7 +4851,7 @@ function PracticeApp({ onExit }) {
         <div className="flex-1 min-h-0 overflow-y-auto no-scrollbar">
 
           {tab === "Рынок" && (
-            <div className="flex flex-col h-full relative">
+            <div className="flex flex-col h-full relative overflow-hidden">
               {!snap.tradingOpen && sheet !== "limit" && (
                 <div className="absolute inset-0 z-20 flex flex-col items-center justify-center
                   backdrop-blur-[2px] tx-fade"
@@ -4855,30 +4909,29 @@ function PracticeApp({ onExit }) {
               )}
               <div className="px-5 pt-1 flex items-end justify-between">
                 <div>
-                  <div className="text-[46px] leading-none font-mono tracking-tight">
+                  <div className="text-[38px] leading-none font-mono tracking-tight">
                     {fmt(state.price)}
                   </div>
-                  <div className="text-[14px] font-mono mt-1.5" style={{ color: changeAbs >= 0 ? LONG : SHORT }}>
+                  <div className="text-[13px] font-mono mt-1" style={{ color: changeAbs >= 0 ? LONG : SHORT }}>
                     {changeAbs >= 0 ? "+" : "−"}{Math.abs(changePct * 100).toFixed(2)}%
                   </div>
                 </div>
                 <div className="text-right">
-                  <div className="text-[11px] tracking-[0.15em]" style={{ color: DIM }}>{state.phase}</div>
-                  <div className="text-[11px] font-mono mt-1" style={{ color: FAINT }}>
+                  <div className="text-[11px] font-mono" style={{ color: FAINT }}>
                     {stats.activePositions} / {CONFIG.market.totalPlayers} в рынке
                   </div>
                 </div>
               </div>
 
               {/* Полоса сторон — единственный график толпы на главном экране */}
-              <div className="px-5 pt-4">
+              <div className="px-5 pt-2.5">
                 <div className="h-1 w-full flex rounded-full overflow-hidden" style={{ backgroundColor: HAIR }}>
                   <div style={{ width: `${stats.longShare * 100}%`, backgroundColor: LONG }} />
                   <div style={{ width: `${stats.shortShare * 100}%`, backgroundColor: SHORT }} />
                 </div>
               </div>
 
-              <div className="px-5 pt-4 grid grid-cols-4 gap-3">
+              <div className="px-5 pt-3 grid grid-cols-4 gap-3">
                 <Metric label="LONG" value={fmt(stats.longExposure, 0)} color={LONG} />
                 <Metric label="SHORT" value={fmt(stats.shortExposure, 0)} color={SHORT} />
                 <Metric label="ЗАРАБОТАЛИ ЛОНГИ" value={fmtSigned(state.longRealized ?? 0, 0)}
@@ -4887,7 +4940,7 @@ function PracticeApp({ onExit }) {
                   color={(state.shortRealized ?? 0) >= 0 ? LONG : SHORT} />
               </div>
 
-              <div className="flex items-center justify-between px-5 pt-5">
+              <div className="flex items-center justify-between px-5 pt-3">
                 <div className="flex gap-0.5">
                   {TIMEFRAMES.map((tf) => (
                     <Toggle key={tf.label} active={timeframe === tf.label} onClick={() => setTimeframe(tf.label)}>
@@ -4930,7 +4983,8 @@ function PracticeApp({ onExit }) {
                   eyes={eyesData && eyesOn ? eyesFilter(eyesData.live, eyesFilterName) : null} />
               </div>
 
-              <div className="px-5 pb-4 grid grid-cols-4 gap-3">
+              <div className="px-5 pb-2 pt-1 grid gap-3"
+                style={{ gridTemplateColumns: `repeat(${leverage > 1 ? 5 : 4}, minmax(0, 1fr))` }}>
                 <Metric label="ЭКВИТИ" value={fmt(equity)} />
                 <Metric label="СВОБОДНО" value={fmt(human.cash)} />
                 <Metric label="ПОЗИЦИЯ"
@@ -5131,6 +5185,11 @@ function PracticeApp({ onExit }) {
               <Line left="Оборот за тик" right={fmt((state.buyPressure ?? 0) + (state.sellPressure ?? 0))} />
               <Line left="Заработали лонги" right={fmtSigned(state.longRealized ?? 0)}
                 color={(state.longRealized ?? 0) >= 0 ? LONG : SHORT} />
+              <button onClick={togglePause}
+                className="w-full text-left py-2.5 text-[13px] tap"
+                style={{ color: paused ? SHORT : DIM, borderBottom: `1px solid ${HAIR}` }}>
+                {paused ? "Рынок на паузе — возобновить" : "Поставить рынок на паузу"}
+              </button>
               <Line left="Фаза сессии"
                 right={snap.sessionPhase === null || snap.sessionPhase === undefined
                   ? "без таймера" : `${Math.round(snap.sessionPhase * 100)}%`} />
@@ -5321,19 +5380,19 @@ function PracticeApp({ onExit }) {
 
             <div className="grid grid-cols-3 gap-2">
               <button disabled={!snap.tradingOpen || (notional < 1 && !(pos && pos.side === "short"))} onClick={doBuy}
-                className="rounded-lg py-3 disabled:opacity-25 flex flex-col items-center"
+                className="rounded-lg py-2.5 disabled:opacity-25 flex flex-col items-center"
                 style={{ backgroundColor: LONG, color: BG, boxShadow: `0 0 26px ${LONG}38` }}>
                 <span className="font-bold text-[16px] tracking-wide">ЛОНГ</span>
                 <span className="text-[9px] opacity-70 leading-tight">{buyHint}</span>
               </button>
               <button disabled={!snap.tradingOpen || (notional < 1 && !(pos && pos.side === "long"))} onClick={doSell}
-                className="rounded-lg py-3 disabled:opacity-25 flex flex-col items-center"
+                className="rounded-lg py-2.5 disabled:opacity-25 flex flex-col items-center"
                 style={{ backgroundColor: SHORT, color: BG, boxShadow: `0 0 26px ${SHORT}38` }}>
                 <span className="font-bold text-[16px] tracking-wide">ШОРТ</span>
                 <span className="text-[9px] opacity-70 leading-tight">{sellHint}</span>
               </button>
               <button disabled={!pos || !snap.tradingOpen} onClick={() => doClose(1, "позиция закрыта")}
-                className="rounded-lg py-3 disabled:opacity-25 flex flex-col items-center"
+                className="rounded-lg py-2.5 disabled:opacity-25 flex flex-col items-center"
                 style={{ backgroundColor: RAISED, color: TEXT, border: `1px solid #3A3A40` }}>
                 <span className="font-bold text-[16px] tracking-wide">ЗАКРЫТЬ</span>
                 <span className="text-[9px] leading-tight" style={{ color: pos ? pnlColor : FAINT }}>
