@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 
 /* ============================================================================
@@ -59,10 +59,14 @@ const CONFIG = {
   // предсказуемость, быстрые трендовые — наоборот. Итог замера на 12 сидах:
   // автокорреляция −0.138, VR(20) = 1.63, размах 15.7% против −0.095 / 1.46 /
   // 14.3% у прежних ботов, при этом механические стратегии стали не выгоднее.
-  NPC_FAST_FADE_WEIGHT: 2.6,
-  NPC_FAST_TREND_WEIGHT: 2.2,
+  // После появления охотников за стопами и настоящих стоп-заявок каскады
+  // усилили тренды, и моментум-стратегия стала выгоднее. Ручки пересчитаны:
+  // моментум-10 упал с 3.23 до 1.65, моментум-40 с 3.66 до 2.57.
+  NPC_FAST_FADE_WEIGHT: 3.0,
+  NPC_FAST_TREND_WEIGHT: 1.6,
   NPC_ACT_SCALE: 1.0,
   NPC_SIZE_SCALE: 0.6,
+  NPC_ORDER_FRACTION: 0.45,   // доля ботов с настоящими стоп/тейк заявками
   NPC_THRESH_SCALE: 0.4,
   NPC_HERD_MAX: 0.25,
   NPC_CONVICTION_UP: 1.10,
@@ -484,6 +488,11 @@ const ARCHETYPES = {
   breakout:     { size: [0.4, 0.8], act: 0.40, stop: -0.12, take: 0.50, bias: "break" },
   // Стадо: смотрит не на цену, а на перекос позиций толпы.
   herd:         { size: [0.3, 0.6], act: 0.25, stop: -0.15, take: 0.35, bias: "herd" },
+  // Охотник за стопами: толкает цену к ближайшему экстремуму окна, где
+  // скопились чужие стопы, и разворачивается, когда уровень пробит.
+  hunter:       { size: [0.5, 0.9], act: 0.45, stop: -0.10, take: 0.20, bias: "hunt" },
+  // Ловушка: входит ПРОТИВ свежего пробоя, рассчитывая на ложный выход.
+  trap:         { size: [0.4, 0.7], act: 0.35, stop: -0.12, take: 0.30, bias: "trap" },
 };
 const TYPES = Object.keys(ARCHETYPES);
 
@@ -520,6 +529,10 @@ function attachNPCs(m, startIdx, count, seed) {
       take: spec.take * CONFIG.NPC_PNL_SCALE,
       hold: Math.round(CONFIG.NPC_HOLD_MIN +
         r() * (CONFIG.NPC_HOLD_MAX - CONFIG.NPC_HOLD_MIN)),
+      // Часть ботов выставляет НАСТОЯЩИЕ заявки стоп/тейк, а не проверяет
+      // пороги у себя внутри. Их срабатывание идёт через pendingIntents в
+      // общем клиринге, поэтому массовый вынос стопов виден как каскад.
+      usesOrders: r() < CONFIG.NPC_ORDER_FRACTION,
       since: 0, lastU: 0, peak: 0, conviction: 1, mood: 0,
       rng: mulberry32(seed * 7919 + k + 1),
     };
@@ -602,6 +615,20 @@ function decide(m, i, history) {
     else if (Number.isFinite(lo) && P < lo) dir = -1;
   } else if (n.spec.bias === "herd") {
     dir = Math.sign(m.crowd || 0);
+  } else if (n.spec.bias === "hunt") {
+    // Ближе к какому краю окна стоит цена — туда и давим: там чужие стопы.
+    const { hi, lo } = windowRange(history, n.look);
+    if (!Number.isFinite(hi) || hi <= lo) return 0;
+    const pos = (P - lo) / (hi - lo);
+    if (pos > 0.78) dir = 1;
+    else if (pos < 0.22) dir = -1;
+    else return 0;
+  } else if (n.spec.bias === "trap") {
+    // Свежий пробой — ставим против него в расчёте на ложный выход.
+    const { hi, lo } = windowRange(history, n.look);
+    if (Number.isFinite(hi) && P > hi) dir = -1;
+    else if (Number.isFinite(lo) && P < lo) dir = 1;
+    else return 0;
   } else if (n.spec.bias === "trend") {
     // Быстрые трендовые смотрят на последние тики, медленные — на своё окно.
     const sig = n.spec.fast ? mom : slow;
@@ -627,6 +654,18 @@ function decide(m, i, history) {
 
   const own = Math.max(0, pl.cash);
   const units = m.curve.unitsFor(own * n.size * n.conviction * m.npcLeverage, P);
+  if (units <= 0) return 0;
+
+  if (n.usesOrders) {
+    // Заявки ставятся сразу от предполагаемой цены входа. Реальный вход
+    // случится по цене клиринга, поэтому уровни примерные — так же, как
+    // у живого игрока, который жмёт кнопку до исполнения.
+    const s = Math.abs(n.stop), t = Math.abs(n.take);
+    pl.stopLoss = dir > 0 ? P * (1 - s) : P * (1 + s);
+    pl.takeProfit = dir > 0 ? P * (1 + t) : P * (1 - t);
+  } else {
+    pl.stopLoss = null; pl.takeProfit = null;
+  }
   return dir > 0 ? units : -units;
 }
 
@@ -911,6 +950,7 @@ CONFIG.market = {
 };
 
 const RU_LABELS = {
+  breakout: "пробойщик", herd: "стадо", hunter: "охотник", trap: "ловушка",
   aggressive: "агрессивный", conservative: "консервативный", momentum: "моментум",
   contrarian: "контрариан", random: "случайный", scared: "пугливый",
   greedy: "жадный", scalper: "скальпер", longterm: "долгосрочный",
@@ -1235,7 +1275,8 @@ const Y_MIN = 0.2, Y_MAX = 6;   // растяжение ценовой шкал�
 const HISTORY_CANDLES = 2000;
 const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
 
-function Chart({ state, timeframe, mode, entryPrice, stopLoss, takeProfit, liquidationPrice }) {
+function Chart({ state, timeframe, mode, entryPrice, stopLoss, takeProfit,
+  liquidationPrice, side, onLevel }) {
   const box = useRef(null);
   const [size, setSize] = useState({ w: 360, h: 300 });
 
@@ -1266,32 +1307,79 @@ function Chart({ state, timeframe, mode, entryPrice, stopLoss, takeProfit, liqui
   const [yZoom, setYZoom] = useState(1);           // растяжение ценовой шкалы
   const view = useRef({ barW, offset, yZoom });
   view.current = { barW, offset, yZoom };
+  // Всё, что нужно обработчикам касаний: они вешаются один раз, поэтому
+  // читают свежие значения через ref, а не через замыкание.
+  const geo = useRef({});
+  const [drag, setDrag] = useState(null);   // {kind, price} во время перетаскивания
+  const dragRef = useRef(null);
+  dragRef.current = drag;
   const auto = offset === 0 && Math.abs(yZoom - 1) < 0.02 && Math.abs(barW - BAR_DEFAULT) < 0.1;
 
   // --- жесты ---
   useEffect(() => {
     const el = box.current;
     if (!el) return;
-    let one = null, two = null, lastTap = 0;
+    let one = null, two = null, grab = null, lastTap = 0, lastX = 0, lastY = 0;
 
     const spread = (t) => ({
       x: Math.abs(t[0].clientX - t[1].clientX),
       y: Math.abs(t[0].clientY - t[1].clientY),
     });
 
+    // Экранная координата -> цена. Нужна и для двойного тапа, и для
+    // перетаскивания линий.
+    const priceAt = (clientY) => {
+      const g = geo.current;
+      const top = el.getBoundingClientRect().top;
+      const y = clientY - top;
+      const k = (g.padT + g.plotH - y) / g.plotH;
+      return g.min + k * (g.max - g.min);
+    };
+    const yOf = (price) => {
+      const g = geo.current;
+      return g.padT + g.plotH - ((price - g.min) / (g.max - g.min)) * g.plotH;
+    };
+
     const start = (e) => {
       if (e.touches.length === 2) {
         const s = spread(e.touches);
         two = { d: Math.max(12, Math.hypot(s.x, s.y)), ...view.current };
-        one = null;
-      } else if (e.touches.length === 1) {
-        one = { x: e.touches[0].clientX, offset: view.current.offset };
-        const now = Date.now();
-        if (now - lastTap < 300) {
+        one = null; grab = null;
+        return;
+      }
+      if (e.touches.length !== 1) return;
+      const g = geo.current;
+      const top = el.getBoundingClientRect().top;
+      const y = e.touches[0].clientY - top;
+
+      // Захват существующей линии стопа или тейка.
+      grab = null;
+      if (g.side) {
+        for (const kind of ["sl", "tp"]) {
+          const v = kind === "sl" ? g.stopLoss : g.takeProfit;
+          if (v && Math.abs(yOf(v) - y) < 16) { grab = { kind }; break; }
+        }
+      }
+      if (grab) { setDrag({ kind: grab.kind, price: priceAt(e.touches[0].clientY) }); return; }
+
+      one = { x: e.touches[0].clientX, y: e.touches[0].clientY, offset: view.current.offset };
+      const now = Date.now();
+      if (now - lastTap < 320 && Math.abs(e.touches[0].clientY - lastY) < 24
+        && Math.abs(e.touches[0].clientX - lastX) < 24) {
+        // Двойной тап: ставим уровень, если позиция открыта, иначе сбрасываем вид.
+        if (g.side && g.onLevel) {
+          const price = priceAt(e.touches[0].clientY);
+          const above = price > g.entryPrice;
+          // Лонг: выше входа — тейк, ниже — стоп. Шорт наоборот.
+          const kind = (g.side === "long") === above ? "tp" : "sl";
+          g.onLevel(kind, price);
+        } else {
           setBarW(BAR_DEFAULT); setOffset(0); setYZoom(1);
         }
-        lastTap = now;
+        lastTap = 0;
+        return;
       }
+      lastTap = now; lastX = e.touches[0].clientX; lastY = e.touches[0].clientY;
     };
 
     const move = (e) => {
@@ -1305,6 +1393,11 @@ function Chart({ state, timeframe, mode, entryPrice, stopLoss, takeProfit, liqui
         setYZoom(clamp(two.yZoom * k, Y_MIN, Y_MAX));
         return;
       }
+      if (e.touches.length === 1 && grab) {
+        e.preventDefault();
+        setDrag({ kind: grab.kind, price: priceAt(e.touches[0].clientY) });
+        return;
+      }
       if (e.touches.length === 1 && one) {
         const dx = e.touches[0].clientX - one.x;
         if (Math.abs(dx) < 6) return;
@@ -1314,7 +1407,17 @@ function Chart({ state, timeframe, mode, entryPrice, stopLoss, takeProfit, liqui
       }
     };
 
-    const end = (e) => { if (e.touches.length === 0) { one = null; two = null; } };
+    const end = (e) => {
+      if (e.touches.length !== 0) return;
+      if (grab) {
+        // Линию отпустили — фиксируем новое значение.
+        const g = geo.current;
+        const d = dragRef.current;
+        if (d && g.onLevel) g.onLevel(d.kind, d.price);
+        setDrag(null);
+      }
+      one = null; two = null; grab = null;
+    };
     const wheel = (e) => {
       e.preventDefault();
       const k = e.deltaY > 0 ? 0.9 : 1.11;
@@ -1373,10 +1476,22 @@ function Chart({ state, timeframe, mode, entryPrice, stopLoss, takeProfit, liqui
   const volTop = PAD_T + plotH + 4;
 
   const bucketMs = TIMEFRAMES.find((t) => t.label === timeframe)?.ms ?? 1000;
-  const all = buildCandles(state.priceHistory, bucketMs, HISTORY_CANDLES);
+  // Свечи пересобираются только когда пришли новые точки или сменился
+  // таймфрейм. Раньше 6000 точек перемалывались в 2000 свечей на КАЖДОМ
+  // кадре при перерисовке раз в 100 мс — на телефоне это и давало
+  // подвисания и запаздывающую отрисовку.
+  const need = Math.min(HISTORY_CANDLES, Math.ceil(plotW / barW) + offset + 8);
+  const all = useMemo(
+    () => buildCandles(state.priceHistory, bucketMs, need),
+    [state.priceHistory.length, bucketMs, need]
+  );
   const fit = Math.max(4, Math.ceil(plotW / barW));
   // Ширина свечи, при которой в окно влезает вся накопленная история.
-  const fitAllBarW = clamp(plotW / Math.max(4, all.length), BAR_MIN, BAR_MAX);
+  // Оценка полной длины истории — «всё» должно уводить дальше окна выборки.
+  const span0 = state.priceHistory.length
+    ? state.priceHistory[state.priceHistory.length - 1].t - state.priceHistory[0].t : 0;
+  const totalCandles = Math.max(4, Math.min(HISTORY_CANDLES, Math.ceil(span0 / bucketMs) + 1));
+  const fitAllBarW = clamp(plotW / totalCandles, BAR_MIN, BAR_MAX);
   const end = Math.max(1, all.length - offset);
   const shown = all.slice(Math.max(0, end - fit), end);
 
@@ -1413,6 +1528,10 @@ function Chart({ state, timeframe, mode, entryPrice, stopLoss, takeProfit, liqui
 
   const span = max - min || 1;
   const toY = (p) => PAD_T + plotH - ((p - min) / span) * plotH;
+
+  geo.current = { min, max, plotH, padT: PAD_T, side, entryPrice, onLevel,
+    stopLoss: drag?.kind === "sl" ? drag.price : stopLoss,
+    takeProfit: drag?.kind === "tp" ? drag.price : takeProfit };
   // Позиция считается по времени, а не по номеру свечи. Раньше при
   // появлении новой свечи весь ряд мгновенно прыгал влево на целую свечу;
   // теперь он едет непрерывно, доля за долей текущего бакета.
@@ -1478,6 +1597,13 @@ function Chart({ state, timeframe, mode, entryPrice, stopLoss, takeProfit, liqui
           style={{ backgroundColor: RAISED, color: DIM, border: `1px solid ${HAIR}` }}>всё</button>
       </div>
 
+      {side && !stopLoss && !takeProfit && !drag && (
+        <div className="absolute bottom-1 left-1 z-10 px-2 py-1 rounded text-[10px]"
+          style={{ backgroundColor: RAISED, color: FAINT, border: `1px solid ${HAIR}` }}>
+          двойной тап по графику — стоп или тейк
+        </div>
+      )}
+
       {!auto && (
         <button onClick={() => { setBarW(BAR_DEFAULT); setOffset(0); setYZoom(1); }}
           className="absolute top-1 left-1 z-10 px-2 py-1 rounded text-[10px] font-mono tap"
@@ -1541,8 +1667,16 @@ function Chart({ state, timeframe, mode, entryPrice, stopLoss, takeProfit, liqui
 
         {level(entryPrice, `вход ${entryPrice?.toFixed(2)}`, "6 4", TEXT, true)}
         {level(liquidationPrice, `ликвидация ${liquidationPrice?.toFixed(2)}`, "2 2", SHORT, true)}
-        {level(stopLoss, `стоп ${stopLoss?.toFixed(2)}`, "4 3", SHORT)}
-        {level(takeProfit, `тейк ${takeProfit?.toFixed(2)}`, "4 3", LONG)}
+        {(() => {
+          const sl = drag?.kind === "sl" ? drag.price : stopLoss;
+          const tp = drag?.kind === "tp" ? drag.price : takeProfit;
+          return (
+            <>
+              {level(sl, `стоп ${sl?.toFixed(2)}`, "4 3", SHORT, drag?.kind === "sl")}
+              {level(tp, `тейк ${tp?.toFixed(2)}`, "4 3", LONG, drag?.kind === "tp")}
+            </>
+          );
+        })()}
 
         {/* объёмы */}
         {shown.map((c, i) => {
@@ -3677,6 +3811,22 @@ function PracticeApp({ onExit }) {
     const res = await send({ type: "TRADE", action: "CLOSE", fraction, reason: "ручное закрытие" });
     if (res.ok) say(label);
   };
+  /**
+   * Уровень, поставленный прямо на графике: двойным тапом или перетаскиванием
+   * линии. Тип определяется сам — по стороне позиции и по тому, выше или ниже
+   * входа оказалась точка.
+   */
+  const setLevelFromChart = async (kind, price) => {
+    if (!pos || !Number.isFinite(price)) return;
+    const value = Math.max(0.01, price);
+    const res = await send({
+      type: "PROTECT",
+      stopLoss: kind === "sl" ? value : null,
+      takeProfit: kind === "tp" ? value : null,
+    });
+    if (res.ok) say(`${kind === "sl" ? "стоп" : "тейк"} ${value.toFixed(2)}`);
+  };
+
   const setRisk = async (kind, delta) => {
     if (!pos) return;
     const long = pos.side === "long";
@@ -3837,7 +3987,8 @@ function PracticeApp({ onExit }) {
               <div className="px-2 pt-1 flex-1 min-h-0">
                 <Chart state={state} timeframe={timeframe} mode={chartMode}
                   entryPrice={pos?.entryPrice} stopLoss={human.stopLoss} takeProfit={human.takeProfit}
-                  liquidationPrice={human.liquidationPrice} />
+                  liquidationPrice={human.liquidationPrice}
+                  side={pos?.side} onLevel={setLevelFromChart} />
               </div>
 
               <div className="px-5 pb-4 grid grid-cols-4 gap-3">
