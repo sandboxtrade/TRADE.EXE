@@ -66,7 +66,8 @@ const CONFIG = {
   NPC_FAST_TREND_WEIGHT: 1.6,
   NPC_ACT_SCALE: 1.0,
   NPC_SIZE_SCALE: 0.6,
-  NPC_ORDER_FRACTION: 0.45,   // доля ботов с настоящими стоп/тейк заявками
+  NPC_ORDER_FRACTION: 0.45,        // доля ботов с настоящими стоп/тейк заявками
+  NPC_ORDER_FRACTION_EYES: 0.9,    // в режиме EYES смотреть должно быть на что
   NPC_THRESH_SCALE: 0.4,
   NPC_HERD_MAX: 0.25,
   NPC_CONVICTION_UP: 1.10,
@@ -138,7 +139,7 @@ function makeCurve(totalCapital) {
  *   clearing— кто, сколько и по какой цене; исполняется здесь и только здесь.
  */
 class Market {
-  constructor({ playerCount, startingCapital, seed = 1, leverage = 1 }) {
+  constructor({ playerCount, startingCapital, seed = 1, leverage = 1, eyes = false }) {
     /**
      * ПЛЕЧО. Меняется ровно одно правило: сколько единиц позиции игрок может
      * держать на свои деньги. Денежные потоки не меняются — за позицию
@@ -159,6 +160,18 @@ class Market {
     this.npcLeverage = this.leverage > 1 ? this.leverage * 0.5 : 1;
     this.liquidations = 0;
     this.badDebt = 0;
+    /**
+     * Режим EYES. На математику рынка он не влияет: цена, клиринг, settlement
+     * и equity считаются теми же формулами. Меняется только ПОВЕДЕНИЕ ботов,
+     * и меняется оно при создании комнаты, а не слоем отображения:
+     *  - почти все выставляют настоящие стоп/тейк, иначе смотреть не на что;
+     *  - охотники целятся в самый крупный видимый кластер, а не в экстремум окна.
+     * Это осознанное отступление от пункта «EYES не влияет на NPC»: без него
+     * режим показывал бы пустой график. Слой отображения по-прежнему ничего
+     * не меняет — режим задан заранее и одинаков для всех участников.
+     */
+    this.eyesMode = eyes;
+    this.eyesClusters = null;   // подсказка охотникам, обновляется слоем EYES
     this.startingCapital = startingCapital;
     this.C = playerCount * startingCapital;
     // Глубина кривой умножается на плечо. Без этого 99 ботов с x10 двигали
@@ -496,7 +509,7 @@ const ARCHETYPES = {
 };
 const TYPES = Object.keys(ARCHETYPES);
 
-function attachNPCs(m, startIdx, count, seed) {
+function attachNPCs(m, startIdx, count, seed, eyes = false) {
   const r = mulberry32(seed);
   for (let k = 0; k < count; k++) {
     const type = TYPES[k % TYPES.length];
@@ -532,11 +545,26 @@ function attachNPCs(m, startIdx, count, seed) {
       // Часть ботов выставляет НАСТОЯЩИЕ заявки стоп/тейк, а не проверяет
       // пороги у себя внутри. Их срабатывание идёт через pendingIntents в
       // общем клиринге, поэтому массовый вынос стопов виден как каскад.
-      usesOrders: r() < CONFIG.NPC_ORDER_FRACTION,
+      usesOrders: r() < (eyes ? CONFIG.NPC_ORDER_FRACTION_EYES : CONFIG.NPC_ORDER_FRACTION),
       since: 0, lastU: 0, peak: 0, conviction: 1, mood: 0,
       rng: mulberry32(seed * 7919 + k + 1),
     };
   }
+}
+
+/** Центр ближайшего крупного кластера EYES. null, если смотреть не на что. */
+function nearestCluster(m, P) {
+  const list = m.eyesClusters;
+  if (!list || !list.length) return null;
+  let best = null, bestScore = -Infinity;
+  for (const c of list) {
+    const mid = (c.min + c.max) / 2;
+    const dist = Math.abs(mid - P) / P;
+    if (dist < 1e-4 || dist > 0.04) continue;
+    const score = c.volume / (1 + dist * 400);
+    if (score > bestScore) { bestScore = score; best = mid; }
+  }
+  return best;
 }
 
 /** Экстремумы окна: нужны пробойщикам. */
@@ -616,6 +644,11 @@ function decide(m, i, history) {
   } else if (n.spec.bias === "herd") {
     dir = Math.sign(m.crowd || 0);
   } else if (n.spec.bias === "hunt") {
+    // В режиме EYES охотник видит то же, что и игрок: обезличенные кластеры.
+    // Целится в ближайший крупный и давит цену к нему.
+    const target = m.eyesMode ? nearestCluster(m, P) : null;
+    if (target) { dir = target > P ? 1 : -1; }
+    else {
     // Ближе к какому краю окна стоит цена — туда и давим: там чужие стопы.
     const { hi, lo } = windowRange(history, n.look);
     if (!Number.isFinite(hi) || hi <= lo) return 0;
@@ -623,6 +656,7 @@ function decide(m, i, history) {
     if (pos > 0.78) dir = 1;
     else if (pos < 0.22) dir = -1;
     else return 0;
+    }
   } else if (n.spec.bias === "trap") {
     // Свежий пробой — ставим против него в расчёте на ложный выход.
     const { hi, lo } = windowRange(history, n.look);
@@ -845,14 +879,14 @@ function createSnapshot(m, viewerId, { level = "full", devMode = false } = {}) {
  */
 class RoomV4 {
   constructor({ playerCount = 100, startingCapital = 100, seed = 1, npcCount = null,
-    leverage = 1 } = {}) {
-    this.market = new Market({ playerCount, startingCapital, seed, leverage });
+    leverage = 1, eyes = false } = {}) {
+    this.market = new Market({ playerCount, startingCapital, seed, leverage, eyes });
     this.history = [this.market.mark];
     this.pendingCommands = [];
     this.humanSlots = new Set();
     this.halted = null;
     const npcs = npcCount === null ? playerCount : npcCount;
-    if (npcs > 0) attachNPCs(this.market, playerCount - npcs, npcs, seed);
+    if (npcs > 0) attachNPCs(this.market, playerCount - npcs, npcs, seed, eyes);
   }
 
   /** Человек занимает слот бота: позиция бота закрывается в ближайшем клиринге. */
@@ -969,12 +1003,146 @@ function signedPct(v, d = 2) {
   return `${s}${(v * 100).toFixed(d)}%`;
 }
 
+/* ============================== EYES ======================================
+   ИНФОРМАЦИОННЫЙ СЛОЙ. Ничего не создаёт и ничего не меняет в движке:
+   только читает уже существующие поля pl.stopLoss / pl.takeProfit и позиции
+   участников и сворачивает их в обезличенные кластеры.
+
+   Источник данных — те же заявки, что исполняет pendingIntents() в общем
+   клиринге. Никаких фиктивных заявок, никакого параллельного рынка.
+
+   Личности не раскрываются: наружу уходят только тип, сторона, диапазон
+   цены, суммарный объём и число участников.
+   ------------------------------------------------------------------------ */
+const EYES_BAND = 0.002;        // 0.2% цены — шаг сетки для устойчивого id
+const EYES_GAP = 0.0035;        // разрыв, по которому кластер делится
+const EYES_HISTORY = 40;        // сколько исчезнувших зон помним
+const EYES_HISTORY_MS = 180000; // и как долго
+
+class EyesLayer {
+  constructor() {
+    this.state = new Map();     // key -> живой кластер с историей объёма
+    this.history = [];
+    this.live = [];
+    this.totals = { stopFlow: 0, takeFlow: 0, clusters: 0 };
+  }
+
+  /**
+   * Пересчёт за тик. Вызывается ОДИН раз из step(), результат кэшируется —
+   * снапшот его только отдаёт. Сложность O(n log n) по числу заявок.
+   */
+  update(market, executed, now) {
+    const P = market.mark;
+    const raw = [];
+    for (const pl of market.players) {
+      if (pl.u === 0 || pl.entryPrice === null) continue;
+      const side = pl.u > 0 ? "LONG" : "SHORT";
+      const volume = market.curve.value(pl.u, P);
+      if (pl.stopLoss !== null) raw.push({ type: "STOP", side, price: pl.stopLoss, volume });
+      if (pl.takeProfit !== null) raw.push({ type: "TAKE", side, price: pl.takeProfit, volume });
+    }
+
+    // --- кластеризация: сортировка и разрез по ценовому разрыву ---
+    const groups = new Map();
+    for (const o of raw) {
+      const k = `${o.type}|${o.side}`;
+      if (!groups.has(k)) groups.set(k, []);
+      groups.get(k).push(o);
+    }
+
+    const seen = new Set();
+    const live = [];
+    for (const [k, list] of groups) {
+      list.sort((a, b) => a.price - b.price);
+      const [type, side] = k.split("|");
+      let cur = null;
+      const flush = () => {
+        if (!cur) return;
+        const mid = (cur.min + cur.max) / 2;
+        const key = `${k}|${Math.round(mid / (P * EYES_BAND))}`;
+        seen.add(key);
+        live.push({ key, type, side, min: cur.min, max: cur.max,
+          volume: cur.volume, participants: cur.n });
+        cur = null;
+      };
+      for (const o of list) {
+        if (cur && o.price - cur.max > P * EYES_GAP) flush();
+        if (!cur) cur = { min: o.price, max: o.price, volume: 0, n: 0 };
+        cur.max = o.price;
+        cur.volume += o.volume;
+        cur.n++;
+      }
+      flush();
+    }
+
+    // --- сопоставление с предыдущим состоянием: возраст и истончение ---
+    for (const c of live) {
+      const prev = this.state.get(c.key);
+      if (prev) {
+        c.createdAt = prev.createdAt;
+        c.peak = Math.max(prev.peak, c.volume);
+        c.trail = prev.volume !== c.volume
+          ? [...prev.trail, c.volume].slice(-6) : prev.trail;
+      } else {
+        c.createdAt = now; c.peak = c.volume; c.trail = [c.volume];
+      }
+      c.age = now - c.createdAt;
+      c.status = c.age < 4000 ? "NEW"
+        : c.volume < c.peak * 0.7 ? "THINNING"
+        : "ACTIVE";
+      c.lastUpdatedAt = now;
+      this.state.set(c.key, c);
+    }
+
+    // --- исчезнувшие: сработали или сняты ---
+    const fired = new Set();
+    for (const e of executed || []) {
+      if (e.reason === "stop") fired.add("STOP");
+      if (e.reason === "take") fired.add("TAKE");
+    }
+    for (const [key, prev] of this.state) {
+      if (seen.has(key)) continue;
+      const touched = P >= prev.min - P * EYES_GAP && P <= prev.max + P * EYES_GAP;
+      this.history.unshift({
+        key, type: prev.type, side: prev.side, min: prev.min, max: prev.max,
+        volume: prev.peak, participants: prev.participants,
+        trail: [...prev.trail, 0].slice(-6),
+        status: touched && fired.has(prev.type) ? "TRIGGERED" : "REMOVED",
+        at: now, age: now - prev.createdAt,
+      });
+      this.state.delete(key);
+    }
+    this.history = this.history
+      .filter((h) => now - h.at < EYES_HISTORY_MS)
+      .slice(0, EYES_HISTORY);
+
+    live.sort((a, b) => b.volume - a.volume);
+    this.live = live;
+    this.totals = {
+      stopFlow: live.filter((c) => c.type === "STOP").reduce((a, c) => a + c.volume, 0),
+      takeFlow: live.filter((c) => c.type === "TAKE").reduce((a, c) => a + c.volume, 0),
+      clusters: live.length,
+      stopClusters: live.filter((c) => c.type === "STOP").length,
+      takeClusters: live.filter((c) => c.type === "TAKE").length,
+      participants: live.reduce((a, c) => a + c.participants, 0),
+    };
+  }
+
+  /** Слепок для снапшота. Без каких-либо идентификаторов участников. */
+  view() {
+    return { live: this.live, history: this.history, totals: this.totals };
+  }
+}
+
 class LegacyRoom {
-  constructor({ startingCapital = 100, seed = 1, devMode = true, playerCount, leverage = 1 } = {}) {
+  constructor({ startingCapital = 100, seed = 1, devMode = true, playerCount,
+    leverage = 1, eyes = false } = {}) {
     const count = playerCount || CONFIG.market.totalPlayers;
     this.leverage = leverage;
+    this.eyesMode = eyes;
+    this.eyes = eyes ? new EyesLayer() : null;
     this._room = new RoomV4({ playerCount: count, startingCapital, seed,
-      npcCount: count - 1, leverage });
+      npcCount: count - 1, leverage, eyes });
     this.devMode = devMode;
     this._startingCapital = startingCapital;
     this.paused = false;
@@ -1000,6 +1168,13 @@ class LegacyRoom {
   step() {
     if (this.paused || this._room.halted) return null;
     const result = this._room.step();
+    // EYES пересчитывается ровно один раз за тик и только читает рынок.
+    if (this.eyes) {
+      const m = this._room.market;
+      this.eyes.update(m, result && result.executed, m.tick * CONFIG.market.tickMs);
+      // Боты в режиме EYES видят те же обезличенные кластеры, что и игрок.
+      m.eyesClusters = this.eyes.live;
+    }
     let buy = 0, sell = 0;
     if (result && result.executed) {
       for (const e of result.executed) {
@@ -1046,6 +1221,8 @@ class LegacyRoom {
       netTotal: this._buyTotal - this._sellTotal,
       longRealized: this._room.market.longRealized,
       shortRealized: this._room.market.shortRealized,
+      eyes: this.eyes ? this.eyes.view() : null,
+      eyesMode: this.eyesMode,
       leverage: this._room.market.leverage,
       maintenance: this._room.market.maintenance,
       liquidations: this._room.market.liquidations,
@@ -1167,9 +1344,10 @@ const Room = LegacyRoom;
 
 // ==== ПРОФИЛЬ / ЛОКАЛЬНЫЙ ТРАНСПОРТ / ИНТЕРФЕЙС ====
 class LocalTransport {
-  constructor({ startingCapital, seed, devMode = true, leverage = 1 } = {}) {
+  constructor({ startingCapital, seed, devMode = true, leverage = 1, eyes = false } = {}) {
     this.leverage = leverage;
-    this.room = new Room({ startingCapital, seed, devMode, leverage });
+    this.eyes = eyes;
+    this.room = new Room({ startingCapital, seed, devMode, leverage, eyes });
     this.playerId = this.room.join(null, "ВЫ"); // новый движок сам выдаёт id человека
     this.timer = null;
     this.speed = 1;
@@ -1276,7 +1454,7 @@ const HISTORY_CANDLES = 2000;
 const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
 
 function Chart({ state, timeframe, mode, entryPrice, stopLoss, takeProfit,
-  liquidationPrice, side, onLevel }) {
+  liquidationPrice, side, onLevel, eyes }) {
   const box = useRef(null);
   const [size, setSize] = useState({ w: 360, h: 300 });
 
@@ -1626,6 +1804,48 @@ function Chart({ state, timeframe, mode, entryPrice, stopLoss, takeProfit,
           </g>
         ))}
 
+        {/* ------------------------------ EYES -------------------------------
+            Зоны рисуются ПОД свечами и приглушённо: приоритет у цены.
+            Соседние по пикселям кластеры сливаются, поэтому при отдалении
+            график не превращается в сплошные прямоугольники. */}
+        {eyes && eyes.length > 0 && (() => {
+          const vis = [];
+          for (const c of eyes) {
+            if (c.max < min || c.min > max) continue;
+            const y1 = toY(c.max), y2 = toY(c.min);
+            const near = vis.find((v) => v.type === c.type && v.side === c.side
+              && Math.abs((v.y1 + v.y2) / 2 - (y1 + y2) / 2) < 26);
+            if (near) {
+              near.y1 = Math.min(near.y1, y1); near.y2 = Math.max(near.y2, y2);
+              near.volume += c.volume; near.participants += c.participants;
+              near.merged++;
+            } else {
+              vis.push({ ...c, y1, y2, merged: 1 });
+            }
+          }
+          const top = vis.sort((a, b) => b.volume - a.volume).slice(0, 6);
+          const maxV = Math.max(1, ...top.map((c) => c.volume));
+          return top.map((c) => {
+            const color = c.type === "STOP" ? SHORT : LONG;
+            const h = Math.max(3, c.y2 - c.y1);
+            const alpha = 0.07 + (c.volume / maxV) * 0.16;
+            const thin = c.status === "THINNING";
+            return (
+              <g key={c.key} opacity={thin ? 0.55 : 1}>
+                <rect x={0} y={c.y1} width={plotW} height={h} fill={color} opacity={alpha} />
+                <line x1={0} x2={plotW} y1={c.y1} y2={c.y1} stroke={color}
+                  strokeWidth={0.8} opacity={0.5} strokeDasharray={thin ? "2 4" : ""} />
+                <line x1={0} x2={plotW} y1={c.y2} y2={c.y2} stroke={color}
+                  strokeWidth={0.8} opacity={0.5} strokeDasharray={thin ? "2 4" : ""} />
+                <text x={5} y={c.y1 + h / 2 + 3} fontSize={9} fontFamily="monospace"
+                  fill={color} opacity={0.95}>
+                  {c.type} {c.side} · {fmt(c.volume, 0)} · {c.participants}
+                </text>
+              </g>
+            );
+          });
+        })()}
+
         {mode === "свечи" ? (
           <g>
             {shown.map((c, i) => {
@@ -1709,6 +1929,130 @@ function niceStep(raw) {
   const n = raw / pow;
   const mult = n <= 1 ? 1 : n <= 2 ? 2 : n <= 2.5 ? 2.5 : n <= 5 ? 5 : 10;
   return mult * pow;
+}
+
+
+/* ----------------------------- ПАНЕЛЬ EYES -------------------------------
+   Показывает только агрегаты. Никаких прогнозов и сигналов: направление
+   формулируется как «потенциальное давление», потому что это следствие
+   стороны и типа заявки, а не предсказание цены.
+   ------------------------------------------------------------------------ */
+const EYES_FILTERS = ["ВСЁ", "STOP", "TAKE", "LONG", "SHORT"];
+
+function pressureOf(type, side) {
+  // STOP LONG и TAKE LONG закрываются продажей, обе SHORT-зоны — покупкой.
+  return side === "LONG" ? "потенциальное давление продаж"
+                         : "потенциальное давление покупок";
+}
+
+function eyesFilter(list, f) {
+  if (f === "ВСЁ") return list;
+  if (f === "STOP" || f === "TAKE") return list.filter((c) => c.type === f);
+  return list.filter((c) => c.side === f);
+}
+
+function EyesPanel({ eyes, filter, onFilter, view, onView }) {
+  const t = eyes.totals;
+  const list = eyesFilter(view === "LIVE" ? eyes.live : eyes.history, filter);
+  const card = { backgroundColor: SURFACE, border: `1px solid ${HAIR}` };
+
+  return (
+    <div className="px-4 pb-4">
+      <div className="rounded-2xl px-4 py-3.5 mt-2" style={card}>
+        <div className="flex items-center justify-between">
+          <span className="text-[11px] tracking-[0.3em]" style={{ color: LONG }}>EYES</span>
+          <div className="flex gap-1">
+            {["LIVE", "HISTORY"].map((v) => (
+              <button key={v} onClick={() => onView(v)}
+                className="px-2.5 py-1 rounded text-[10px] tracking-[0.1em] tap"
+                style={{ backgroundColor: v === view ? TEXT : RAISED,
+                  color: v === view ? BG : DIM, border: `1px solid ${HAIR}` }}>
+                {v}
+              </button>
+            ))}
+          </div>
+        </div>
+
+        <div className="grid grid-cols-3 gap-3 mt-3">
+          <div>
+            <div className="text-[9px] tracking-[0.15em]" style={{ color: FAINT }}>STOP FLOW</div>
+            <div className="text-[15px] font-mono mt-1" style={{ color: SHORT }}>
+              {fmt(t.stopFlow, 0)}
+            </div>
+          </div>
+          <div>
+            <div className="text-[9px] tracking-[0.15em]" style={{ color: FAINT }}>TAKE FLOW</div>
+            <div className="text-[15px] font-mono mt-1" style={{ color: LONG }}>
+              {fmt(t.takeFlow, 0)}
+            </div>
+          </div>
+          <div>
+            <div className="text-[9px] tracking-[0.15em]" style={{ color: FAINT }}>КЛАСТЕРОВ</div>
+            <div className="text-[15px] font-mono mt-1">
+              {t.stopClusters} / {t.takeClusters}
+            </div>
+          </div>
+        </div>
+
+        <div className="flex gap-1.5 mt-3 overflow-x-auto no-scrollbar">
+          {EYES_FILTERS.map((f) => (
+            <button key={f} onClick={() => onFilter(f)}
+              className="px-3 py-1.5 rounded-lg text-[10px] tracking-[0.1em] shrink-0 tap"
+              style={{ backgroundColor: f === filter ? TEXT : RAISED,
+                color: f === filter ? BG : DIM, border: `1px solid ${HAIR}` }}>
+              {f}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {list.length === 0 ? (
+        <div className="rounded-2xl py-8 text-center text-[12px] mt-2"
+          style={{ ...card, color: FAINT }}>
+          {view === "LIVE" ? "активных зон нет" : "история пока пуста"}
+        </div>
+      ) : (
+        <div className="flex flex-col gap-2 mt-2">
+          {list.slice(0, 14).map((c) => {
+            const color = c.type === "STOP" ? SHORT : LONG;
+            return (
+              <div key={c.key + (c.at ?? "")} className="rounded-xl px-4 py-3" style={card}>
+                <div className="flex items-center justify-between gap-3">
+                  <span className="text-[12px] tracking-[0.1em] font-semibold" style={{ color }}>
+                    {c.type} {c.side}
+                  </span>
+                  <span className="text-[11px] font-mono" style={{ color: FAINT }}>
+                    {c.min === c.max ? fmt(c.min) : `${fmt(c.min)} — ${fmt(c.max)}`}
+                  </span>
+                </div>
+                <div className="flex items-center justify-between gap-3 mt-1.5">
+                  <span className="text-[15px] font-mono">{fmt(c.volume, 0)}</span>
+                  <span className="text-[11px]" style={{ color: DIM }}>
+                    {c.participants} уч. · {c.status === "NEW" ? "NEW" : clock(c.age || 0)}
+                  </span>
+                </div>
+                <div className="flex items-center justify-between gap-3 mt-1.5">
+                  <span className="text-[11px]" style={{ color: FAINT }}>
+                    {pressureOf(c.type, c.side)}
+                  </span>
+                  <span className="text-[10px] tracking-[0.1em]"
+                    style={{ color: c.status === "TRIGGERED" ? color
+                      : c.status === "THINNING" ? DIM : FAINT }}>
+                    {c.status}
+                  </span>
+                </div>
+                {c.trail && c.trail.length > 1 && (
+                  <div className="text-[10px] font-mono mt-1.5" style={{ color: FAINT }}>
+                    {c.trail.map((v) => fmt(v, 0)).join(" → ")}
+                  </div>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
 }
 
 /* ------------------------------- ЭЛЕМЕНТЫ UI ------------------------------ */
@@ -2275,6 +2619,10 @@ const Icon = ({ name, size = 16, color = TEXT }) => {
     <svg {...common}><circle cx="6" cy="12" r="1.2" fill={color} /><circle cx="12" cy="12" r="1.2" fill={color} />
       <circle cx="18" cy="12" r="1.2" fill={color} /></svg>
   );
+  if (name === "eye") return (
+    <svg {...common}><path d="M2 12s3.8-6.5 10-6.5S22 12 22 12s-3.8 6.5-10 6.5S2 12 2 12z" />
+      <circle cx="12" cy="12" r="3" /></svg>
+  );
   if (name === "calendar") return (
     <svg {...common}><rect x="3.5" y="5" width="17" height="15" rx="2" />
       <path d="M3.5 10h17M8 3v4M16 3v4" /></svg>
@@ -2827,25 +3175,50 @@ function MarketsTab({ onPlay }) {
         {row("Стартовая цена", fmt(m.initialPrice))}
         {row("Взнос", m.capitalOptions.map((c) => fmt(c, 0)).join(" · "))}
         {row("Тик", `${m.tickMs} мс`)}
-        <button onClick={onPlay}
+        <button onClick={() => onPlay(false)}
           className="w-full rounded-xl py-3.5 mt-3 text-[12px] tracking-[0.2em] font-bold tap"
           style={{ backgroundColor: TEXT, color: BG }}>
           ИГРАТЬ
         </button>
       </div>
 
-      {["BTC/USD", "ETH/USD", "Индекс страха"].map((name, i) => (
-        <div key={name}
-          className="rounded-2xl px-4 py-4 mt-2 flex items-center justify-between tx-in"
-          style={{ backgroundColor: SURFACE, border: `1px solid ${HAIR}`, ...stagger(i + 1) }}>
-          <div>
-            <div className="text-[14px] font-mono" style={{ color: DIM }}>{name}</div>
-            <div className="text-[11px] mt-1" style={{ color: FAINT }}>появится позже</div>
+      <div className="rounded-2xl p-4 mt-2 tx-in"
+        style={{ backgroundColor: SURFACE, border: `1px solid #1E4A32`, ...stagger(1) }}>
+        <div className="flex items-start justify-between gap-3">
+          <div className="flex items-center gap-2">
+            <Icon name="eye" size={17} color={LONG} />
+            <div>
+              <div className="text-[17px] font-mono" style={{ color: LONG }}>
+                {m.assetSymbol} · EYES
+              </div>
+              <div className="text-[11px] mt-1" style={{ color: DIM }}>
+                видно чужие стопы и тейки
+              </div>
+            </div>
           </div>
           <span className="px-2.5 py-1 rounded-full text-[10px] tracking-[0.15em]"
-            style={{ backgroundColor: "#0E0E11", color: FAINT }}>СКОРО</span>
+            style={{ backgroundColor: "#0E2A1B", color: LONG, border: "1px solid #1E4A32" }}>
+            ОТКРЫТ
+          </span>
         </div>
-      ))}
+        <div className="my-3 rounded-xl overflow-hidden" style={{ backgroundColor: "#08080A" }}>
+          <ModeArt kind="online" />
+        </div>
+        <div className="text-[12px] leading-snug" style={{ color: DIM }}>
+          Тот же рынок и та же математика. Сверху — обезличенные зоны, куда
+          другие участники поставили стопы и тейки: диапазон цены, суммарный
+          объём и число участников. Имён не видно.
+        </div>
+        <div className="text-[11px] leading-snug mt-2" style={{ color: FAINT }}>
+          Боты в этом режиме почти все выставляют настоящие заявки, а охотники
+          целятся в самые крупные скопления.
+        </div>
+        <button onClick={() => onPlay(true)}
+          className="w-full rounded-xl py-3.5 mt-3 text-[12px] tracking-[0.2em] font-bold tap"
+          style={{ backgroundColor: LONG, color: BG }}>
+          ИГРАТЬ В EYES
+        </button>
+      </div>
     </div>
   );
 }
@@ -3209,7 +3582,7 @@ function Lobby({ profile, account, onNew, onReset, onExit, onSignOut, onTopUp })
                   onClick={() => setNotice("Онлайн-комнаты появятся после подключения сервера. Пока доступна офлайн-практика.")} />
                 <ModeCard kind="offline" title="ОФЛАЙН ПРАКТИКА"
                   text="Практикуй стратегии без риска для баланса"
-                  cta="ИГРАТЬ ОФЛАЙН" onClick={onNew} disabled={!affordable} />
+                  cta="ИГРАТЬ ОФЛАЙН" onClick={() => onNew(false)} disabled={!affordable} />
               </div>
 
               {notice && (
@@ -3318,7 +3691,7 @@ function Lobby({ profile, account, onNew, onReset, onExit, onSignOut, onTopUp })
             </div>
           )}
 
-          {tab === "markets" && <MarketsTab onPlay={onNew} />}
+          {tab === "markets" && <MarketsTab onPlay={(e) => onNew(e)} />}
           {tab === "rank" && <RankingTab profile={profile} period={period} onPeriod={setPeriod} />}
           {tab === "history" && <HistoryTab profile={profile} />}
         </div>
@@ -3330,14 +3703,12 @@ function Lobby({ profile, account, onNew, onReset, onExit, onSignOut, onTopUp })
 }
 
 /* ---------------------------- ВЫБОР РАЗМЕРА СЕССИИ ------------------------ */
-function SessionSetup({ wallet, onStart, onBack }) {
+function SessionSetup({ wallet, onStart, onBack, eyes = false }) {
   const options = CONFIG.market.capitalOptions;
   const [capital, setCapital] = useState(
     options.filter((c) => c <= wallet).slice(-1)[0] ?? options[0]
   );
   const [leverage, setLeverage] = useState(1);
-  const [deadline, setDeadline] = useState(null);   // конец сессии, мс epoch
-  const [left, setLeft] = useState(0);
   const [minutes, setMinutes] = useState(CONFIG.market.durationOptions[1]);
 
   return (
@@ -3421,10 +3792,10 @@ function SessionSetup({ wallet, onStart, onBack }) {
       </div>
 
       <div className="max-w-md w-full mx-auto px-6 pb-8">
-        <button onClick={() => onStart(capital, leverage, minutes)}
+        <button onClick={() => onStart(capital, leverage, minutes, eyes)}
           className="w-full rounded-lg py-4 text-[15px] tracking-[0.15em] font-semibold tap"
           style={{ backgroundColor: TEXT, color: BG }}>
-          ВОЙТИ В РЫНОК · {fmt(capital, 0)} · {minutes} МИН{leverage > 1 ? " · x10" : ""}
+          ВОЙТИ В {eyes ? "EYES" : "РЫНОК"} · {fmt(capital, 0)} · {minutes} МИН{leverage > 1 ? " · x10" : ""}
         </button>
       </div>
     </div>
@@ -3590,6 +3961,7 @@ function PracticeApp({ onExit }) {
   const [session, setSession] = useState(null);
   const [pending, setPending] = useState(null);   // взнос и режим, пока идёт подбор
   const [leverage, setLeverage] = useState(1);
+  const [pendingEyes, setPendingEyes] = useState(false);
   const [deadline, setDeadline] = useState(null);   // конец сессии, мс epoch
   const [left, setLeft] = useState(0);
   const [minutes, setMinutes] = useState(CONFIG.market.durationOptions[1]);
@@ -3610,6 +3982,9 @@ function PracticeApp({ onExit }) {
   const [npcMode, setNpcMode] = useState("активные");
   const [toast, setToast] = useState(null);
   const [confirmingEnd, setConfirmingEnd] = useState(false);
+  const [eyesOn, setEyesOn] = useState(true);
+  const [eyesFilterName, setEyesFilterName] = useState("ВСЁ");
+  const [eyesView, setEyesView] = useState("LIVE");
 
   const speedRef = useRef(1);
   speedRef.current = speed;
@@ -3645,15 +4020,15 @@ function PracticeApp({ onExit }) {
   const persist = (next) => { setProfile(next); saveProfile(next); };
 
   /** Первая фаза: подбор участников. Реальная комната ещё не создана. */
-  const queueSession = (capital, leverage = 1, minutes = 5) => {
-    setPending({ capital, leverage, minutes });
+  const queueSession = (capital, leverage = 1, minutes = 5, eyes = false) => {
+    setPending({ capital, leverage, minutes, eyes });
     setScreen("matching");
   };
 
-  const startSession = ({ capital, leverage, minutes }) => {
+  const startSession = ({ capital, leverage, minutes, eyes }) => {
     // Приложение больше не создаёт движок напрямую — только транспорт.
     // При переезде на сервер здесь меняется одна строка на RemoteTransport.
-    engineRef.current = new LocalTransport({ startingCapital: capital, leverage });
+    engineRef.current = new LocalTransport({ startingCapital: capital, leverage, eyes });
     setSize(String(Math.round(capital * 0.3)));
     setPaused(false);
     setTab("Рынок");
@@ -3740,11 +4115,12 @@ function PracticeApp({ onExit }) {
 
   if (screen === "lobby") {
     return <Lobby profile={profile} account={account} onSignOut={signOut} onTopUp={topUp}
-      onNew={() => setScreen("setup")} onExit={onExit}
+      onNew={(e) => { setPendingEyes(!!e); setScreen("setup"); }} onExit={onExit}
       onReset={() => persist({ ...profile, wallet: STARTING_WALLET, deposited: profile.deposited + STARTING_WALLET })} />;
   }
   if (screen === "setup") {
-    return <SessionSetup wallet={profile.wallet} onStart={queueSession} onBack={() => setScreen("lobby")} />;
+    return <SessionSetup wallet={profile.wallet} onStart={queueSession}
+      eyes={!!pendingEyes} onBack={() => { setPendingEyes(false); setScreen("lobby"); }} />;
   }
   if (screen === "matching" && pending !== null) {
     return <Matchmaking capital={pending.capital} leverage={pending.leverage}
@@ -3756,7 +4132,7 @@ function PracticeApp({ onExit }) {
   }
   if (!engineRef.current || !snapshot) {
     return <Lobby profile={profile} account={account} onSignOut={signOut} onTopUp={topUp}
-      onNew={() => setScreen("setup")} onExit={onExit}
+      onNew={(e) => { setPendingEyes(!!e); setScreen("setup"); }} onExit={onExit}
       onReset={() => persist({ ...profile, wallet: STARTING_WALLET })} />;
   }
 
@@ -3841,7 +4217,10 @@ function PracticeApp({ onExit }) {
     if (res.ok) say(`${kind === "sl" ? "стоп" : "тейк"} ${target.toFixed(2)}`);
   };
 
-  const TAB_KEYS = ["Рынок", "Позиции", "Ордера", "Участники", "Отладка"];
+  const eyesData = snap.eyes;
+  const TAB_KEYS = eyesData
+    ? ["Рынок", "EYES", "Позиции", "Ордера", "Участники", "Отладка"]
+    : ["Рынок", "Позиции", "Ордера", "Участники", "Отладка"];
 
   return (
     <div className="w-full flex flex-col" style={{ height: "100dvh", backgroundColor: BG, color: TEXT }}>
@@ -3854,6 +4233,10 @@ function PracticeApp({ onExit }) {
             {leverage > 1 && (
               <span className="ml-2 px-1.5 py-0.5 rounded font-semibold"
                 style={{ backgroundColor: RAISED, color: LONG }}>x{leverage}</span>
+            )}
+            {eyesData && (
+              <span className="ml-2 px-1.5 py-0.5 rounded font-semibold"
+                style={{ backgroundColor: "#0E2A1B", color: LONG }}>EYES</span>
             )}
           </span>
           <div className="flex items-center gap-4">
@@ -3984,11 +4367,35 @@ function PracticeApp({ onExit }) {
                   className="text-[12px]" style={{ color: DIM }}>{chartMode}</button>
               </div>
 
+              {eyesData && (
+                <div className="flex items-center justify-between px-4 pb-1">
+                  <button onClick={() => setEyesOn((v) => !v)}
+                    className="flex items-center gap-2 px-3 py-1.5 rounded-lg text-[10px] tracking-[0.2em] tap"
+                    style={{ backgroundColor: eyesOn ? "#0E2A1B" : RAISED,
+                      color: eyesOn ? LONG : DIM,
+                      border: `1px solid ${eyesOn ? "#1E4A32" : HAIR}` }}>
+                    <Icon name="eye" size={13} color={eyesOn ? LONG : DIM} />
+                    EYES
+                  </button>
+                  <div className="flex gap-1.5">
+                    {EYES_FILTERS.map((f) => (
+                      <button key={f} onClick={() => setEyesFilterName(f)}
+                        className="px-2 py-1.5 rounded text-[10px] tap"
+                        style={{ backgroundColor: f === eyesFilterName ? TEXT : RAISED,
+                          color: f === eyesFilterName ? BG : FAINT,
+                          border: `1px solid ${HAIR}` }}>
+                        {f}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )}
               <div className="px-2 pt-1 flex-1 min-h-0">
                 <Chart state={state} timeframe={timeframe} mode={chartMode}
                   entryPrice={pos?.entryPrice} stopLoss={human.stopLoss} takeProfit={human.takeProfit}
                   liquidationPrice={human.liquidationPrice}
-                  side={pos?.side} onLevel={setLevelFromChart} />
+                  side={pos?.side} onLevel={setLevelFromChart}
+                  eyes={eyesData && eyesOn ? eyesFilter(eyesData.live, eyesFilterName) : null} />
               </div>
 
               <div className="px-5 pb-4 grid grid-cols-4 gap-3">
@@ -4007,6 +4414,11 @@ function PracticeApp({ onExit }) {
                 )}
               </div>
             </div>
+          )}
+
+          {tab === "EYES" && eyesData && (
+            <EyesPanel eyes={eyesData} filter={eyesFilterName} onFilter={setEyesFilterName}
+              view={eyesView} onView={setEyesView} />
           )}
 
           {tab === "Позиции" && (
