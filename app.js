@@ -59,9 +59,10 @@ const CONFIG = {
   // предсказуемость, быстрые трендовые — наоборот. Итог замера на 12 сидах:
   // автокорреляция −0.138, VR(20) = 1.63, размах 15.7% против −0.095 / 1.46 /
   // 14.3% у прежних ботов, при этом механические стратегии стали не выгоднее.
-  NPC_FAST_FADE_WEIGHT: 3.6,
-  NPC_FAST_TREND_WEIGHT: 2.5,
-  NPC_ACT_SCALE: 1.7,
+  NPC_FAST_FADE_WEIGHT: 2.6,
+  NPC_FAST_TREND_WEIGHT: 2.2,
+  NPC_ACT_SCALE: 1.0,
+  NPC_SIZE_SCALE: 0.6,
   NPC_THRESH_SCALE: 0.4,
   NPC_HERD_MAX: 0.25,
   NPC_CONVICTION_UP: 1.10,
@@ -497,7 +498,7 @@ function attachNPCs(m, startIdx, count, seed) {
       type, spec,
       // Вес быстрых контр-трендовых подобран замером: при множителе 1
       // автокорреляция +0.33, при 5 она −0.35, ноль приходится на 2.2.
-      size: (spec.size[0] + r() * (spec.size[1] - spec.size[0]))
+      size: CONFIG.NPC_SIZE_SCALE * (spec.size[0] + r() * (spec.size[1] - spec.size[0]))
         * (spec.fast
           ? (spec.bias === "fade" ? CONFIG.NPC_FAST_FADE_WEIGHT : CONFIG.NPC_FAST_TREND_WEIGHT)
           : 1),
@@ -519,7 +520,7 @@ function attachNPCs(m, startIdx, count, seed) {
       take: spec.take * CONFIG.NPC_PNL_SCALE,
       hold: Math.round(CONFIG.NPC_HOLD_MIN +
         r() * (CONFIG.NPC_HOLD_MAX - CONFIG.NPC_HOLD_MIN)),
-      since: 0, lastU: 0, peak: 0, conviction: 1, lastEquity: null,
+      since: 0, lastU: 0, peak: 0, conviction: 1, mood: 0,
       rng: mulberry32(seed * 7919 + k + 1),
     };
   }
@@ -629,10 +630,20 @@ function decide(m, i, history) {
   return dir > 0 ? units : -units;
 }
 
-/** Уверенность: после прибыли растёт, после убытка падает. Даёт инерцию. */
+/**
+ * Настроение бота: скользящее среднее исходов сделок, где выигрыш +1,
+ * проигрыш −1. Из него получается множитель размера.
+ *
+ * Прежняя версия была мультипликативным храповиком (×1.10 на прибыль,
+ * ×0.72 на убыток) и неизбежно съезжала вниз: рынок с нулевой суммой даёт
+ * убыточных сделок больше, чем прибыльных, и через 300 тиков средняя
+ * уверенность падала до 0.42 при полу 0.25. Боты продолжали торговать,
+ * но объёмом в два-три раза меньше — на графике это выглядело как
+ * умерший рынок с крошечными свечами.
+ */
 function note(n, win) {
-  n.conviction = Math.min(2.2, Math.max(0.25,
-    win ? n.conviction * CONFIG.NPC_CONVICTION_UP : n.conviction * 0.72));
+  n.mood = (n.mood ?? 0) * 0.75 + (win ? 0.25 : -0.25);
+  n.conviction = Math.min(1.6, Math.max(0.45, 1 + 0.6 * n.mood));
 }
 
 function npcIntents(m, history, fromIdx) {
@@ -1695,6 +1706,10 @@ const GLOBAL_CSS = `
 @keyframes tx-twinkle { 0%,100% { opacity: .18; } 50% { opacity: .9; } }
 @keyframes tx-wave    { 0%,100% { transform: translateY(0); }
                         50% { transform: translateY(-4px); } }
+@keyframes tx-float   { 0%,100% { transform: translateY(0) rotate(0deg); }
+                        50% { transform: translateY(-5px) rotate(1.5deg); } }
+@keyframes tx-layer   { 0%,100% { opacity: .45; transform: translateY(0); }
+                        50% { opacity: 1; transform: translateY(-2.5px); } }
 
 .tx-screen { animation: tx-fade-up .34s cubic-bezier(.22,.9,.3,1) both; }
 .tx-in     { animation: tx-fade-up .38s cubic-bezier(.22,.9,.3,1) both; }
@@ -1707,6 +1722,8 @@ const GLOBAL_CSS = `
 .tx-dome    { transform-origin: 80px 70px; animation: tx-dome-spin 7s ease-in-out infinite; }
 .tx-twinkle { animation: tx-twinkle 2.6s ease-in-out infinite; }
 .tx-wave    { animation: tx-wave 4.2s ease-in-out infinite; }
+.tx-float   { animation: tx-float 5s ease-in-out infinite; }
+.tx-layer   { transform-origin: 50px 50px; animation: tx-layer 2.8s ease-in-out infinite; }
 
 /* Нажатие: лёгкое сжатие. Работает и на тач-устройствах. */
 .tap { transition: transform .12s ease, opacity .12s ease, background-color .18s ease,
@@ -1715,7 +1732,7 @@ const GLOBAL_CSS = `
 
 @media (prefers-reduced-motion: reduce) {
   .tx-screen, .tx-in, .tx-fade, .tx-pop, .tx-sheet, .tx-dot, .tx-line, .tx-spin,
-  .tx-dome, .tx-twinkle, .tx-wave { animation: none !important; }
+  .tx-dome, .tx-twinkle, .tx-wave, .tx-float, .tx-layer { animation: none !important; }
 }
 `;
 
@@ -2123,6 +2140,10 @@ const Icon = ({ name, size = 16, color = TEXT }) => {
   if (name === "dots") return (
     <svg {...common}><circle cx="6" cy="12" r="1.2" fill={color} /><circle cx="12" cy="12" r="1.2" fill={color} />
       <circle cx="18" cy="12" r="1.2" fill={color} /></svg>
+  );
+  if (name === "calendar") return (
+    <svg {...common}><rect x="3.5" y="5" width="17" height="15" rx="2" />
+      <path d="M3.5 10h17M8 3v4M16 3v4" /></svg>
   );
   if (name === "plus") return (
     <svg {...common}><path d="M12 5v14M5 12h14" /></svg>
@@ -2770,6 +2791,7 @@ function TabBar({ active, onChange }) {
    даёт два кубка, а первый же убыток серию обрывает.
    ------------------------------------------------------------------------ */
 const LEVEL_STEP = (level) => 5 * Math.pow(2, level - 1);
+const XP_PER_WIN = 60;
 
 function profileProgress(profile) {
   const list = [...(profile.sessions || [])].reverse();   // от старых к новым
@@ -2786,50 +2808,179 @@ function profileProgress(profile) {
     else streak = 0;
   }
 
+  // Серия успеха: сколько календарных дней подряд была хотя бы одна сессия,
+  // считая назад от последней. Дни берутся по локальной дате.
+  const day = (t) => { const d = new Date(t); d.setHours(0, 0, 0, 0); return d.getTime(); };
+  const days = [...new Set(list.filter((x) => Number.isFinite(x.at)).map((x) => day(x.at)))]
+    .sort((a, b) => b - a);
+  let dayStreak = 0;
+  if (days.length) {
+    const today = day(Date.now());
+    if (days[0] === today || days[0] === today - 86400e3) {
+      dayStreak = 1;
+      for (let i = 1; i < days.length; i++) {
+        if (days[i - 1] - days[i] === 86400e3) dayStreak++; else break;
+      }
+    }
+  }
+
+  const bestPct = list.length
+    ? Math.max(...list.map((x) => (x.capital ? x.pnl / x.capital : 0))) : 0;
+
   return { level, wins, done, need, progress: need ? done / need : 0,
-    trophies, streak, bestStreak: best, toTrophy: (5 - (streak % 5)) % 5 || 5 };
+    xpLeft: (need - done) * XP_PER_WIN,
+    trophies, streak, bestStreak: best, dayStreak, bestPct,
+    toTrophy: (5 - (streak % 5)) % 5 || 5 };
 }
 
-/** Полоса уровня и кубки под шапкой главного экрана. */
+/**
+ * Куб уровня. Нарисован в духе логотипа: рамка-«окно» с угловыми скобками,
+ * свечи внутри и разлетающиеся точки по бокам. Всё держится на transform
+ * и opacity, поэтому анимация не пересчитывает вёрстку.
+ */
+function LevelCube({ size = 84 }) {
+  const top = "M50 12 L84 30 L50 48 L16 30 Z";
+  return (
+    <svg width={size} height={size} viewBox="0 0 100 100" fill="none" className="tx-float">
+      <defs>
+        <linearGradient id="tx-cube" x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0%" stopColor={LONG} stopOpacity="0.55" />
+          <stop offset="100%" stopColor={LONG} stopOpacity="0.05" />
+        </linearGradient>
+      </defs>
+
+      {/* внешняя коробка */}
+      <path d={top} stroke={LONG} strokeWidth="1.6" opacity="0.75" />
+      <path d="M16 30 L16 62 L50 82 L84 62 L84 30" stroke={LONG} strokeWidth="1.6" opacity="0.5" />
+      <path d="M50 48 L50 82" stroke={LONG} strokeWidth="1.2" opacity="0.35" />
+
+      {/* внутренние слои: пульсируют вразнобой */}
+      <path d="M50 34 L72 46 L50 58 L28 46 Z" fill="url(#tx-cube)" stroke={LONG}
+        strokeWidth="1.2" className="tx-layer" />
+      <path d="M50 48 L72 60 L50 72 L28 60 Z" fill="url(#tx-cube)" stroke={LONG}
+        strokeWidth="1.2" className="tx-layer" style={{ animationDelay: "700ms" }} />
+
+      {/* свечи внутри — отсылка к логотипу */}
+      <g stroke={LONG} strokeWidth="1.4" opacity="0.9" className="tx-layer"
+        style={{ animationDelay: "350ms" }}>
+        <path d="M42 44v14M50 40v20M58 46v12" />
+      </g>
+
+      {/* угловые скобки, как в логотипе */}
+      <g stroke={LONG} strokeWidth="1.6" strokeLinecap="square" opacity="0.6">
+        <path d="M8 22V14h8M92 22V14h-8M8 78v8h8M92 78v8h-8" />
+      </g>
+
+      {/* искры */}
+      {[[6, 40], [12, 56], [90, 44], [95, 60], [24, 12], [78, 90]].map(([x, y], i) => (
+        <circle key={i} cx={x} cy={y} r="1.4" fill={LONG} className="tx-twinkle"
+          style={{ animationDelay: `${i * 380}ms` }} />
+      ))}
+    </svg>
+  );
+}
+
+/** Верхний блок главного экрана: уровень, прогресс, кубки, серия. */
 function LevelBar({ profile }) {
   const p = profileProgress(profile);
+  const inner = { backgroundColor: RAISED, border: `1px solid ${HAIR}` };
+
   return (
-    <div className="rounded-2xl px-4 py-3 mt-4 tx-in"
+    <div className="rounded-2xl p-3 mt-4 tx-in"
       style={{ backgroundColor: SURFACE, border: `1px solid ${HAIR}`, ...stagger(1) }}>
-      <div className="flex items-center justify-between gap-3">
-        <div className="flex items-baseline gap-2 min-w-0">
-          <span className="text-[10px] tracking-[0.25em]" style={{ color: FAINT }}>УРОВЕНЬ</span>
-          <span className="text-[20px] font-mono leading-none">{p.level}</span>
+
+      {/* ------------------------- верхняя строка ------------------------- */}
+      <div className="flex items-start justify-between gap-2">
+        <div className="min-w-0">
+          <div className="text-[9px] tracking-[0.25em]" style={{ color: FAINT }}>УРОВЕНЬ</div>
+          <div className="text-[38px] leading-none font-mono mt-0.5">{p.level}</div>
+          <div className="inline-block mt-2 px-2.5 py-1 rounded-lg text-[11px] font-mono"
+            style={{ backgroundColor: "#0E2A1B", color: LONG, border: `1px solid #1E4A32` }}>
+            +{p.xpLeft} XP
+          </div>
+          <div className="text-[11px] mt-1.5" style={{ color: FAINT }}>до уровня {p.level + 1}</div>
         </div>
-        <div className="flex items-center gap-1.5 shrink-0">
-          {p.trophies === 0 ? (
-            <span className="text-[11px]" style={{ color: FAINT }}>
-              {p.streak > 0 ? `серия ${p.streak} · до кубка ${p.toTrophy}` : "кубков нет"}
-            </span>
-          ) : (
-            <>
-              {Array.from({ length: Math.min(p.trophies, 5) }, (_, i) => (
-                <Icon key={i} name="trophy" size={15} color={LONG} />
-              ))}
-              {p.trophies > 5 && (
-                <span className="text-[12px] font-mono" style={{ color: LONG }}>×{p.trophies}</span>
-              )}
-            </>
-          )}
+
+        <div className="shrink-0"><LevelCube size={84} /></div>
+
+        <div className="rounded-xl px-3 py-2.5 shrink-0 text-right" style={inner}>
+          <div className="flex items-center justify-end gap-1.5">
+            <Icon name="trophy" size={16} color={LONG} />
+            <span className="text-[20px] font-mono leading-none">{p.trophies}</span>
+          </div>
+          <div className="text-[9px] tracking-[0.15em] mt-1" style={{ color: FAINT }}>КУБКОВ</div>
+          <div className="text-[10px] mt-1.5 leading-tight" style={{ color: FAINT }}>
+            {p.trophies === 0
+              ? (p.streak > 0 ? `до кубка ${p.toTrophy}` : "кубков пока нет")
+              : `серия ${p.streak}`}
+          </div>
         </div>
       </div>
 
-      <div className="h-1.5 w-full rounded-full mt-3 overflow-hidden" style={{ backgroundColor: HAIR }}>
-        <div style={{ width: `${Math.min(1, p.progress) * 100}%`, height: "100%",
-          backgroundColor: LONG, transition: "width 600ms cubic-bezier(.22,.9,.3,1)" }} />
+      {/* --------------------------- прогресс ---------------------------- */}
+      <div className="rounded-xl px-3.5 py-3 mt-3" style={inner}>
+        <div className="flex items-center justify-between">
+          <span className="text-[9px] tracking-[0.2em]" style={{ color: FAINT }}>
+            ПРОГРЕСС УРОВНЯ
+          </span>
+          <span className="text-[12px] font-mono" style={{ color: LONG }}>
+            {Math.round(p.progress * 100)}%
+          </span>
+        </div>
+        <div className="h-2 w-full rounded-full mt-2 overflow-hidden" style={{ backgroundColor: HAIR }}>
+          <div style={{ width: `${Math.min(1, p.progress) * 100}%`, height: "100%",
+            backgroundColor: LONG, boxShadow: `0 0 10px ${LONG}`,
+            transition: "width 700ms cubic-bezier(.22,.9,.3,1)" }} />
+        </div>
+        <div className="flex items-start justify-between gap-3 mt-2.5">
+          <div className="min-w-0">
+            <div className="text-[13px]">{p.done} / {p.need} прибыльных сессий</div>
+            <div className="text-[11px] mt-0.5" style={{ color: FAINT }}>
+              {p.done === 0 ? "начни с первой" : p.done >= p.need ? "уровень взят" : "ты на верном пути"}
+            </div>
+          </div>
+          <div className="text-right shrink-0">
+            <div className="text-[11px]" style={{ color: DIM }}>
+              ещё {Math.max(0, p.need - p.done)} до уровня {p.level + 1}
+            </div>
+          </div>
+        </div>
       </div>
 
-      <div className="flex items-center justify-between mt-2 text-[11px]" style={{ color: FAINT }}>
-        <span>{p.done} / {p.need} прибыльных сессий</span>
-        <span>до уровня {p.level + 1}</span>
+      {/* ---------------------------- нижняя ----------------------------- */}
+      <div className="rounded-xl px-3.5 py-3 mt-2 flex items-center gap-3" style={inner}>
+        <div className="flex items-center gap-2.5 flex-1 min-w-0">
+          <Icon name="calendar" size={17} color={LONG} />
+          <div className="min-w-0">
+            <div className="text-[9px] tracking-[0.15em]" style={{ color: FAINT }}>СЕРИЯ УСПЕХА</div>
+            <div className="text-[13px] mt-0.5">
+              {p.dayStreak > 0 ? `${p.dayStreak} ${plural(p.dayStreak, "день", "дня", "дней")} подряд` : "—"}
+            </div>
+          </div>
+        </div>
+        <div className="w-px self-stretch" style={{ backgroundColor: HAIR }} />
+        <div className="flex items-center gap-2.5 flex-1 min-w-0">
+          <Icon name="trend" size={17} color={LONG} />
+          <div className="min-w-0">
+            <div className="text-[9px] tracking-[0.15em]" style={{ color: FAINT }}>ЛУЧШАЯ СЕССИЯ</div>
+            <div className="text-[13px] mt-0.5 font-mono"
+              style={{ color: p.bestPct > 0 ? LONG : DIM }}>
+              {p.wins || p.bestPct ? signedPct(p.bestPct) : "—"}
+            </div>
+          </div>
+        </div>
       </div>
     </div>
   );
+}
+
+/** Русское склонение по числу. */
+function plural(n, one, few, many) {
+  const a = Math.abs(n) % 100, b = a % 10;
+  if (a > 10 && a < 20) return many;
+  if (b > 1 && b < 5) return few;
+  if (b === 1) return one;
+  return many;
 }
 
 /* --------------------------------- ЛОББИ --------------------------------- */
@@ -3254,6 +3405,32 @@ function SessionResult({ result, onDone }) {
               color={SHORT} />
           )}
         </div>
+
+        {result.top && result.top.length > 0 && (
+          <>
+            <div className="text-[10px] tracking-[0.3em] mt-8 mb-2.5" style={{ color: FAINT }}>
+              ЛУЧШИЕ В КОМНАТЕ
+            </div>
+            <div className="flex flex-col gap-2">
+              {result.top.map((p, i) => (
+                <div key={i}
+                  className="rounded-xl px-4 py-3 flex items-center gap-3 tx-in"
+                  style={{ backgroundColor: p.you ? RAISED : SURFACE,
+                    border: `1px solid ${p.you ? "#3A3A40" : HAIR}`, ...stagger(i) }}>
+                  <span className="text-[13px] font-mono w-4 shrink-0"
+                    style={{ color: i === 0 ? LONG : FAINT }}>{i + 1}</span>
+                  {i === 0 && <Icon name="trophy" size={14} color={LONG} />}
+                  <span className="flex-1 min-w-0 text-[13px] truncate"
+                    style={{ color: p.you ? LONG : TEXT }}>
+                    {p.you ? "вы" : (STRATEGY_LABELS[String(p.name).split("-")[0]] || p.name)}
+                  </span>
+                  <span className="text-[13px] font-mono shrink-0"
+                    style={{ color: p.pnl >= 0 ? LONG : SHORT }}>{fmtSigned(p.pnl)}</span>
+                </div>
+              ))}
+            </div>
+          </>
+        )}
       </div>
       <div className="max-w-md w-full mx-auto px-6 pb-8">
         <button onClick={onDone} className="w-full rounded-lg py-4 text-[15px] tracking-[0.15em] font-semibold"
@@ -3382,6 +3559,12 @@ function PracticeApp({ onExit }) {
       leverage,
       early,
       penalty,
+      // Тройка лидеров комнаты на момент закрытия. Считается по снапшоту,
+      // чтобы экран итога не зависел от того, жив ли ещё транспорт.
+      top: [...(snap.players || [])]
+        .map((p) => ({ name: p.name, pnl: p.equity - session, you: p.id === snap.you.id }))
+        .sort((a, b) => b.pnl - a.pnl)
+        .slice(0, 3),
     };
 
     persist({
