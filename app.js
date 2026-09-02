@@ -685,6 +685,43 @@ function nearestCluster(m, P) {
   return best;
 }
 
+/**
+ * Предторговые заявки ботов. Каждый тик разогрева часть ботов ставит одну
+ * лимитку вокруг стартовой цены. Разброс зависит от архетипа: агрессивные
+ * встают близко к цене, осторожные — далеко и ждут лучшего входа.
+ */
+function npcWarmupOrders(m) {
+  const P = m.mark;
+  for (const pl of m.players) {
+    const n = pl.npc;
+    if (!n) continue;
+    const r = n.rng;
+    // За все 100 тиков разогрева бот в среднем оставляет одну-две заявки.
+    if (r() > 0.02 * n.act * 10) continue;
+    pl.limits = pl.limits || [];
+    if (pl.limits.filter((l) => !l.filled).length >= 2) continue;
+
+    const dir = n.spec.bias === "fade" ? (r() < 0.5 ? 1 : -1)
+      : n.spec.bias === "trend" ? (r() < 0.55 ? 1 : -1)
+      : (r() < 0.5 ? 1 : -1);
+    /* Часть заявок агрессивные: они выставлены по ту сторону цены и потому
+       исполняются в первом же клиринге после открытия — это и есть стартовый
+       аукцион. Остальные лежат в стакане и подбираются, когда цена до них
+       доходит. Чем активнее архетип, тем ближе к цене он готов встать. */
+    const aggressive = r() < 0.3;
+    const spread = (0.001 + r() * 0.02) * (1.4 - n.act);
+    const price = aggressive
+      ? (dir > 0 ? P * (1 + spread) : P * (1 - spread))
+      : (dir > 0 ? P * (1 - spread) : P * (1 + spread));
+    const budget = Math.max(0, pl.cash) * n.size * 0.6 * m.npcLeverage;
+    if (budget < m.startingCapital * 0.01) continue;
+    pl.limits.push({
+      side: dir > 0 ? "BUY" : "SELL",
+      limitPrice: price, notional: budget, filled: false,
+    });
+  }
+}
+
 /** Экстремумы окна: нужны пробойщикам. */
 function windowRange(history, look) {
   const n = history.length;
@@ -1133,13 +1170,13 @@ class RoomV4 {
   }
 
   send(playerId, cmd) {
-    /* Во время разогрева участник не торгует. Боты работают как обычно —
-       заявки игрока идут через send, а решения ботов через npcIntents, так
-       что блокировка здесь их не касается. */
+    /* До открытия рынок стоит: клиринга нет, цена не движется. Принимаются
+       только лимитные заявки — и от участника, и от ботов. В момент открытия
+       все они попадают в первый общий клиринг. Рыночные заявки до открытия
+       невозможны: исполнять их не по чему. */
     const m = this.market;
-    if (m.tick < m.warmupTicks
-      && (cmd.type === "TRADE" || cmd.type === "LIMIT")) {
-      return { ok: false, reason: "рынок ещё не открыт" };
+    if (m.tick < m.warmupTicks && cmd.type === "TRADE") {
+      return { ok: false, reason: "рынок ещё не открыт, доступны только лимитные заявки" };
     }
     const v = validateCommand(this.market, playerId, cmd);
     if (!v.ok) return v;
@@ -1174,6 +1211,19 @@ class RoomV4 {
     // Разогрев не входит в сессию: фаза начинает считаться после открытия.
     m.phase = m.totalTicks
       ? clamp((m.tick - m.warmupTicks) / m.totalTicks, 0, 1) : null;
+
+    /* ------------------------- ПРЕДТОРГОВЫЙ ПЕРИОД ----------------------
+       Клиринга нет, Q не меняется, цена стоит. Боты и игрок только
+       выставляют лимитные заявки — тот же механизм pl.limits. В первый тик
+       после открытия все пересёкшиеся заявки уходят в один общий клиринг:
+       получается стартовый аукцион. */
+    if (m.tick < m.warmupTicks) {
+      npcWarmupOrders(m);
+      this.pendingCommands = [];
+      m.tick++;
+      this.history.push(m.mark);
+      return { executed: [], price: m.mark, warmup: true };
+    }
 
     const intents = [];
     // Маржин-колл идёт ПЕРВЫМ и в том же клиринге, что и всё остальное:
@@ -4748,7 +4798,7 @@ function PracticeApp({ onExit }) {
 
           {tab === "Рынок" && (
             <div className="flex flex-col h-full relative">
-              {!snap.tradingOpen && (
+              {!snap.tradingOpen && sheet !== "limit" && (
                 <div className="absolute inset-0 z-20 flex flex-col items-center justify-center
                   backdrop-blur-[2px] tx-fade"
                   style={{ backgroundColor: "rgba(0,0,0,0.62)" }}>
@@ -4766,10 +4816,16 @@ function PracticeApp({ onExit }) {
                       height: "100%", backgroundColor: LONG,
                       transition: "width var(--tx-fast) linear" }} />
                   </div>
-                  <div className="text-[12px] mt-5 text-center max-w-[240px] leading-snug"
+                  <div className="text-[12px] mt-5 text-center max-w-[260px] leading-snug"
                     style={{ color: DIM }}>
-                    Участники расставляют позиции. Открывать свои пока нельзя.
+                    Цена стоит, сделок нет. Участники расставляют лимитные
+                    заявки — можно выставить свою, она сработает при открытии.
                   </div>
+                  <button onClick={() => setSheet(sheet === "limit" ? null : "limit")}
+                    className="mt-4 px-4 py-2.5 rounded-xl text-[11px] tracking-[0.15em] font-bold tap"
+                    style={{ backgroundColor: TEXT, color: BG }}>
+                    ВЫСТАВИТЬ ЛИМИТКУ
+                  </button>
                 </div>
               )}
               {leverage > 1 && !pos && (
@@ -5255,8 +5311,10 @@ function PracticeApp({ onExit }) {
               </button>
               <button onClick={() => setSheet(sheet === "limit" ? null : "limit")}
                 className="px-2.5 py-2.5 rounded text-[11px] font-semibold tap"
-                style={{ backgroundColor: sheet === "limit" ? TEXT : RAISED,
-                  color: sheet === "limit" ? BG : TEXT, border: `1px solid ${HAIR}` }}>
+                style={{ backgroundColor: sheet === "limit" ? TEXT
+                    : !snap.tradingOpen ? LONG : RAISED,
+                  color: sheet === "limit" || !snap.tradingOpen ? BG : TEXT,
+                  border: `1px solid ${HAIR}` }}>
                 лимит{myLimits.length ? ` ${myLimits.length}` : ""}
               </button>
             </div>
