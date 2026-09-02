@@ -232,6 +232,10 @@ class Market {
        тогда фаза не считается и поведение прежнее. */
     this.totalTicks = null;
     this.phase = null;      // 0 в начале, 1 в конце
+    /* Разогрев: первые тики рынок живёт, но заявки участника не принимаются.
+       За это время боты успевают расставить позиции и на графике появляется
+       история, так что игрок входит не в пустоту. */
+    this.warmupTicks = 0;
     this.eyesClusters = null;   // подсказка охотникам, обновляется слоем EYES
     this.startingCapital = startingCapital;
     this.C = playerCount * startingCapital;
@@ -1105,9 +1109,10 @@ function createSnapshot(m, viewerId, { level = "full", devMode = false } = {}) {
  */
 class RoomV4 {
   constructor({ playerCount = 100, startingCapital = 100, seed = 1, npcCount = null,
-    leverage = 1, eyes = false, durationTicks = null } = {}) {
+    leverage = 1, eyes = false, durationTicks = null, warmupTicks = 0 } = {}) {
     this.market = new Market({ playerCount, startingCapital, seed, leverage, eyes });
     this.market.totalTicks = durationTicks;
+    this.market.warmupTicks = warmupTicks;
     this.history = [this.market.mark];
     this.pendingCommands = [];
     this.humanSlots = new Set();
@@ -1128,6 +1133,14 @@ class RoomV4 {
   }
 
   send(playerId, cmd) {
+    /* Во время разогрева участник не торгует. Боты работают как обычно —
+       заявки игрока идут через send, а решения ботов через npcIntents, так
+       что блокировка здесь их не касается. */
+    const m = this.market;
+    if (m.tick < m.warmupTicks
+      && (cmd.type === "TRADE" || cmd.type === "LIMIT")) {
+      return { ok: false, reason: "рынок ещё не открыт" };
+    }
     const v = validateCommand(this.market, playerId, cmd);
     if (!v.ok) return v;
     if (cmd.type === "PROTECT") {
@@ -1158,7 +1171,9 @@ class RoomV4 {
     const m = this.market;
     // Фаза сессии обновляется до решений ботов: они смотрят на неё так же,
     // как на цену.
-    m.phase = m.totalTicks ? Math.min(1, m.tick / m.totalTicks) : null;
+    // Разогрев не входит в сессию: фаза начинает считаться после открытия.
+    m.phase = m.totalTicks
+      ? clamp((m.tick - m.warmupTicks) / m.totalTicks, 0, 1) : null;
 
     const intents = [];
     // Маржин-колл идёт ПЕРВЫМ и в том же клиринге, что и всё остальное:
@@ -1209,6 +1224,7 @@ CONFIG.market = {
   totalPlayers: 100,
   capitalOptions: [100, 500, 1000, 10000],
   durationOptions: [1, 5, 10, 30],     // минуты
+  warmupTicks: 100,                    // 10 секунд разогрева перед открытием
   earlyExitPenalty: 0.10,              // доля остатка, если выйти раньше срока
   initialPrice: CONFIG.P0,
   tickMs: 100,
@@ -1367,7 +1383,8 @@ class EyesLayer {
 
 class LegacyRoom {
   constructor({ startingCapital = 100, seed = 1, devMode = true, playerCount,
-    leverage = 1, eyes = false, durationTicks = null } = {}) {
+    leverage = 1, eyes = false, durationTicks = null,
+    warmupTicks = CONFIG.market.warmupTicks } = {}) {
     const count = playerCount || CONFIG.market.totalPlayers;
     this.leverage = leverage;
     this.eyesMode = eyes;
@@ -1376,9 +1393,13 @@ class LegacyRoom {
        тогда фаза не считается и поведение прежнее. */
     this.totalTicks = null;
     this.phase = null;      // 0 в начале, 1 в конце
+    /* Разогрев: первые тики рынок живёт, но заявки участника не принимаются.
+       За это время боты успевают расставить позиции и на графике появляется
+       история, так что игрок входит не в пустоту. */
+    this.warmupTicks = 0;
     this.eyes = eyes ? new EyesLayer() : null;
     this._room = new RoomV4({ playerCount: count, startingCapital, seed,
-      npcCount: count - 1, leverage, eyes, durationTicks });
+      npcCount: count - 1, leverage, eyes, durationTicks, warmupTicks });
     this.devMode = devMode;
     this._startingCapital = startingCapital;
     this.paused = false;
@@ -1462,6 +1483,8 @@ class LegacyRoom {
       // Именно sessionPhase: поле phase в снапшоте уже занято словесной
       // характеристикой рынка («стабильно», «разгон»).
       sessionPhase: this._room.market.phase,
+      warmupLeft: Math.max(0, this._room.market.warmupTicks - this._room.market.tick),
+      tradingOpen: this._room.market.tick >= this._room.market.warmupTicks,
       leverage: this._room.market.leverage,
       maintenance: this._room.market.maintenance,
       liquidations: this._room.market.liquidations,
@@ -1584,10 +1607,11 @@ const Room = LegacyRoom;
 // ==== ПРОФИЛЬ / ЛОКАЛЬНЫЙ ТРАНСПОРТ / ИНТЕРФЕЙС ====
 class LocalTransport {
   constructor({ startingCapital, seed, devMode = true, leverage = 1, eyes = false,
-    durationTicks = null } = {}) {
+    durationTicks = null, warmupTicks = CONFIG.market.warmupTicks } = {}) {
     this.leverage = leverage;
     this.eyes = eyes;
-    this.room = new Room({ startingCapital, seed, devMode, leverage, eyes, durationTicks });
+    this.room = new Room({ startingCapital, seed, devMode, leverage, eyes,
+      durationTicks, warmupTicks });
     this.playerId = this.room.join(null, "ВЫ"); // новый движок сам выдаёт id человека
     this.timer = null;
     this.speed = 1;
@@ -3291,14 +3315,21 @@ function ModeCard({ kind, title, text, cta, primary, onClick, disabled }) {
   return (
     <div className="rounded-2xl p-3.5 flex flex-col flex-1 min-w-0"
       style={{ backgroundColor: SURFACE, border: `1px solid ${HAIR}` }}>
-      <div className="text-[11px] tracking-[0.18em] font-semibold">{title}</div>
-      <div className="my-2 overflow-hidden rounded-xl"
+      <div className="text-[11px] tracking-[0.18em] font-semibold h-[16px] leading-4 truncate">
+        {title}
+      </div>
+      <div className="my-2.5 overflow-hidden rounded-xl"
         style={{ backgroundColor: "#08080A" }}>
         <ModeArt kind={kind} />
       </div>
-      <div className="text-[11px] leading-snug mb-3 min-h-[30px]" style={{ color: DIM }}>{text}</div>
+      {/* Тексты разной длины раньше сдвигали кнопки на разную высоту.
+          Фиксированные три строки и прижатая книзу кнопка выравнивают
+          карточки независимо от подписи. */}
+      <div className="text-[11px] leading-snug h-[48px] overflow-hidden" style={{ color: DIM }}>
+        {text}
+      </div>
       <button onClick={onClick} disabled={disabled}
-        className="w-full rounded-xl py-3 text-[11px] tracking-[0.15em] font-bold tap disabled:opacity-45"
+        className="w-full rounded-xl py-3 mt-auto text-[11px] tracking-[0.15em] font-bold tap disabled:opacity-45"
         style={primary
           ? { backgroundColor: TEXT, color: BG }
           : { backgroundColor: RAISED, color: TEXT, border: "1px solid #3A3A40" }}>
@@ -3954,7 +3985,7 @@ function Lobby({ profile, account, onNew, onReset, onExit, onSignOut, onTopUp })
               </div>
 
               {/* --------------------------- режимы -------------------------- */}
-              <div className="flex gap-2.5 mt-5 tx-in" style={stagger(1)}>
+              <div className="flex items-stretch gap-2.5 mt-5 tx-in" style={stagger(1)}>
                 <ModeCard kind="online" title="ОНЛАЙН РЫНОК"
                   text="Торгуй с реальными игроками в реальном времени"
                   cta="ИГРАТЬ ОНЛАЙН" primary
@@ -4442,7 +4473,10 @@ function PracticeApp({ onExit }) {
     setTab("Рынок");
     setSession(capital);
     setLeverage(leverage);
-    setDeadline(Date.now() + minutes * 60000);
+    // Таймер сессии стартует после разогрева, иначе десять секунд ожидания
+    // съедали бы оплаченное время.
+    setDeadline(Date.now() + CONFIG.market.warmupTicks * CONFIG.market.tickMs
+      + minutes * 60000);
     setScreen("game");
     persist({ ...profile, wallet: profile.wallet - capital });
     setPending(null);
@@ -4713,7 +4747,31 @@ function PracticeApp({ onExit }) {
         <div className="flex-1 min-h-0 overflow-y-auto no-scrollbar">
 
           {tab === "Рынок" && (
-            <div className="flex flex-col h-full">
+            <div className="flex flex-col h-full relative">
+              {!snap.tradingOpen && (
+                <div className="absolute inset-0 z-20 flex flex-col items-center justify-center
+                  backdrop-blur-[2px] tx-fade"
+                  style={{ backgroundColor: "rgba(0,0,0,0.62)" }}>
+                  <div className="text-[10px] tracking-[0.35em]" style={{ color: FAINT }}>
+                    РЫНОК ОТКРОЕТСЯ ЧЕРЕЗ
+                  </div>
+                  <div className="text-[72px] leading-none font-mono mt-3 tabular-nums tx-pop"
+                    key={Math.ceil(snap.warmupLeft / 10)}>
+                    {Math.ceil(snap.warmupLeft / 10)}
+                  </div>
+                  <div className="h-1 w-40 rounded-full mt-6 overflow-hidden"
+                    style={{ backgroundColor: HAIR }}>
+                    <div style={{
+                      width: `${(1 - snap.warmupLeft / CONFIG.market.warmupTicks) * 100}%`,
+                      height: "100%", backgroundColor: LONG,
+                      transition: "width var(--tx-fast) linear" }} />
+                  </div>
+                  <div className="text-[12px] mt-5 text-center max-w-[240px] leading-snug"
+                    style={{ color: DIM }}>
+                    Участники расставляют позиции. Открывать свои пока нельзя.
+                  </div>
+                </div>
+              )}
               {leverage > 1 && !pos && (
                 <div className="mx-2 mb-1 rounded-lg px-3 py-2 text-[11px]"
                   style={{ backgroundColor: RAISED, color: DIM, border: `1px solid ${HAIR}` }}>
@@ -5204,19 +5262,19 @@ function PracticeApp({ onExit }) {
             </div>
 
             <div className="grid grid-cols-3 gap-2">
-              <button disabled={notional < 1 && !(pos && pos.side === "short")} onClick={doBuy}
+              <button disabled={!snap.tradingOpen || (notional < 1 && !(pos && pos.side === "short"))} onClick={doBuy}
                 className="rounded-lg py-3 disabled:opacity-25 flex flex-col items-center"
                 style={{ backgroundColor: LONG, color: BG, boxShadow: `0 0 26px ${LONG}38` }}>
                 <span className="font-bold text-[16px] tracking-wide">ЛОНГ</span>
                 <span className="text-[9px] opacity-70 leading-tight">{buyHint}</span>
               </button>
-              <button disabled={notional < 1 && !(pos && pos.side === "long")} onClick={doSell}
+              <button disabled={!snap.tradingOpen || (notional < 1 && !(pos && pos.side === "long"))} onClick={doSell}
                 className="rounded-lg py-3 disabled:opacity-25 flex flex-col items-center"
                 style={{ backgroundColor: SHORT, color: BG, boxShadow: `0 0 26px ${SHORT}38` }}>
                 <span className="font-bold text-[16px] tracking-wide">ШОРТ</span>
                 <span className="text-[9px] opacity-70 leading-tight">{sellHint}</span>
               </button>
-              <button disabled={!pos} onClick={() => doClose(1, "позиция закрыта")}
+              <button disabled={!pos || !snap.tradingOpen} onClick={() => doClose(1, "позиция закрыта")}
                 className="rounded-lg py-3 disabled:opacity-25 flex flex-col items-center"
                 style={{ backgroundColor: RAISED, color: TEXT, border: `1px solid #3A3A40` }}>
                 <span className="font-bold text-[16px] tracking-wide">ЗАКРЫТЬ</span>
@@ -5237,7 +5295,8 @@ function PracticeApp({ onExit }) {
           </div>
         )}
 
-        <div className="grid grid-cols-5 border-t" style={{ borderColor: HAIR }}>
+        <div className="grid border-t" style={{ borderColor: HAIR,
+          gridTemplateColumns: `repeat(${TAB_KEYS.length}, minmax(0, 1fr))` }}>
           {TAB_KEYS.map((key) => (
             <button key={key} onClick={() => setTab(key)}
               className="py-3 text-[11px] font-semibold tap"
