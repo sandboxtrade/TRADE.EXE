@@ -78,8 +78,17 @@ const CONFIG = {
   NPC_ACT_SCALE: 1.6,
   NPC_SIZE_SCALE: 0.6,
   // --- маржинальный режим ---
-  LEV_DEPTH: 0.5,        // глубина кривой = C * L^LEV_DEPTH
-  LEV_MAINTENANCE: 1.4,  // поддерживающая маржа = LEV_MAINTENANCE / L
+  LEV_DEPTH: 0.7,        // глубина кривой = C * L^LEV_DEPTH
+  /* Поддерживающая маржа = LEV_MAINTENANCE / L, то есть 5% при x10.
+     ОНА ОБЯЗАНА БЫТЬ СИЛЬНО НИЖЕ НАЧАЛЬНОЙ. При входе на всю покупательную
+     способность позиция стоит ровно L собственных средств, значит начальная
+     маржа = 1/L = 10%. Порог стоял на 14% — позиция оказывалась под
+     маржин-коллом в тот же тик, в котором открывалась. Замер: 20 входов на
+     100% из 20 закрывались мгновенно.
+     Подобрано 6.5%, запас 3.5 процентных пункта: ни одного мгновенного
+     закрытия, 16 ликвидаций за сессию, безнадёжного долга нет. При 5%
+     ликвидаций всего 3, при 8% позиция полного размера живёт 2 тика. */
+  LEV_MAINTENANCE: 0.65,
 
   NPC_ORDER_FRACTION: 0.45,        // доля ботов с настоящими стоп/тейк заявками
   NPC_ORDER_FRACTION_EYES: 0.9,    // в режиме EYES смотреть должно быть на что
@@ -4647,6 +4656,15 @@ function PracticeApp({ onExit }) {
 
           {tab === "Рынок" && (
             <div className="flex flex-col h-full">
+              {leverage > 1 && !pos && (
+                <div className="mx-2 mb-1 rounded-lg px-3 py-2 text-[11px]"
+                  style={{ backgroundColor: RAISED, color: DIM, border: `1px solid ${HAIR}` }}>
+                  Вход на 100% даёт начальную маржу {(100 / leverage).toFixed(0)}%.
+                  Принудительное закрытие при {(snap.maintenance * 100).toFixed(0)}% —
+                  запаса хватает примерно на {(100 / leverage - snap.maintenance * 100).toFixed(0)}
+                  {" "}процентных пункта.
+                </div>
+              )}
               {leverage > 1 && pos && human.marginLevel !== null
                 && human.marginLevel < snap.maintenance * 1.6 && (
                 <div className="mx-2 mb-1 rounded-lg px-3 py-2 text-[11px] tx-pop"
