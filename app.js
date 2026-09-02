@@ -68,6 +68,18 @@ const CONFIG = {
   NPC_SIZE_SCALE: 0.6,
   NPC_ORDER_FRACTION: 0.45,        // доля ботов с настоящими стоп/тейк заявками
   NPC_ORDER_FRACTION_EYES: 0.9,    // в режиме EYES смотреть должно быть на что
+
+  // --- «торговать, чтобы заработать», а не ради оборота ---
+  // Ожидаемое движение должно перекрывать стоимость входа и выхода хотя бы
+  // в NPC_EDGE_MULT раз, иначе сделка не открывается.
+  // Подобрано замером: при 2.2 боты почти переставали торговать и размах
+  // цены падал до 3.3%, при 0.6 оборот и размах восстанавливаются, а
+  // бессмысленные сделки всё равно отсекаются.
+  NPC_EDGE_MULT: 0.6,
+  // Насколько устойчиво отрицательным должен стать личный edge, чтобы бот
+  // начал нарушать собственную стратегию.
+  NPC_EDGE_GIVEUP: -0.001,
+  NPC_TILT: 0.05,        // вероятность сделки «на эмоциях» после серии потерь
   NPC_THRESH_SCALE: 0.4,
   NPC_HERD_MAX: 0.25,
   NPC_CONVICTION_UP: 1.10,
@@ -465,6 +477,8 @@ function checkInvariants(m, ctx = {}) {
 // ---- npc.js ----
 
 /** Детерминированный ГПСЧ: один seed -> одна и та же сессия. */
+const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
+
 function mulberry32(a) {
   return function () {
     a |= 0; a = (a + 0x6D2B79F5) | 0;
@@ -546,7 +560,15 @@ function attachNPCs(m, startIdx, count, seed, eyes = false) {
       // пороги у себя внутри. Их срабатывание идёт через pendingIntents в
       // общем клиринге, поэтому массовый вынос стопов виден как каскад.
       usesOrders: r() < (eyes ? CONFIG.NPC_ORDER_FRACTION_EYES : CONFIG.NPC_ORDER_FRACTION),
+      // Терпение: сколько тиков бот выжидает после выхода. После убытка
+      // пауза длиннее — как у человека, который «отходит от сделки».
+      patience: 6 + Math.floor(r() * 40),
+      // Насколько бот готов нарушить собственную стратегию, когда она
+      // перестала работать. 0 — догматик, 1 — легко переобувается.
+      flexibility: 0.15 + r() * 0.7,
       since: 0, lastU: 0, peak: 0, conviction: 1, mood: 0,
+      cooldown: 0, edge: 0, trades: 0, losses: 0, flipped: 0,
+      startEquity: null, entryEquity: null,
       rng: mulberry32(seed * 7919 + k + 1),
     };
   }
@@ -594,38 +616,58 @@ function windowRange(history, look) {
 function decide(m, i, history) {
   const pl = m.players[i], n = pl.npc;
   if (!n) return 0;
+  if (n.startEquity === null) n.startEquity = m.equity(i);
   if (n.lastU !== pl.u) { n.lastU = pl.u; n.since = 0; n.peak = 0; }
   n.since++;
+  if (n.cooldown > 0) n.cooldown--;
+
   const r = n.rng;
-  if (r() > n.act) return 0;
+  const P = m.mark;
+  const equity = m.equity(i);
   if (pl.u === 0 && pl.cash <= m.startingCapital * 0.02) return 0;   // сгорел
 
-  const P = m.mark;
   const lag = Math.max(1, n.lag);
   const at = (k) => history[Math.max(0, history.length - 1 - k)];
   const past = history.length ? at(lag) : P;
   const mom = (P - past) / Math.max(past, 1e-9);
   const slow = history.length ? (P - at(lag + n.look)) / Math.max(at(lag + n.look), 1e-9) : 0;
 
-  // --- управление открытой позицией ---
+  /* ------------------------- УПРАВЛЕНИЕ ПОЗИЦИЕЙ -------------------------
+     Выход — тоже решение о деньгах, а не срабатывание таймера. Бот смотрит
+     на свой результат в этой сделке и на то, продолжается ли движение,
+     ради которого он вошёл.                                                */
   if (pl.u !== 0 && pl.entryPrice !== null) {
     const pnl = pl.u > 0 ? (P - pl.entryPrice) / pl.entryPrice
                          : (pl.entryPrice - P) / pl.entryPrice;
     if (pnl > n.peak) n.peak = pnl;
+    const withFlow = (pl.u > 0 ? 1 : -1) * Math.sign(slow) > 0;
 
-    if (pnl <= n.stop) { note(n, false); return -pl.u; }
+    if (pnl <= n.stop) { close(n, false, equity); return -pl.u; }
+
     if (n.trail > 0) {
-      // Трейлинг: выходим не по достижении цели, а по откату от максимума.
-      if (n.peak >= n.take * 0.6 && pnl <= n.peak * (1 - n.trail)) { note(n, true); return -pl.u; }
-      if (pnl >= n.take * 2.5) { note(n, true); return -pl.u; }
-    } else if (pnl >= n.take) { note(n, true); return -pl.u; }
+      if (n.peak >= n.take * 0.6 && pnl <= n.peak * (1 - n.trail)) {
+        close(n, true, equity); return -pl.u;
+      }
+      // Цель достигнута, но поток всё ещё за нас — жадность против правила.
+      if (pnl >= n.take * 2.5 && (!withFlow || r() > n.flexibility)) {
+        close(n, true, equity); return -pl.u;
+      }
+    } else if (pnl >= n.take) {
+      if (withFlow && r() < n.flexibility * 0.5) {
+        // Нарушаем собственный тейк и даём прибыли идти дальше.
+        n.take *= 1.4;
+      } else { close(n, true, equity); return -pl.u; }
+    }
 
-    if (n.since >= n.hold) { note(n, pnl > 0); return -pl.u; }
+    // Движение выдохлось и развернулось против — выходим досрочно, не дожидаясь
+    // стопа. Раньше бот просто досиживал до таймера.
+    if (!withFlow && pnl < 0 && n.since > 15 && r() < 0.05 + n.flexibility * 0.05) {
+      close(n, false, equity); return -pl.u;
+    }
+    if (n.since >= n.hold) { close(n, pnl > 0, equity); return -pl.u; }
 
-    // Пирамидинг: доливка в сторону движения, пока оно продолжается.
     if (r() < 0.12) {
-      const with_ = (pl.u > 0 ? 1 : -1) * Math.sign(slow) > 0;
-      if (with_ && pnl > 0 && n.conviction > 1) {
+      if (withFlow && pnl > 0 && n.conviction > 1) {
         const own = Math.max(0, pl.cash + m.curve.value(pl.u, P));
         const add = m.curve.unitsFor(own * n.size * 0.4 * n.conviction * m.npcLeverage, P);
         return pl.u > 0 ? add : -add;
@@ -635,72 +677,117 @@ function decide(m, i, history) {
     return 0;
   }
 
-  // --- поиск входа ---
-  let dir = 0;
+  /* ------------------------------- ВХОД ---------------------------------- */
+  if (n.cooldown > 0) return 0;
+  if (r() > n.act) return 0;
+
+  // Сигнал и его сила. Сила нужна не для красоты: ниже она сравнивается
+  // со стоимостью входа и выхода.
+  let dir = 0, strength = 0;
   if (n.spec.bias === "break") {
     const { hi, lo } = windowRange(history, n.look);
-    if (Number.isFinite(hi) && P > hi) dir = 1;
-    else if (Number.isFinite(lo) && P < lo) dir = -1;
+    if (Number.isFinite(hi) && P > hi) { dir = 1; strength = (P - hi) / P; }
+    else if (Number.isFinite(lo) && P < lo) { dir = -1; strength = (lo - P) / P; }
   } else if (n.spec.bias === "herd") {
-    dir = Math.sign(m.crowd || 0);
+    dir = Math.sign(m.crowd || 0); strength = Math.abs(m.crowd || 0) * 0.01;
   } else if (n.spec.bias === "hunt") {
-    // В режиме EYES охотник видит то же, что и игрок: обезличенные кластеры.
-    // Целится в ближайший крупный и давит цену к нему.
     const target = m.eyesMode ? nearestCluster(m, P) : null;
-    if (target) { dir = target > P ? 1 : -1; }
+    if (target) { dir = target > P ? 1 : -1; strength = Math.abs(target - P) / P; }
     else {
-    // Ближе к какому краю окна стоит цена — туда и давим: там чужие стопы.
-    const { hi, lo } = windowRange(history, n.look);
-    if (!Number.isFinite(hi) || hi <= lo) return 0;
-    const pos = (P - lo) / (hi - lo);
-    if (pos > 0.78) dir = 1;
-    else if (pos < 0.22) dir = -1;
-    else return 0;
+      const { hi, lo } = windowRange(history, n.look);
+      if (!Number.isFinite(hi) || hi <= lo) return 0;
+      const pos = (P - lo) / (hi - lo);
+      if (pos > 0.78) { dir = 1; strength = (hi - P) / P + 0.001; }
+      else if (pos < 0.22) { dir = -1; strength = (P - lo) / P + 0.001; }
+      else return 0;
     }
   } else if (n.spec.bias === "trap") {
-    // Свежий пробой — ставим против него в расчёте на ложный выход.
     const { hi, lo } = windowRange(history, n.look);
-    if (Number.isFinite(hi) && P > hi) dir = -1;
-    else if (Number.isFinite(lo) && P < lo) dir = 1;
+    if (Number.isFinite(hi) && P > hi) { dir = -1; strength = (P - hi) / P; }
+    else if (Number.isFinite(lo) && P < lo) { dir = 1; strength = (lo - P) / P; }
     else return 0;
   } else if (n.spec.bias === "trend") {
-    // Быстрые трендовые смотрят на последние тики, медленные — на своё окно.
     const sig = n.spec.fast ? mom : slow;
     if (Math.abs(sig) < n.thresh) return 0;
-    dir = Math.sign(sig);
+    dir = Math.sign(sig); strength = Math.abs(sig);
   } else if (n.spec.bias === "fade") {
-    // Часть контр-трендовых работает по быстрому сигналу, часть по медленному.
-    // Без быстрых автокорреляция доходности уходила в +0.33: цена становилась
-    // предсказуемой по направлению, и momentum давал бесплатный доход.
     const sig = n.spec.fast ? mom : slow;
     if (Math.abs(sig) < n.thresh) return 0;
-    dir = -Math.sign(sig);
+    dir = -Math.sign(sig); strength = Math.abs(sig);
   } else {
-    dir = r() < 0.5 ? 1 : -1;
+    dir = r() < 0.5 ? 1 : -1; strength = n.thresh * 1.5;
   }
 
-  // Примесь стадного чувства: часть решения — за толпой.
-  if (dir === 0 || (n.herd > 0.35 && r() < n.herd * 0.4)) {
-    const c = Math.sign(m.crowd || 0);
-    if (c !== 0) dir = c;
-  }
   if (dir === 0) return 0;
 
+  /* --- Стратегия перестала работать: разворот собственного правила ---
+     Бот помнит, сколько он зарабатывал последними сделками. Если его edge
+     устойчиво отрицательный, гибкий бот начинает делать наоборот, а
+     догматик просто уменьшает ставку. Именно это и отличает попытку
+     заработать от торговли по инструкции.                                */
+  if (n.edge < CONFIG.NPC_EDGE_GIVEUP && n.trades > 6) {
+    if (r() < n.flexibility * 0.6) { dir = -dir; n.flipped++; }
+    else if (r() < 0.5) { n.cooldown = n.patience; return 0; }
+  }
+
+  // Стадное чувство — по-прежнему примесь, а не основа.
+  if (n.herd > 0.35 && r() < n.herd * 0.3) {
+    const c = Math.sign(m.crowd || 0);
+    if (c !== 0) { dir = c; strength = Math.max(strength, n.thresh); }
+  }
+
+  /* --- Ожидаемая выгода против стоимости входа и выхода ---
+     Собственный сдвиг цены считается той же функцией клиринга, что и в
+     движке, поэтому оценка честная, а не выдуманный коэффициент.         */
   const own = Math.max(0, pl.cash);
-  const units = m.curve.unitsFor(own * n.size * n.conviction * m.npcLeverage, P);
+  const behind = n.startEquity ? (n.startEquity - equity) / n.startEquity : 0;
+  // Отстал от старта — рискует смелее; вышел вперёд — бережёт прибыль.
+  const appetite = clamp(1 + behind * 1.5, 0.55, 1.7);
+  let budget = own * n.size * n.conviction * appetite * m.npcLeverage;
+  if (budget <= 0) return 0;
+
+  let units = m.curve.unitsFor(budget, P);
   if (units <= 0) return 0;
 
+  const impact = Math.abs(m.curve.clearingPrice(m.Q, dir * units) - P) / P;
+  const roundTrip = impact * 2;
+  const tilt = n.losses >= 3 && r() < CONFIG.NPC_TILT;   // сделка на эмоциях
+  if (strength < roundTrip * CONFIG.NPC_EDGE_MULT && !tilt) {
+    // Игра не стоит свеч в этом размере. Сдвиг цены растёт вместе с объёмом,
+    // поэтому вместо отказа бот УМЕНЬШАЕТ ставку до той, что окупается.
+    // Отказ остаётся только когда осмысленного размера не существует —
+    // так крупный участник не парализует сам себя.
+    const scale = strength / Math.max(1e-9, roundTrip * CONFIG.NPC_EDGE_MULT);
+    if (scale < 0.05) { n.cooldown = Math.round(n.patience * 0.5); return 0; }
+    units *= Math.max(scale, 0.05);
+    budget *= Math.max(scale, 0.05);
+  }
+  if (budget < m.startingCapital * 0.01) return 0;   // мелочь не стоит комиссии внимания
+
+  n.entryEquity = equity;
   if (n.usesOrders) {
-    // Заявки ставятся сразу от предполагаемой цены входа. Реальный вход
-    // случится по цене клиринга, поэтому уровни примерные — так же, как
-    // у живого игрока, который жмёт кнопку до исполнения.
-    const s = Math.abs(n.stop), t = Math.abs(n.take);
-    pl.stopLoss = dir > 0 ? P * (1 - s) : P * (1 + s);
-    pl.takeProfit = dir > 0 ? P * (1 + t) : P * (1 - t);
+    const st = Math.abs(n.stop), tk = Math.abs(n.take);
+    pl.stopLoss = dir > 0 ? P * (1 - st) : P * (1 + st);
+    pl.takeProfit = dir > 0 ? P * (1 + tk) : P * (1 - tk);
   } else {
     pl.stopLoss = null; pl.takeProfit = null;
   }
   return dir > 0 ? units : -units;
+}
+
+/**
+ * Закрытие сделки: бот записывает, сколько на ней заработал, и назначает
+ * себе паузу. Именно эта запись потом решает, продолжать ли следовать
+ * своей стратегии.
+ */
+function close(n, win, equity) {
+  const gain = n.entryEquity ? (equity - n.entryEquity) / Math.max(1e-9, n.entryEquity) : 0;
+  n.edge = n.edge * 0.8 + gain * 0.2;
+  n.trades++;
+  n.losses = gain < 0 ? n.losses + 1 : 0;
+  n.cooldown = Math.round(n.patience * (gain < 0 ? 1.6 : 0.6));
+  n.take = n.spec.take * CONFIG.NPC_PNL_SCALE;   // сброс раздвинутой цели
+  note(n, win);
 }
 
 /**
@@ -1451,7 +1538,6 @@ const PAD_T = 10, PAD_B = 6;
 const BAR_MIN = 1.0, BAR_MAX = 40, BAR_DEFAULT = 8;
 const Y_MIN = 0.2, Y_MAX = 6;   // растяжение ценовой шкалы
 const HISTORY_CANDLES = 2000;
-const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
 
 function Chart({ state, timeframe, mode, entryPrice, stopLoss, takeProfit,
   liquidationPrice, side, onLevel, eyes }) {
