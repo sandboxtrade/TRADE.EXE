@@ -227,6 +227,11 @@ class Market {
      * не меняет — режим задан заранее и одинаков для всех участников.
      */
     this.eyesMode = eyes;
+    /* Длительность сессии в тиках. Нужна ботам: в закрытой комнате с общим
+       таймером время — такой же фактор, как цена. null = бессрочная сессия,
+       тогда фаза не считается и поведение прежнее. */
+    this.totalTicks = null;
+    this.phase = null;      // 0 в начале, 1 в конце
     this.eyesClusters = null;   // подсказка охотникам, обновляется слоем EYES
     this.startingCapital = startingCapital;
     this.C = playerCount * startingCapital;
@@ -725,6 +730,31 @@ function decide(m, i, history) {
   const equity = m.equity(i);
   if (pl.u === 0 && pl.cash <= m.startingCapital * 0.02) return 0;   // сгорел
 
+  /* ------------------------- ВРЕМЯ СЕССИИ -------------------------------
+     Комната закрывается по общему таймеру, поэтому время для бота — такой
+     же фактор, как цена. Три отрезка:
+
+     СТАРТ (первые 10%) — никто не хочет простоять сессию вне рынка:
+       порог входа ниже, пауза не действует, размер чуть больше.
+     СЕРЕДИНА — обычное поведение.
+     КОНЕЦ (последние 20%) — поведение расходится по результату:
+       кто в минусе, отыгрывается: больше размер, ниже порог, дольше держит;
+       кто в плюсе, бережёт результат: сокращает размер и раньше выходит.
+     ПОСЛЕДНИЕ 3% — все разгружаются: новых входов нет, позиции закрываются,
+       потому что после закрытия комнаты держать уже нечего.            */
+  const ph = m.phase;                     // null, если сессия бессрочная
+  const opening = ph !== null && ph < 0.10;
+  const endgame = ph !== null && ph > 0.75;
+  const flush = ph !== null && ph > 0.97;
+  const behind = n.startEquity ? equity < n.startEquity : false;
+  // Множители порога входа и размера ставки от фазы.
+  let phThresh = 1, phSize = 1;
+  if (opening) { phThresh = 0.45; phSize = 1.25; }
+  else if (endgame) {
+    if (behind) { phThresh = 0.4; phSize = 2.0; }   // отыгрывается
+    else { phThresh = 2.2; phSize = 0.45; }         // бережёт прибыль
+  }
+
   const lag = Math.max(1, n.lag);
   const at = (k) => history[Math.max(0, history.length - 1 - k)];
   const past = history.length ? at(lag) : P;
@@ -740,6 +770,11 @@ function decide(m, i, history) {
                          : (pl.entryPrice - P) / pl.entryPrice;
     if (pnl > n.peak) n.peak = pnl;
     const withFlow = (pl.u > 0 ? 1 : -1) * Math.sign(slow) > 0;
+
+    // Комната вот-вот закроется — держать позицию больше незачем.
+    if (flush) { close(n, pnl > 0, equity); return -pl.u; }
+    // Впереди по итогу и осталось мало времени — фиксируем, не рискуя.
+    if (endgame && !behind && pnl > 0 && r() < 0.35) { close(n, true, equity); return -pl.u; }
 
     if (pnl <= n.stop) { close(n, false, equity); return -pl.u; }
 
@@ -763,7 +798,10 @@ function decide(m, i, history) {
     if (!withFlow && pnl < 0 && n.since > 15 && r() < 0.05 + n.flexibility * 0.05) {
       close(n, false, equity); return -pl.u;
     }
-    if (n.since >= n.hold) { close(n, pnl > 0, equity); return -pl.u; }
+    // Отстающий в конце сессии тянет позицию дольше обычного: закрыть её
+    // по таймеру значит зафиксировать минус.
+    const holdLimit = endgame && behind ? n.hold * 2.5 : n.hold;
+    if (n.since >= holdLimit) { close(n, pnl > 0, equity); return -pl.u; }
 
     if (r() < 0.12) {
       if (withFlow && pnl > 0 && n.conviction > 1) {
@@ -777,8 +815,9 @@ function decide(m, i, history) {
   }
 
   /* ------------------------------- ВХОД ---------------------------------- */
-  if (n.cooldown > 0) return 0;
-  if (r() > n.act) return 0;
+  if (flush) return 0;                       // перед закрытием комнаты не входим
+  if (n.cooldown > 0 && !opening) return 0;  // на старте пауза не держит
+  if (r() > n.act * (opening ? 1.6 : endgame && behind ? 1.9 : 1)) return 0;
 
   // Сигнал и его сила. Сила нужна не для красоты: ниже она сравнивается
   // со стоимостью входа и выхода.
@@ -807,11 +846,11 @@ function decide(m, i, history) {
     else return 0;
   } else if (n.spec.bias === "trend") {
     const sig = n.spec.fast ? mom : slow;
-    if (Math.abs(sig) < n.thresh) return 0;
+    if (Math.abs(sig) < n.thresh * phThresh) return 0;
     dir = Math.sign(sig); strength = Math.abs(sig);
   } else if (n.spec.bias === "fade") {
     const sig = n.spec.fast ? mom : slow;
-    if (Math.abs(sig) < n.thresh) return 0;
+    if (Math.abs(sig) < n.thresh * phThresh) return 0;
     dir = -Math.sign(sig); strength = Math.abs(sig);
   } else {
     dir = r() < 0.5 ? 1 : -1; strength = n.thresh * 1.5;
@@ -839,10 +878,10 @@ function decide(m, i, history) {
      Собственный сдвиг цены считается той же функцией клиринга, что и в
      движке, поэтому оценка честная, а не выдуманный коэффициент.         */
   const own = Math.max(0, pl.cash);
-  const behind = n.startEquity ? (n.startEquity - equity) / n.startEquity : 0;
   // Отстал от старта — рискует смелее; вышел вперёд — бережёт прибыль.
-  const appetite = clamp(1 + behind * 1.5, 0.55, 1.7);
-  let budget = own * n.size * n.conviction * appetite * m.npcLeverage;
+  const drawdown = n.startEquity ? (n.startEquity - equity) / n.startEquity : 0;
+  const appetite = clamp(1 + drawdown * 1.5, 0.55, 1.7);
+  let budget = own * n.size * n.conviction * appetite * phSize * m.npcLeverage;
   if (budget <= 0) return 0;
 
   let units = m.curve.unitsFor(budget, P);
@@ -1066,8 +1105,9 @@ function createSnapshot(m, viewerId, { level = "full", devMode = false } = {}) {
  */
 class RoomV4 {
   constructor({ playerCount = 100, startingCapital = 100, seed = 1, npcCount = null,
-    leverage = 1, eyes = false } = {}) {
+    leverage = 1, eyes = false, durationTicks = null } = {}) {
     this.market = new Market({ playerCount, startingCapital, seed, leverage, eyes });
+    this.market.totalTicks = durationTicks;
     this.history = [this.market.mark];
     this.pendingCommands = [];
     this.humanSlots = new Set();
@@ -1116,6 +1156,10 @@ class RoomV4 {
   step() {
     if (this.halted) return this.halted;
     const m = this.market;
+    // Фаза сессии обновляется до решений ботов: они смотрят на неё так же,
+    // как на цену.
+    m.phase = m.totalTicks ? Math.min(1, m.tick / m.totalTicks) : null;
+
     const intents = [];
     // Маржин-колл идёт ПЕРВЫМ и в том же клиринге, что и всё остальное:
     // единая цена тика не даёт ликвидируемым проскочить раньше других.
@@ -1323,13 +1367,18 @@ class EyesLayer {
 
 class LegacyRoom {
   constructor({ startingCapital = 100, seed = 1, devMode = true, playerCount,
-    leverage = 1, eyes = false } = {}) {
+    leverage = 1, eyes = false, durationTicks = null } = {}) {
     const count = playerCount || CONFIG.market.totalPlayers;
     this.leverage = leverage;
     this.eyesMode = eyes;
+    /* Длительность сессии в тиках. Нужна ботам: в закрытой комнате с общим
+       таймером время — такой же фактор, как цена. null = бессрочная сессия,
+       тогда фаза не считается и поведение прежнее. */
+    this.totalTicks = null;
+    this.phase = null;      // 0 в начале, 1 в конце
     this.eyes = eyes ? new EyesLayer() : null;
     this._room = new RoomV4({ playerCount: count, startingCapital, seed,
-      npcCount: count - 1, leverage, eyes });
+      npcCount: count - 1, leverage, eyes, durationTicks });
     this.devMode = devMode;
     this._startingCapital = startingCapital;
     this.paused = false;
@@ -1410,6 +1459,9 @@ class LegacyRoom {
       shortRealized: this._room.market.shortRealized,
       eyes: this.eyes ? this.eyes.view() : null,
       eyesMode: this.eyesMode,
+      // Именно sessionPhase: поле phase в снапшоте уже занято словесной
+      // характеристикой рынка («стабильно», «разгон»).
+      sessionPhase: this._room.market.phase,
       leverage: this._room.market.leverage,
       maintenance: this._room.market.maintenance,
       liquidations: this._room.market.liquidations,
@@ -1531,10 +1583,11 @@ const Room = LegacyRoom;
 
 // ==== ПРОФИЛЬ / ЛОКАЛЬНЫЙ ТРАНСПОРТ / ИНТЕРФЕЙС ====
 class LocalTransport {
-  constructor({ startingCapital, seed, devMode = true, leverage = 1, eyes = false } = {}) {
+  constructor({ startingCapital, seed, devMode = true, leverage = 1, eyes = false,
+    durationTicks = null } = {}) {
     this.leverage = leverage;
     this.eyes = eyes;
-    this.room = new Room({ startingCapital, seed, devMode, leverage, eyes });
+    this.room = new Room({ startingCapital, seed, devMode, leverage, eyes, durationTicks });
     this.playerId = this.room.join(null, "ВЫ"); // новый движок сам выдаёт id человека
     this.timer = null;
     this.speed = 1;
@@ -4378,7 +4431,12 @@ function PracticeApp({ onExit }) {
   const startSession = ({ capital, leverage, minutes, eyes }) => {
     // Приложение больше не создаёт движок напрямую — только транспорт.
     // При переезде на сервер здесь меняется одна строка на RemoteTransport.
-    engineRef.current = new LocalTransport({ startingCapital: capital, leverage, eyes });
+    engineRef.current = new LocalTransport({
+      startingCapital: capital, leverage, eyes,
+      // Боты видят тот же таймер, что и игрок: старт, середина и концовка
+      // сессии влияют на их поведение.
+      durationTicks: Math.round(minutes * 60000 / CONFIG.market.tickMs),
+    });
     setSize(String(Math.round(capital * 0.3)));
     setPaused(false);
     setTab("Рынок");
@@ -4959,6 +5017,9 @@ function PracticeApp({ onExit }) {
               <Line left="Оборот за тик" right={fmt((state.buyPressure ?? 0) + (state.sellPressure ?? 0))} />
               <Line left="Заработали лонги" right={fmtSigned(state.longRealized ?? 0)}
                 color={(state.longRealized ?? 0) >= 0 ? LONG : SHORT} />
+              <Line left="Фаза сессии"
+                right={snap.sessionPhase === null || snap.sessionPhase === undefined
+                  ? "без таймера" : `${Math.round(snap.sessionPhase * 100)}%`} />
               <Line left="Плечо" right={`x${snap.leverage ?? 1}`} />
               <Line left="Поддерживающая маржа"
                 right={`${((snap.maintenance ?? 0) * 100).toFixed(0)}%`} />
