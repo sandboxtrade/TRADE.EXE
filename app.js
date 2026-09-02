@@ -27,7 +27,15 @@ const CONFIG = {
   // Это даёт масштабную инвариантность: движение цены зависит только от
   // ДОЛИ совокупного капитала (MODEL-V2, разд. 3: 12 конфигураций,
   // идентичный результат до 6-го знака).
-  THETA: 0.5,
+  // Глубина кривой. Чем больше THETA, тем меньше kappa и тем сильнее один и
+  // тот же поток двигает цену. Поднято с 0.5 до 0.62.
+  //
+  // Компромисс замерен: 0.5 -> размах 7.1%, колебание 0.137%/тик, моментум
+  // почти не окупается (EV 0.11); 0.8 -> размах 11.9% и 0.326%/тик, но
+  // моментум даёт EV 2.88. Живая цена сама по себе делает рынок проще:
+  // на пологой кривой собственный поток трейдера двигает цену сильнее.
+  // 0.62 — середина: размах 9.2%, 0.212%/тик, моментум EV 0.59.
+  THETA: 0.62,
 
   // --- Клиринг ---
   CLIP_MAX_ITER: 200,   // предел итераций обрезки; эмпирически хватает <= 14
@@ -62,9 +70,12 @@ const CONFIG = {
   // После появления охотников за стопами и настоящих стоп-заявок каскады
   // усилили тренды, и моментум-стратегия стала выгоднее. Ручки пересчитаны:
   // моментум-10 упал с 3.23 до 1.65, моментум-40 с 3.66 до 2.57.
-  NPC_FAST_FADE_WEIGHT: 3.0,
-  NPC_FAST_TREND_WEIGHT: 1.6,
-  NPC_ACT_SCALE: 1.0,
+  // Пересчитано под THETA=0.8. Более живая цена сама по себе возвращает
+  // преимущество трендовым стратегиям, поэтому вес быстрых контр-трендовых
+  // поднят: моментум-40 из +0.45 ушёл в −0.65, моментум-10 держится на 1.01.
+  NPC_FAST_FADE_WEIGHT: 3.4,
+  NPC_FAST_TREND_WEIGHT: 1.5,
+  NPC_ACT_SCALE: 1.6,
   NPC_SIZE_SCALE: 0.6,
   NPC_ORDER_FRACTION: 0.45,        // доля ботов с настоящими стоп/тейк заявками
   NPC_ORDER_FRACTION_EYES: 0.9,    // в режиме EYES смотреть должно быть на что
@@ -340,9 +351,26 @@ class Market {
    * порядко-независимость: перестановка не меняет ни P*, ни исполнение.
    */
   clear(orders) {
-    const orig = orders
-      .filter((o) => Number.isFinite(o.du) && Math.abs(o.du) > 1e-15)
-      .map((o) => ({ i: o.i, du: o.du, reason: o.reason || null }));
+    /* ОДНА ЗАЯВКА НА УЧАСТНИКА ЗА ТИК.
+       Обрезка по бюджету считает каждую заявку от ПРЕДТИКОВОЙ позиции. Если
+       у участника в одном тике оказывались две заявки — например, стоп на
+       закрытие шорта и новый вход бота, — каждая проходила проверку по
+       отдельности, а исполнялись обе подряд. Участник переворачивался и
+       платил за обе ноги: замер показал кэш 14.15 -> -8.45 на 312-м тике.
+       Складываем объёмы до обрезки; приоритет причины — ликвидация, затем
+       стоп, затем тейк. */
+    const PRIORITY = { liquidation: 3, stop: 2, take: 1 };
+    const merged = new Map();
+    for (const o of orders) {
+      if (!Number.isFinite(o.du) || o.du === 0) continue;
+      const cur = merged.get(o.i);
+      const reason = o.reason || null;
+      if (!cur) { merged.set(o.i, { i: o.i, du: o.du, reason }); continue; }
+      cur.du += o.du;
+      if ((PRIORITY[reason] || 0) > (PRIORITY[cur.reason] || 0)) cur.reason = reason;
+    }
+    const orig = [...merged.values()]
+      .filter((o) => Math.abs(o.du) > 1e-15);
     if (!orig.length) { this.tick++; return { price: this.mark, executed: [], iters: 0 }; }
 
     const { value, clearingPrice, PMAX } = this.curve;
@@ -367,6 +395,22 @@ class Market {
       const P2 = clearingPrice(this.Q, work.reduce((a, o) => a + o.du, 0));
       if (Math.abs(P2 - P) < CONFIG.EPS) { P = P2; break; }
       P = P2;
+    }
+
+    // ЗАКЛЮЧИТЕЛЬНАЯ ОБРЕЗКА ПО ИТОГОВОЙ ЦЕНЕ.
+    // Выше объёмы считались от предыдущего приближения P, а исполнение идёт
+    // по последнему P2. Пока цена ходила по 0.1% за тик, разница тонула в
+    // допуске; на более подвижной кривой она выросла и кэш уходил в минус
+    // (аварийная остановка «cash < 0» на 6 сидах из 20).
+    for (let k = 0; k < work.length; k++) {
+      const want = orig[k].du, pl = this.players[work[k].i];
+      const before = pl.u, after = before + want;
+      const budget = (pl.cash + value(before, P)) * this.leverage;
+      let maxAfter = after > 0 ? budget / P : after < 0 ? -budget / (PMAX - P) : 0;
+      let allowed = after;
+      if (after > 0 && after > maxAfter) allowed = maxAfter;
+      if (after < 0 && after < maxAfter) allowed = maxAfter;
+      work[k].du = allowed - before;
     }
 
     const executed = [];
@@ -617,7 +661,19 @@ function decide(m, i, history) {
   const pl = m.players[i], n = pl.npc;
   if (!n) return 0;
   if (n.startEquity === null) n.startEquity = m.equity(i);
-  if (n.lastU !== pl.u) { n.lastU = pl.u; n.since = 0; n.peak = 0; }
+  if (n.lastU !== pl.u) {
+    // Позиция могла закрыться НЕ решением бота: сработал его же стоп или
+    // тейк через общий клиринг, либо пришёл маржин-колл. Раньше в этом
+    // случае close() не вызывался, итог сделки не записывался, entryEquity
+    // оставался от прошлого входа, и следующая запись считала прибыль от
+    // устаревшей точки. Из-за этого серия убытков накручивалась до 55 при
+    // 48 прибыльных ботах из 99, а уверенность стабильно проседала до 0.62.
+    if (n.lastU !== 0 && pl.u === 0 && n.entryEquity !== null) {
+      const eq = m.equity(i);
+      close(n, eq > n.entryEquity, eq);
+    }
+    n.lastU = pl.u; n.since = 0; n.peak = 0;
+  }
   n.since++;
   if (n.cooldown > 0) n.cooldown--;
 
@@ -787,6 +843,7 @@ function close(n, win, equity) {
   n.losses = gain < 0 ? n.losses + 1 : 0;
   n.cooldown = Math.round(n.patience * (gain < 0 ? 1.6 : 0.6));
   n.take = n.spec.take * CONFIG.NPC_PNL_SCALE;   // сброс раздвинутой цели
+  n.entryEquity = null;                          // сделка записана ровно один раз
   note(n, win);
 }
 
@@ -1511,6 +1568,7 @@ const DIM = "#7A7A80";
 const FAINT = "#46464C";
 const LONG = "#19D67E";
 const SHORT = "#FF3F52";
+const GOLD = "#E8B44A";   // кубки
 
 const fmt = (v, d = 2) => {
   const digits = Math.abs(v) >= 1000 ? 0 : d;
@@ -2251,6 +2309,16 @@ function profileStats(profile) {
    не вызывать перерасчёт вёрстки на каждом кадре.
    ========================================================================== */
 const GLOBAL_CSS = `
+/* Единая кривая и три длительности на всё приложение: 200 мс на отклик
+   элемента, 320 мс на появление блока, 480 мс на смену экрана. Раньше в
+   разных местах стояли 120, 150, 260, 340, 600 и 700 мс с четырьмя разными
+   кривыми — движения выглядели вразнобой. */
+:root {
+  --tx-ease: cubic-bezier(.22,.9,.3,1);
+  --tx-fast: 200ms;
+  --tx-mid: 320ms;
+  --tx-slow: 480ms;
+}
 @keyframes tx-fade-up { from { opacity: 0; transform: translateY(14px); }
                           to { opacity: 1; transform: none; } }
 @keyframes tx-fade    { from { opacity: 0; } to { opacity: 1; } }
@@ -2274,24 +2342,33 @@ const GLOBAL_CSS = `
                         50% { transform: translateY(-5px) rotate(1.5deg); } }
 @keyframes tx-layer   { 0%,100% { opacity: .45; transform: translateY(0); }
                         50% { opacity: 1; transform: translateY(-2.5px); } }
+@keyframes tx-breathe { 0%,100% { transform: scale(1); opacity: .85; }
+                        50% { transform: scale(1.06); opacity: 1; } }
+@keyframes tx-pulsedot{ 0%,100% { transform: scale(.7); opacity: .5; }
+                        50% { transform: scale(1); opacity: 1; } }
 
-.tx-screen { animation: tx-fade-up .34s cubic-bezier(.22,.9,.3,1) both; }
-.tx-in     { animation: tx-fade-up .38s cubic-bezier(.22,.9,.3,1) both; }
-.tx-fade   { animation: tx-fade .3s ease both; }
-.tx-pop    { animation: tx-pop .32s cubic-bezier(.22,.9,.3,1) both; }
-.tx-sheet  { animation: tx-sheet .28s cubic-bezier(.22,.9,.3,1) both; }
+.tx-screen { animation: tx-fade-up var(--tx-slow) var(--tx-ease) both; }
+.tx-in     { animation: tx-fade-up var(--tx-mid) var(--tx-ease) both; }
+.tx-fade   { animation: tx-fade var(--tx-mid) var(--tx-ease) both; }
+.tx-pop    { animation: tx-pop var(--tx-mid) var(--tx-ease) both; }
+.tx-sheet  { animation: tx-sheet var(--tx-mid) var(--tx-ease) both; }
 .tx-dot    { animation: tx-pulse 2s ease-in-out infinite; }
 .tx-spin   { animation: tx-spin 1.1s linear infinite; }
 .tx-line   { stroke-dasharray: var(--len); animation: tx-draw .7s ease-out both; }
-.tx-dome    { transform-origin: 80px 70px; animation: tx-dome-spin 7s ease-in-out infinite; }
+.tx-dome    { transform-origin: 80px 70px; animation: tx-dome-spin 7s var(--tx-ease) infinite; }
 .tx-twinkle { animation: tx-twinkle 2.6s ease-in-out infinite; }
 .tx-wave    { animation: tx-wave 4.2s ease-in-out infinite; }
 .tx-float   { animation: tx-float 5s ease-in-out infinite; }
 .tx-layer   { transform-origin: 50px 50px; animation: tx-layer 2.8s ease-in-out infinite; }
+.tx-breathe { animation: tx-breathe 2.4s var(--tx-ease) infinite; }
+.tx-pulse-dot { animation: tx-pulsedot 1s var(--tx-ease) infinite; }
 
 /* Нажатие: лёгкое сжатие. Работает и на тач-устройствах. */
-.tap { transition: transform .12s ease, opacity .12s ease, background-color .18s ease,
-                   color .18s ease, border-color .18s ease; }
+.tap { transition: transform var(--tx-fast) var(--tx-ease),
+                     opacity var(--tx-fast) var(--tx-ease),
+                     background-color var(--tx-fast) var(--tx-ease),
+                     color var(--tx-fast) var(--tx-ease),
+                     border-color var(--tx-fast) var(--tx-ease); }
 .tap:active { transform: scale(.97); opacity: .9; }
 
 @media (prefers-reduced-motion: reduce) {
@@ -2308,7 +2385,7 @@ if (typeof document !== "undefined" && !document.getElementById("tx-css")) {
 }
 
 /** Задержка появления для «лесенки» блоков. */
-const stagger = (i) => ({ animationDelay: `${i * 55}ms` });
+const stagger = (i) => ({ animationDelay: `${i * 45}ms` });
 
 /* ============================ АККАУНТ И ВХОД ==============================
    ТРЕТИЙ ШОВ ПОД FIREBASE. Экраны ниже — это только интерфейс. Сейчас
@@ -2369,13 +2446,74 @@ function Logo({ size = 96 }) {
 }
 
 /** Экран загрузки. Показывается, пока читаются аккаунт и профиль. */
-function Splash({ text = "загрузка" }) {
+/* ------------------------------- ЗАГРУЗКА --------------------------------
+   Экран запуска делает настоящую работу, а не просто ждёт таймер:
+   читает аккаунт, читает профиль и прогревает движок — прогоняет
+   одноразовую комнату на 300 тиков, чтобы JIT успел скомпилировать
+   горячие функции клиринга до первой настоящей сессии. Без прогрева
+   первые секунды реальной игры заметно дёргались.
+   ------------------------------------------------------------------------ */
+const BOOT_STEPS = [
+  { key: "auth", label: "проверка аккаунта" },
+  { key: "profile", label: "загрузка профиля" },
+  { key: "engine", label: "прогрев движка" },
+  { key: "ready", label: "готово" },
+];
+
+function Boot({ done }) {
+  const total = BOOT_STEPS.length - 1;
+  const progress = done / total;
   return (
-    <div className="w-full flex flex-col items-center justify-center gap-6 tx-fade"
+    <div className="w-full flex flex-col items-center justify-center px-10 tx-fade"
       style={{ height: "100dvh", backgroundColor: BG }}>
-      <div className="tx-dot"><Logo size={84} /></div>
-      <div className="text-[11px] tracking-[0.35em]" style={{ color: FAINT }}>
-        {text.toUpperCase()}
+
+      <div className="relative">
+        {/* Кольцо заполняется вместе с реальным прогрессом загрузки. */}
+        <svg width="132" height="132" viewBox="0 0 132 132" className="absolute inset-0">
+          <circle cx="66" cy="66" r="60" fill="none" stroke={HAIR} strokeWidth="1.5" />
+          <circle cx="66" cy="66" r="60" fill="none" stroke={LONG} strokeWidth="1.5"
+            strokeLinecap="round" strokeDasharray={2 * Math.PI * 60}
+            strokeDashoffset={2 * Math.PI * 60 * (1 - progress)}
+            transform="rotate(-90 66 66)"
+            style={{ transition: "stroke-dashoffset var(--tx-slow) var(--tx-ease)" }} />
+          {[0, 1, 2, 3].map((i) => {
+            const a = (-90 + i * 90) * Math.PI / 180;
+            return <circle key={i} cx={66 + Math.cos(a) * 60} cy={66 + Math.sin(a) * 60} r="2.5"
+              fill={done >= i ? LONG : HAIR}
+              style={{ transition: "fill var(--tx-mid) var(--tx-ease)" }} />;
+          })}
+        </svg>
+        <div className="w-[132px] h-[132px] flex items-center justify-center">
+          <div className="tx-breathe"><Logo size={62} /></div>
+        </div>
+      </div>
+
+      <div className="text-[22px] tracking-tight mt-5">trade.exe</div>
+
+      <div className="w-full max-w-[240px] mt-7">
+        {BOOT_STEPS.slice(0, total).map((s, i) => {
+          const state = done > i ? "done" : done === i ? "run" : "wait";
+          return (
+            <div key={s.key} className="flex items-center gap-2.5 py-1.5"
+              style={{ opacity: state === "wait" ? 0.35 : 1,
+                transition: "opacity var(--tx-mid) var(--tx-ease)" }}>
+              <span className="w-3.5 h-3.5 rounded-full flex items-center justify-center shrink-0"
+                style={{ border: `1px solid ${state === "done" ? LONG : FAINT}`,
+                  backgroundColor: state === "done" ? LONG : "transparent",
+                  transition: "background-color var(--tx-mid) var(--tx-ease), border-color var(--tx-mid) var(--tx-ease)" }}>
+                {state === "done" && <Icon name="check" size={9} color={BG} />}
+                {state === "run" && (
+                  <span className="w-1.5 h-1.5 rounded-full tx-pulse-dot"
+                    style={{ backgroundColor: LONG }} />
+                )}
+              </span>
+              <span className="text-[12px]"
+                style={{ color: state === "done" ? DIM : state === "run" ? TEXT : FAINT }}>
+                {s.label}
+              </span>
+            </div>
+          );
+        })}
       </div>
     </div>
   );
@@ -2476,7 +2614,7 @@ function Onboarding({ onSignIn, onSignUp }) {
             <button key={i} onClick={() => setSlide(i)} className="rounded-full"
               style={{ width: i === slide ? 22 : 7, height: 7,
                 backgroundColor: i === slide ? TEXT : HAIR,
-                transition: "width 260ms cubic-bezier(.22,.9,.3,1), background-color 260ms" }} />
+                transition: "width var(--tx-mid) var(--tx-ease), background-color var(--tx-mid) var(--tx-ease)" }} />
           ))}
         </div>
 
@@ -2904,7 +3042,7 @@ function StatsSheet({ profile, onClose }) {
                     style={{ backgroundColor: HAIR }}>
                     <div style={{ width: `${(b / maxB) * 100}%`, height: "100%",
                       backgroundColor: i === 0 ? LONG : i === 4 ? SHORT : DIM,
-                      transition: "width 500ms cubic-bezier(.22,.9,.3,1)" }} />
+                      transition: "width var(--tx-slow) var(--tx-ease)" }} />
                   </div>
                   <span className="text-[11px] font-mono w-5 text-right" style={{ color: DIM }}>{b}</span>
                 </div>
@@ -3184,7 +3322,11 @@ function RankingTab({ profile, period, onPeriod }) {
               style={{ backgroundColor: first ? RAISED : SURFACE,
                 border: `1px solid ${first ? "#3A3A40" : HAIR}`,
                 marginBottom: first ? 0 : 8, ...stagger(i) }}>
-              {first && <div className="text-[13px] leading-none mb-1">♛</div>}
+              {first && (
+                <div className="flex justify-center mb-1">
+                  <Icon name="trophy" size={14} color={GOLD} />
+                </div>
+              )}
               <div className="text-[15px] font-mono">{r.place}</div>
               <div className="w-7 h-7 rounded-full mx-auto my-2"
                 style={{ backgroundColor: first ? TEXT : "#26262B" }} />
@@ -3365,7 +3507,7 @@ function TabBar({ active, onChange }) {
         return (
           <button key={t.key} onClick={() => onChange(t.key)}
             className="flex flex-col items-center gap-1.5 py-1.5 tap">
-            <Icon name={t.icon} size={19} color={on ? LONG : FAINT} />
+            <Icon name={t.icon} size={19} color={on ? (t.key === "rank" ? GOLD : LONG) : FAINT} />
             <span className="text-[9px] tracking-[0.12em]" style={{ color: on ? LONG : FAINT }}>
               {t.label}
             </span>
@@ -3384,7 +3526,6 @@ function TabBar({ active, onChange }) {
    даёт два кубка, а первый же убыток серию обрывает.
    ------------------------------------------------------------------------ */
 const LEVEL_STEP = (level) => 5 * Math.pow(2, level - 1);
-const XP_PER_WIN = 60;
 
 function profileProgress(profile) {
   const list = [...(profile.sessions || [])].reverse();   // от старых к новым
@@ -3421,7 +3562,6 @@ function profileProgress(profile) {
     ? Math.max(...list.map((x) => (x.capital ? x.pnl / x.capital : 0))) : 0;
 
   return { level, wins, done, need, progress: need ? done / need : 0,
-    xpLeft: (need - done) * XP_PER_WIN,
     trophies, streak, bestStreak: best, dayStreak, bestPct,
     toTrophy: (5 - (streak % 5)) % 5 || 5 };
 }
@@ -3487,19 +3627,16 @@ function LevelBar({ profile }) {
         <div className="min-w-0">
           <div className="text-[9px] tracking-[0.25em]" style={{ color: FAINT }}>УРОВЕНЬ</div>
           <div className="text-[38px] leading-none font-mono mt-0.5">{p.level}</div>
-          <div className="inline-block mt-2 px-2.5 py-1 rounded-lg text-[11px] font-mono"
-            style={{ backgroundColor: "#0E2A1B", color: LONG, border: `1px solid #1E4A32` }}>
-            +{p.xpLeft} XP
-          </div>
-          <div className="text-[11px] mt-1.5" style={{ color: FAINT }}>до уровня {p.level + 1}</div>
+          <div className="text-[11px] mt-2.5" style={{ color: FAINT }}>до уровня {p.level + 1}</div>
         </div>
 
         <div className="shrink-0"><LevelCube size={84} /></div>
 
         <div className="rounded-xl px-3 py-2.5 shrink-0 text-right" style={inner}>
           <div className="flex items-center justify-end gap-1.5">
-            <Icon name="trophy" size={16} color={LONG} />
-            <span className="text-[20px] font-mono leading-none">{p.trophies}</span>
+            <Icon name="trophy" size={16} color={p.trophies > 0 ? GOLD : FAINT} />
+            <span className="text-[20px] font-mono leading-none"
+              style={{ color: p.trophies > 0 ? GOLD : TEXT }}>{p.trophies}</span>
           </div>
           <div className="text-[9px] tracking-[0.15em] mt-1" style={{ color: FAINT }}>КУБКОВ</div>
           <div className="text-[10px] mt-1.5 leading-tight" style={{ color: FAINT }}>
@@ -3523,7 +3660,7 @@ function LevelBar({ profile }) {
         <div className="h-2 w-full rounded-full mt-2 overflow-hidden" style={{ backgroundColor: HAIR }}>
           <div style={{ width: `${Math.min(1, p.progress) * 100}%`, height: "100%",
             backgroundColor: LONG, boxShadow: `0 0 10px ${LONG}`,
-            transition: "width 700ms cubic-bezier(.22,.9,.3,1)" }} />
+            transition: "width var(--tx-slow) var(--tx-ease)" }} />
         </div>
         <div className="flex items-start justify-between gap-3 mt-2.5">
           <div className="min-w-0">
@@ -3937,7 +4074,7 @@ function Matchmaking({ capital, leverage = 1, onReady, onCancel }) {
 
         <div className="h-1 w-full rounded-full mt-6 overflow-hidden" style={{ backgroundColor: HAIR }}>
           <div style={{ width: `${pct * 100}%`, height: "100%", backgroundColor: TEXT,
-            transition: "width 200ms cubic-bezier(.22,.9,.3,1)" }} />
+            transition: "width var(--tx-mid) var(--tx-ease)" }} />
         </div>
 
         <div className="mt-8">
@@ -4010,7 +4147,7 @@ function SessionResult({ result, onDone }) {
                     border: `1px solid ${p.you ? "#3A3A40" : HAIR}`, ...stagger(i) }}>
                   <span className="text-[13px] font-mono w-4 shrink-0"
                     style={{ color: i === 0 ? LONG : FAINT }}>{i + 1}</span>
-                  {i === 0 && <Icon name="trophy" size={14} color={LONG} />}
+                  {i === 0 && <Icon name="trophy" size={14} color={GOLD} />}
                   <span className="flex-1 min-w-0 text-[13px] truncate"
                     style={{ color: p.you ? LONG : TEXT }}>
                     {p.you ? "вы" : (STRATEGY_LABELS[String(p.name).split("-")[0]] || p.name)}
@@ -4076,8 +4213,32 @@ function PracticeApp({ onExit }) {
   speedRef.current = speed;
   const toastTimer = useRef(null);
 
-  useEffect(() => { loadProfile().then(setProfile); }, []);
-  useEffect(() => { authStore.current().then((a) => setAccount(a ?? null)); }, []);
+  const [boot, setBoot] = useState(0);
+
+  // Загрузка идёт последовательными шагами, и каждый — настоящая работа.
+  useEffect(() => {
+    let alive = true;
+    const pause = (ms) => new Promise((res) => setTimeout(res, ms));
+    (async () => {
+      const acc = await authStore.current();
+      if (!alive) return;
+      setAccount(acc ?? null); setBoot(1); await pause(160);
+
+      const prof = await loadProfile();
+      if (!alive) return;
+      setProfile(prof); setBoot(2); await pause(160);
+
+      // Прогрев: одноразовая комната прогоняется вхолостую, чтобы JIT
+      // скомпилировал клиринг и решения ботов до первой настоящей сессии.
+      try {
+        const warm = new LocalTransport({ startingCapital: 100 });
+        warm.room.advance(300);
+      } catch (_) {}
+      if (!alive) return;
+      setBoot(3);
+    })();
+    return () => { alive = false; };
+  }, []);
   useEffect(() => () => clearTimeout(toastTimer.current), []);
 
   useEffect(() => {
@@ -4178,7 +4339,7 @@ function PracticeApp({ onExit }) {
     setScreen("result");
   };
 
-  if (!profile || account === undefined) return <Splash />;
+  if (boot < 3 || !profile || account === undefined) return <Boot done={boot} />;
 
   // Не вошёл — показываем онбординг, затем экран входа/регистрации.
   if (!account) {
