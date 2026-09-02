@@ -77,6 +77,10 @@ const CONFIG = {
   NPC_FAST_TREND_WEIGHT: 1.5,
   NPC_ACT_SCALE: 1.6,
   NPC_SIZE_SCALE: 0.6,
+  // --- маржинальный режим ---
+  LEV_DEPTH: 0.5,        // глубина кривой = C * L^LEV_DEPTH
+  LEV_MAINTENANCE: 1.4,  // поддерживающая маржа = LEV_MAINTENANCE / L
+
   NPC_ORDER_FRACTION: 0.45,        // доля ботов с настоящими стоп/тейк заявками
   NPC_ORDER_FRACTION_EYES: 0.9,    // в режиме EYES смотреть должно быть на что
 
@@ -141,7 +145,25 @@ function makeCurve(totalCapital) {
    * Выбор именно этой цены даёт Sum(settlement) = escrow тождественно,
    * а значит Sum(equity) = C (FINAL-AUDIT-V2, вопрос 4).
    */
-  const liquidationPrice = (Q) => (Math.abs(Q) < CONFIG.EPS ? p(0) : R(Q) / Q);
+  /**
+   * Цена полной ликвидации L(Q) = R(Q)/Q.
+   *
+   * Прямое деление теряет точность около нуля: и R(Q), и Q стремятся к нулю,
+   * и на |Q| ~ 1e-5 относительная ошибка доходит до 1e-9. Само по себе это
+   * ничтожно, но L умножается на escrow, и при взносе $10 000 абсолютная
+   * ошибка вырастала до 7.5e-2 — тождество Σequity = C ломалось и сессия
+   * падала в аварийную остановку.
+   *
+   * Для малых аргументов берётся ряд: ln cosh(x)/x = x/2 − x³/12 + x⁵/45.
+   */
+  const liquidationPrice = (Q) => {
+    const x = Q / kappa;
+    if (Math.abs(x) < 1e-3) {
+      const x2 = x * x;
+      return P0 * (1 + beta * x * (0.5 - x2 / 12 + x2 * x2 / 45));
+    }
+    return R(Q) / Q;
+  };
 
   /** Размер позиции: СИММЕТРИЧНЫЙ перевод денег в units.
    *  budget/P для лонга и budget/(PMAX-P) для шорта давали шорту в 1.33 раза
@@ -174,13 +196,15 @@ class Market {
      * ликвидированного участника не исчезает — он уже лежит в кэше остальных.
      */
     this.leverage = Math.max(1, leverage);
-    // Поддерживающая маржа. Подобрана замером: при 5% каскад принудительных
-    // закрытий успевал загнать эквити до −67, при 12% худшее эквити за
-    // 30 000 тиков осталось положительным и безнадёжного долга не возникло.
-    this.maintenance = 1.2 / this.leverage;       // 12% при x10
-    // Боты держат половину доступного плеча. С полным x10 у всех рынок
-    // сваливался в каскад ликвидаций (10 211 против 603 на тех же сидах).
-    this.npcLeverage = this.leverage > 1 ? this.leverage * 0.5 : 1;
+    /* Поддерживающая маржа. Замер на 8 сидах по 3000 тиков при полном плече
+       ботов: 12% -> худшее эквити −0.1 (появляется безнадёжный долг),
+       14% -> +1.5 и 566 ликвидаций, 18% -> одна аварийная остановка.
+       Взято 14%: волны ликвидаций есть, долга нет. */
+    this.maintenance = CONFIG.LEV_MAINTENANCE / this.leverage;
+    /* Боты используют ПОЛНОЕ плечо. Половинное вместе с глубиной L^1 и было
+       причиной вялого режима: суммарный поток выходил вдвое меньше, чем без
+       плеча вообще. */
+    this.npcLeverage = this.leverage;
     this.liquidations = 0;
     this.badDebt = 0;
     /**
@@ -197,12 +221,14 @@ class Market {
     this.eyesClusters = null;   // подсказка охотникам, обновляется слоем EYES
     this.startingCapital = startingCapital;
     this.C = playerCount * startingCapital;
-    // Глубина кривой умножается на плечо. Без этого 99 ботов с x10 двигали
-    // цену в десять раз сильнее за тик, маржин-колл не успевал срабатывать и
-    // эквити улетало в минус на сотни долларов. С масштабированной кривой
-    // ТРАЕКТОРИЯ ЦЕНЫ такая же, как без плеча, а PnL каждого растёт в x раз —
-    // это и есть плечо.
-    this.curve = makeCurve(this.C * this.leverage);
+    /* Глубина кривой растёт как L^LEV_DEPTH, а не как L.
+       Полное масштабирование (L^1) давало математически чистый результат —
+       траектория цены в точности как без плеча, — но получался мёртвый режим:
+       колебание 0.070% за тик против 0.243% в обычном, размах 3.4% против
+       8.7% и ОДНА ликвидация за сессию. Плечо не чувствовалось вообще.
+       Замер по показателю: L^0.8 -> 0.147%, L^0.6 -> 0.324%, L^0.5 -> 1.479%
+       при полном плече ботов. Взято 0.5. */
+    this.curve = makeCurve(this.C * Math.pow(this.leverage, CONFIG.LEV_DEPTH));
     this.Q = 0;
     this.escrow = 0;
     this.tick = 0;
@@ -279,10 +305,10 @@ class Market {
     return Math.max(0, this.equity(i) * this.leverage - held);
   }
 
-  /** Уровень маржи: собственные средства к стоимости позиции. */
+  /** Уровень маржи: собственные средства к стоимости позиции. null без позиции. */
   marginLevel(i) {
     const pl = this.players[i];
-    if (pl.u === 0) return Infinity;
+    if (pl.u === 0) return null;
     const notional = this.curve.value(pl.u, this.mark);
     return notional > 0 ? this.equity(i) / notional : Infinity;
   }
@@ -317,7 +343,8 @@ class Market {
     const out = [];
     for (const pl of this.players) {
       if (pl.u === 0) continue;
-      if (this.marginLevel(pl.id) <= this.maintenance) {
+      const lvl = this.marginLevel(pl.id);
+      if (lvl !== null && lvl <= this.maintenance) {
         out.push({ i: pl.id, du: -pl.u, reason: "liquidation" });
       }
     }
@@ -378,40 +405,39 @@ class Market {
     let P = clearingPrice(this.Q, work.reduce((a, o) => a + o.du, 0));
     let iters = 0;
 
-    for (; iters < CONFIG.CLIP_MAX_ITER; iters++) {
+    /* Обрезка по бюджету и цена клиринга зависят друг от друга, поэтому
+       считаются совместно до неподвижной точки. */
+    const clampAll = (price) => {
       for (let k = 0; k < work.length; k++) {
         const want = orig[k].du, pl = this.players[work[k].i];
         const before = pl.u, after = before + want;
-        // Собственные средства участника = кэш + текущая стоимость позиции.
+        // Собственные средства = кэш + текущая стоимость позиции.
         // С плечом на них можно держать в leverage раз больше экспозиции.
-        const own = pl.cash + value(before, P);
-        const budget = own * this.leverage;
-        let maxAfter = after > 0 ? budget / P : after < 0 ? -budget / (PMAX - P) : 0;
+        const budget = (pl.cash + value(before, price)) * this.leverage;
+        let maxAfter = after > 0 ? budget / price
+          : after < 0 ? -budget / (PMAX - price) : 0;
         let allowed = after;
         if (after > 0 && after > maxAfter) allowed = maxAfter;
         if (after < 0 && after < maxAfter) allowed = maxAfter;
         work[k].du = allowed - before;
       }
-      const P2 = clearingPrice(this.Q, work.reduce((a, o) => a + o.du, 0));
+    };
+    const netDu = () => work.reduce((a, o) => a + o.du, 0);
+
+    for (; iters < CONFIG.CLIP_MAX_ITER; iters++) {
+      clampAll(P);
+      const P2 = clearingPrice(this.Q, netDu());
       if (Math.abs(P2 - P) < CONFIG.EPS) { P = P2; break; }
       P = P2;
     }
 
-    // ЗАКЛЮЧИТЕЛЬНАЯ ОБРЕЗКА ПО ИТОГОВОЙ ЦЕНЕ.
-    // Выше объёмы считались от предыдущего приближения P, а исполнение идёт
-    // по последнему P2. Пока цена ходила по 0.1% за тик, разница тонула в
-    // допуске; на более подвижной кривой она выросла и кэш уходил в минус
-    // (аварийная остановка «cash < 0» на 6 сидах из 20).
-    for (let k = 0; k < work.length; k++) {
-      const want = orig[k].du, pl = this.players[work[k].i];
-      const before = pl.u, after = before + want;
-      const budget = (pl.cash + value(before, P)) * this.leverage;
-      let maxAfter = after > 0 ? budget / P : after < 0 ? -budget / (PMAX - P) : 0;
-      let allowed = after;
-      if (after > 0 && after > maxAfter) allowed = maxAfter;
-      if (after < 0 && after < maxAfter) allowed = maxAfter;
-      work[k].du = allowed - before;
-    }
+    /* ЦЕНА ДОЛЖНА СООТВЕТСТВОВАТЬ ИТОГОВЫМ ОБЪЁМАМ.
+       Тождество escrow = R(Q) + PMAX*S держится только если P — точная цена
+       клиринга именно того сдвига, который исполняется. В предыдущей версии
+       после цикла шла ещё одна обрезка, менявшая объёмы, а цена оставалась
+       старой: расхождение доходило до 7.5e-2 при капитале комнаты 10 000 и
+       валило сессию в аварийную остановку на 1513-м тике. */
+    P = clearingPrice(this.Q, netDu());
 
     const executed = [];
     // Цена, по которой позиции будут оценены СРАЗУ ПОСЛЕ этого тика.
@@ -479,7 +505,15 @@ class Market {
  */
 function checkInvariants(m, ctx = {}) {
   const errs = [];
-  const { TOL_CAPITAL: TC, TOL_NONNEG: TN } = CONFIG;
+  /* Допуски МАСШТАБИРУЮТСЯ вместе с капиталом комнаты.
+     Раньше они были абсолютными, и при взносе $10 000 (капитал комнаты
+     $1 000 000) обычный численный шум клиринга в 7.5e-2 — относительная
+     ошибка 7.5e-8, то есть безупречная точность — валил сессию в аварийную
+     остановку. При взносе $100 та же проверка была, наоборот, слишком
+     мягкой. */
+  const scale = Math.max(1, m.C / 10000);
+  const TC = CONFIG.TOL_CAPITAL * scale;
+  const TN = CONFIG.TOL_NONNEG * scale;
   const totalCash = m.players.reduce((a, p) => a + p.cash, 0);
 
   if (Math.abs(totalCash + m.escrow - m.C) > TC)
@@ -2884,7 +2918,7 @@ const LOBBY_RANGES = [
  * Это НЕ котировка и не симуляция — только фактические результаты игрока.
  */
 function EquityCurve({ sessions, rangeMs }) {
-  const W = 320, H = 118, PADR = 46, PADB = 18;
+  const W = 320, H = 128, PADR = 52, PADB = 18, PADT = 8;
   const now = Date.now();
   const list = [...sessions]
     .filter((x) => Number.isFinite(x.at) && now - x.at <= rangeMs)
@@ -2905,44 +2939,104 @@ function EquityCurve({ sessions, rangeMs }) {
 
   const vs = pts.map((p) => p.v);
   const rawMax = Math.max(...vs, 0), rawMin = Math.min(...vs, 0);
-  const pad = Math.max((rawMax - rawMin) * 0.25, 1);
+  const pad = Math.max((rawMax - rawMin) * 0.2, 1);
   const max = rawMax + pad, min = rawMin - pad;
   const t0 = pts[0].t, t1 = pts[pts.length - 1].t;
   const spanT = Math.max(1, t1 - t0);
 
   const x = (t) => ((t - t0) / spanT) * (W - PADR);
-  const y = (v) => H - PADB - ((v - min) / (max - min)) * (H - PADB - 6);
-  const line = pts.map((p) => `${x(p.t).toFixed(1)},${y(p.v).toFixed(1)}`).join(" ");
-  const color = acc >= 0 ? LONG : SHORT;
-  const grid = [max, (max + min) / 2 + (max - min) * 0.25, 0, min + (max - min) * 0.25, min];
+  const y = (v) => PADT + (H - PADB - PADT) * (1 - (v - min) / (max - min));
+  const zeroY = y(0);
+  const up = acc >= 0;
+
+  /* Плавная линия вместо ломаной: кубический сплайн Catmull-Rom, у которого
+     контрольные точки берутся из соседей. Форма проходит ровно через все
+     точки, поэтому цифры не искажаются. */
+  const path = (() => {
+    const P = pts.map((p) => [x(p.t), y(p.v)]);
+    if (P.length < 2) return "";
+    let d = `M ${P[0][0].toFixed(1)},${P[0][1].toFixed(1)}`;
+    for (let i = 0; i < P.length - 1; i++) {
+      const p0 = P[i - 1] || P[i], p1 = P[i], p2 = P[i + 1], p3 = P[i + 2] || P[i + 1];
+      const c1x = p1[0] + (p2[0] - p0[0]) / 6, c1y = p1[1] + (p2[1] - p0[1]) / 6;
+      const c2x = p2[0] - (p3[0] - p1[0]) / 6, c2y = p2[1] - (p3[1] - p1[1]) / 6;
+      d += ` C ${c1x.toFixed(1)},${c1y.toFixed(1)} ${c2x.toFixed(1)},${c2y.toFixed(1)}` +
+           ` ${p2[0].toFixed(1)},${p2[1].toFixed(1)}`;
+    }
+    return d;
+  })();
+  const area = `${path} L ${x(t1).toFixed(1)},${zeroY.toFixed(1)}` +
+               ` L ${x(t0).toFixed(1)},${zeroY.toFixed(1)} Z`;
+
+  // Сетка по «круглым» уровням, ноль всегда есть и никогда не дублируется.
+  const step = niceStep((max - min) / 3.2);
+  const levels = [0];
+  for (let v = step; v <= max; v += step) levels.push(v);
+  for (let v = -step; v >= min; v -= step) levels.push(v);
+  const shown = levels.filter((v) => v > min + (max - min) * 0.04
+    && v < max - (max - min) * 0.02);
+
   const hhmm = (t) => new Date(t).toLocaleTimeString("ru-RU",
     { hour: "2-digit", minute: "2-digit" });
+  const uid = `eq${Math.round(min)}_${Math.round(max)}`;
 
   return (
-    <svg viewBox={`0 0 ${W} ${H}`} className="w-full" style={{ height: 118 }}>
-      {grid.map((g, i) => (
-        <g key={i}>
-          <line x1={0} x2={W - PADR} y1={y(g)} y2={y(g)}
-            stroke={Math.abs(g) < 1e-9 ? DIM : HAIR} strokeWidth={0.8}
-            strokeDasharray={Math.abs(g) < 1e-9 ? "" : "2 3"} />
-          <text x={W - PADR + 6} y={y(g) + 3.5} fill={FAINT} fontSize={9}
-            fontFamily="monospace">{fmtSigned(g, 0)}</text>
+    <svg viewBox={`0 0 ${W} ${H}`} className="w-full" style={{ height: 128 }}>
+      <defs>
+        {/* Заливка над нулём зелёная, под нулём красная — одна и та же
+            фигура рисуется дважды под разными обрезками. */}
+        <linearGradient id={`${uid}g`} x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0%" stopColor={LONG} stopOpacity="0.34" />
+          <stop offset="100%" stopColor={LONG} stopOpacity="0.02" />
+        </linearGradient>
+        <linearGradient id={`${uid}r`} x1="0" y1="1" x2="0" y2="0">
+          <stop offset="0%" stopColor={SHORT} stopOpacity="0.34" />
+          <stop offset="100%" stopColor={SHORT} stopOpacity="0.02" />
+        </linearGradient>
+        <clipPath id={`${uid}up`}>
+          <rect x="0" y="0" width={W - PADR} height={Math.max(0, zeroY)} />
+        </clipPath>
+        <clipPath id={`${uid}dn`}>
+          <rect x="0" y={zeroY} width={W - PADR} height={Math.max(0, H - zeroY)} />
+        </clipPath>
+      </defs>
+
+      {shown.map((v) => (
+        <g key={v}>
+          <line x1={0} x2={W - PADR} y1={y(v)} y2={y(v)}
+            stroke={HAIR} strokeWidth={0.7} strokeDasharray="2 4" />
+          <text x={W - PADR + 7} y={y(v) + 3.2} fill={FAINT} fontSize={8.5}
+            fontFamily="monospace">{fmtSigned(v, 0)}</text>
         </g>
       ))}
 
-      <polygon points={`${line} ${x(t1)},${H - PADB} ${x(t0)},${H - PADB}`}
-        fill={color} opacity={0.12} className="tx-fade" />
-      <polyline points={line} fill="none" stroke={color} strokeWidth={1.8}
-        className="tx-line" style={{ "--len": W * 1.6 }} />
-      <circle cx={x(t1)} cy={y(acc)} r={3.2} fill={color} className="tx-pop" />
+      {/* нулевая линия — опора для взгляда */}
+      <line x1={0} x2={W - PADR} y1={zeroY} y2={zeroY} stroke={DIM} strokeWidth={0.9} />
+      <text x={W - PADR + 7} y={zeroY + 3.2} fill={DIM} fontSize={8.5}
+        fontFamily="monospace">$0</text>
 
-      <text x={0} y={H - 5} fill={FAINT} fontSize={9} fontFamily="monospace">{hhmm(t0)}</text>
-      <text x={x(t1)} y={H - 5} fill={FAINT} fontSize={9} fontFamily="monospace"
+      <g className="tx-fade">
+        <path d={area} fill={`url(#${uid}g)`} clipPath={`url(#${uid}up)`} />
+        <path d={area} fill={`url(#${uid}r)`} clipPath={`url(#${uid}dn)`} />
+      </g>
+
+      <path d={path} fill="none" stroke={LONG} strokeWidth={1.8} strokeLinecap="round"
+        strokeLinejoin="round" clipPath={`url(#${uid}up)`} className="tx-line"
+        style={{ "--len": W * 2 }} />
+      <path d={path} fill="none" stroke={SHORT} strokeWidth={1.8} strokeLinecap="round"
+        strokeLinejoin="round" clipPath={`url(#${uid}dn)`} className="tx-line"
+        style={{ "--len": W * 2 }} />
+
+      <circle cx={x(t1)} cy={y(acc)} r={6} fill={up ? LONG : SHORT} opacity={0.18}
+        className="tx-dot" />
+      <circle cx={x(t1)} cy={y(acc)} r={3} fill={up ? LONG : SHORT} className="tx-pop" />
+
+      <text x={0} y={H - 4} fill={FAINT} fontSize={8.5} fontFamily="monospace">{hhmm(t0)}</text>
+      <text x={x(t1)} y={H - 4} fill={FAINT} fontSize={8.5} fontFamily="monospace"
         textAnchor="end">{hhmm(t1)}</text>
     </svg>
   );
 }
-
 
 /* ------------------------------ СТАТИСТИКА -------------------------------
    Разбор всех закрытых сессий. Данные берутся только из profile.sessions,
@@ -4553,7 +4647,8 @@ function PracticeApp({ onExit }) {
 
           {tab === "Рынок" && (
             <div className="flex flex-col h-full">
-              {leverage > 1 && pos && human.marginLevel < snap.maintenance * 1.6 && (
+              {leverage > 1 && pos && human.marginLevel !== null
+                && human.marginLevel < snap.maintenance * 1.6 && (
                 <div className="mx-2 mb-1 rounded-lg px-3 py-2 text-[11px] tx-pop"
                   style={{ backgroundColor: RAISED, color: SHORT, border: `1px solid ${SHORT}` }}>
                   Маржа {(human.marginLevel * 100).toFixed(0)}% — до принудительного
@@ -4654,8 +4749,9 @@ function PracticeApp({ onExit }) {
                 <Metric label="PNL" value={pos ? fmtSigned(pnl) : "—"} color={pnlColor} />
                 {leverage > 1 && (
                   <Metric label="МАРЖА"
-                    value={pos ? `${(human.marginLevel * 100).toFixed(0)}%` : "—"}
-                    color={!pos ? TEXT
+                    value={pos && human.marginLevel !== null
+                      ? `${(human.marginLevel * 100).toFixed(0)}%` : "—"}
+                    color={!pos || human.marginLevel === null ? TEXT
                       : human.marginLevel < snap.maintenance * 1.6 ? SHORT
                       : human.marginLevel < snap.maintenance * 3 ? TEXT : LONG} />
                 )}
