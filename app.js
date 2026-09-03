@@ -112,165 +112,139 @@ const CONFIG = {
   NPC_THRESH_SCALE: 0.4,
   NPC_HERD_MAX: 0.25,
   NPC_CONVICTION_UP: 1.10,
+
+  /* --- МОДЕЛЬ S ---
+     DEPTH_FRACTION: какая доля капитала комнаты двигает цену на один пункт.
+     0.005 = полпроцента капитала на 1% цены. Замер размаха за сессию при
+     99 ботах: 0.0025 -> 3.5%, 0.005 -> 6.3% (95-й перцентиль 15.3%),
+     0.01 -> 19.7%. Величина относительная, поэтому модель масштабно
+     инвариантна: при взносе $100 и при $10 000 динамика одинакова. */
+  DEPTH_FRACTION: 0.005,
+  /* Насколько глубина растёт с числом участников в позиции. Больше народу —
+     слабее движение на тот же доллар. */
+  DEPTH_CROWD: 0.05,
+  /* СКРЫТЫЙ ЦЕНТР: диапазон, из которого выбирается точка равновесия сессии.
+     Игроку не показывается ни она, ни величины, по которым её можно вычислить
+     (суммы ставок по сторонам, число участников на стороне, глубина). */
+  CENTER_MIN: 85,
+  CENTER_MAX: 115,
+  /* Предварительный прогон перед сессией: боты уже поторговали, поэтому к
+     моменту входа игрока цена смещена относительно центра и по стартовой
+     цене центр не читается. */
+  PREROLL_TICKS: 400,
+  /* Сколько точек прогона остаётся на графике. Начало истории показывать
+     нельзя: самая первая точка — это ровно скрытый центр. */
+  PREROLL_KEEP: 150,
 };
 
-// ---- curve.js ----
+// ---- market.js (MODEL-S) ----
 
 /**
- * Ценовая кривая и резервная функция.
+ * ЦЕНОВАЯ МОДЕЛЬ S — «спор сторон».
  *
- * p(Q) = P0 * (1 + beta * tanh(Q/kappa))          -- цена состояния (mark)
- * R(Q) = P0 * [Q + beta*kappa*ln cosh(Q/kappa)]   -- резерв, интеграл p по [0,Q]
+ * Заменяет кривую p(Q) = P0*(1+beta*tanh(Q/kappa)) вместе с резервом, escrow,
+ * ценой полной ликвидации и двухпроходным клирингом. Причина замены — теорема,
+ * доказанная в аудите: если деньги за позицию лежат в общем резерве, а цена
+ * есть функция состояния рынка, то цена ОБЯЗАНА быть функцией одного Q, а
+ * значит закрытие всех позиций всегда возвращает её ровно в P0. Отсюда и
+ * бралась беспроигрышная стратегия «торгуй возврат к сотне» (60/60 сессий).
  *
- * R имеет ЗАМКНУТУЮ форму. Это не косметика: цена клиринга есть
- * (R(Q+dQ)-R(Q))/dQ, и без замкнутой формы её пришлось бы интегрировать
- * численно, из-за чего сохранение капитала стало бы приближённым.
- * Именно поэтому выбрана эта кривая, а не мультипликативно-симметричная
- * exp(tanh) (MODEL-V2, разд. B).
+ * Три правила модели S:
+ *
+ *  1. СТАВКА ИГРАЕТ РОВНО НАСТОЛЬКО, НАСКОЛЬКО ЕЁ ПЕРЕКРЫЛА ДРУГАЯ СТОРОНА.
+ *     L — деньги на повышение, S — на понижение, спорят min(L, S).
+ *     Меньшинство участвует на 100%, большинство — частично.
+ *     Нет противоположной стороны — никто не может ни выиграть, ни проиграть.
+ *
+ *  2. ЦЕНА ДВИГАЕТСЯ ТОЛЬКО ОТ ПЕРЕВЕСА ЗАЯВОК ТИКА.
+ *     dP = k * (приток на повышение − приток на понижение).
+ *     Чем больше участников в позиции, тем слабее один доллар двигает цену.
+ *
+ *  3. СДВИГ ЦЕНЫ ДОСТАЁТСЯ ТОЛЬКО ТЕМ, КТО В ЭТОМ ТИКЕ НЕ ДЕЙСТВОВАЛ.
+ *     Это не косметика, а единственный симметричный вариант. Замерено:
+ *       - если действующий попадает в переоценку, он зарабатывает на
+ *         собственном сдвиге — возвращается самораскачка;
+ *       - если попадает только выходящий, вход и выход несимметричны, и
+ *         пассивное держание даёт +2.05 в лонг И +2.11 в шорт при 92-97%
+ *         прибыльных сессий, то есть беспроигрышную стратегию без навыка;
+ *       - при полном исключении действующего 500 кругов «вошёл-вышел» дают
+ *         ровно 0.00, а пассивное держание +0.64 / +0.92 при 60-70%.
+ *
+ * ЕДИНИЦЫ. Поле pl.u теперь хранит СТАВКУ В ДЕНЬГАХ со знаком:
+ * u > 0 — на повышение, u < 0 — на понижение, |u| — сколько денег поставлено.
+ * Поэтому value(u, P) = |u|, а деньги участника = cash + |u|. Весь код ботов,
+ * заявок и снапшота работает с u как раньше и правки не требует.
+ *
+ * Чего больше НЕ существует: резерва R(Q), escrow, цены полной ликвидации,
+ * цены клиринга, маржин-коллов, ликвидаций, плеча и отрицательного эквити.
+ * Максимальный убыток равен сматченной части ставки, и она каждый тик
+ * пересчитывается от уже уменьшившейся суммы, поэтому деньги участника
+ * никогда не уходят в минус — структурно, а не проверкой.
  */
-function makeCurve(totalCapital) {
-  const { P0, beta, THETA } = CONFIG;
-  const kappa = totalCapital / (P0 * THETA);
+
+/** Совместимость: остальной файл ждёт объект curve с этими полями. */
+function makeCurve(totalCapital, marketRef) {
+  const { P0, beta } = CONFIG;
   const PMIN = P0 * (1 - beta);
   const PMAX = P0 * (1 + beta);
-
-  const p = (Q) => P0 * (1 + beta * Math.tanh(Q / kappa));
-  const R = (Q) => P0 * (Q + beta * kappa * Math.log(Math.cosh(Q / kappa)));
-
-  /**
-   * Стоимость позиции u при цене P. ОБЕ стороны платят вперёд, взнос >= 0:
-   *   лонг  вносит u * P
-   *   шорт  вносит |u| * (PMAX - P)
-   * Отсюда escrow >= 0 всегда, а equity >= 0 структурно.
-   */
-  const value = (u, P) => (u > 0 ? u * P : u < 0 ? -u * (PMAX - P) : 0);
-
-  /**
-   * ЕДИНАЯ цена клиринга тика = средняя цена кривой на отрезке чистого сдвига.
-   * Единственная цена, совместимая с сохранением капитала: собранные деньги
-   * dQ*P* в точности равны изменению резерва R(Q+dQ)-R(Q).
-   * Не зависит от вида кривой — выводится только из сохранения.
-   */
-  const clearingPrice = (Q, dQ) =>
-    Math.abs(dQ) < CONFIG.EPS ? p(Q) : (R(Q + dQ) - R(Q)) / dQ;
-
-  /**
-   * Цена ПОЛНОЙ ликвидации рынка (Q -> 0). На ней считается CLOSE VALUE.
-   * Выбор именно этой цены даёт Sum(settlement) = escrow тождественно,
-   * а значит Sum(equity) = C (FINAL-AUDIT-V2, вопрос 4).
-   */
-  /**
-   * Цена полной ликвидации L(Q) = R(Q)/Q.
-   *
-   * Прямое деление теряет точность около нуля: и R(Q), и Q стремятся к нулю,
-   * и на |Q| ~ 1e-5 относительная ошибка доходит до 1e-9. Само по себе это
-   * ничтожно, но L умножается на escrow, и при взносе $10 000 абсолютная
-   * ошибка вырастала до 7.5e-2 — тождество Σequity = C ломалось и сессия
-   * падала в аварийную остановку.
-   *
-   * Для малых аргументов берётся ряд: ln cosh(x)/x = x/2 − x³/12 + x⁵/45.
-   */
-  const liquidationPrice = (Q) => {
-    const x = Q / kappa;
-    if (Math.abs(x) < 1e-3) {
-      const x2 = x * x;
-      return P0 * (1 + beta * x * (0.5 - x2 / 12 + x2 * x2 / 45));
-    }
-    return R(Q) / Q;
+  return {
+    PMIN, PMAX,
+    /** Стоимость позиции = поставленные деньги. */
+    value: (u) => Math.abs(u),
+    /** Размер позиции: ставка в деньгах и есть размер. */
+    unitsFor: (budget) => Math.max(0, budget),
+    /** Оценка собственного сдвига цены — нужна ботам для расчёта выгоды. */
+    clearingPrice: (Q, du) => marketRef.P + marketRef.depth() * du,
+    /** Цена — самостоятельное состояние, отдельной «цены ликвидации» нет. */
+    liquidationPrice: () => marketRef.P,
+    p: () => marketRef.P,
   };
-
-  /** Размер позиции: СИММЕТРИЧНЫЙ перевод денег в units.
-   *  budget/P для лонга и budget/(PMAX-P) для шорта давали шорту в 1.33 раза
-   *  больше экспозиции за те же деньги -> систематический дрейф вниз и
-   *  эксплойт "всегда шорт" (t=65.6). Общий знаменатель это устраняет
-   *  (ATTACK-AND-STRATEGIES, разд. 2). */
-  const unitsFor = (budget, P) => budget / Math.max(P, PMAX - P);
-
-  return { kappa, PMIN, PMAX, p, R, value, clearingPrice, liquidationPrice, unitsFor };
 }
 
-// ---- market.js ----
-
-/**
- * MARKET STATE + CLEARING. Три уровня разделены (MODEL-V4 требование 13):
- *   market  — Q, price, escrow
- *   player  — cash, u, entry, realized
- *   clearing— кто, сколько и по какой цене; исполняется здесь и только здесь.
- */
 class Market {
   constructor({ playerCount, startingCapital, seed = 1, leverage = 1, eyes = false }) {
-    /**
-     * ПЛЕЧО. Меняется ровно одно правило: сколько единиц позиции игрок может
-     * держать на свои деньги. Денежные потоки не меняются — за позицию
-     * по-прежнему платится ПОЛНАЯ стоимость value(u, P), просто кэш при этом
-     * уходит в минус. Отрицательный кэш и есть заём.
-     *
-     * Почему капитал остаётся закрытым: тождество Σcash + escrow = C держится
-     * при любом знаке кэша, а Σsettlement ≡ escrow, значит Σequity ≡ C. Убыток
-     * ликвидированного участника не исчезает — он уже лежит в кэше остальных.
-     */
-    this.leverage = Math.max(1, leverage);
-    /* Поддерживающая маржа. Замер на 8 сидах по 3000 тиков при полном плече
-       ботов: 12% -> худшее эквити −0.1 (появляется безнадёжный долг),
-       14% -> +1.5 и 566 ликвидаций, 18% -> одна аварийная остановка.
-       Взято 14%: волны ликвидаций есть, долга нет. */
-    this.maintenance = CONFIG.LEV_MAINTENANCE / this.leverage;
-    /* Боты используют ПОЛНОЕ плечо. Половинное вместе с глубиной L^1 и было
-       причиной вялого режима: суммарный поток выходил вдвое меньше, чем без
-       плеча вообще. */
-    this.npcLeverage = this.leverage;
+    /* Плеча в модели S нет: убыток ограничен ставкой по построению, а заём
+       потребовал бы отдельной системы кредита. Поле оставлено, чтобы не
+       переписывать интерфейс, и всегда равно 1. */
+    this.leverage = 1;
+    this.maintenance = 0;
+    this.npcLeverage = 1;
     this.liquidations = 0;
     this.badDebt = 0;
-    /**
-     * Режим EYES. На математику рынка он не влияет: цена, клиринг, settlement
-     * и equity считаются теми же формулами. Меняется только ПОВЕДЕНИЕ ботов,
-     * и меняется оно при создании комнаты, а не слоем отображения:
-     *  - почти все выставляют настоящие стоп/тейк, иначе смотреть не на что;
-     *  - охотники целятся в самый крупный видимый кластер, а не в экстремум окна.
-     * Это осознанное отступление от пункта «EYES не влияет на NPC»: без него
-     * режим показывал бы пустой график. Слой отображения по-прежнему ничего
-     * не меняет — режим задан заранее и одинаков для всех участников.
-     */
     this.eyesMode = eyes;
-    /* Длительность сессии в тиках. Нужна ботам: в закрытой комнате с общим
-       таймером время — такой же фактор, как цена. null = бессрочная сессия,
-       тогда фаза не считается и поведение прежнее. */
     this.totalTicks = null;
-    this.phase = null;      // 0 в начале, 1 в конце
-    /* Разогрев: первые тики рынок живёт, но заявки участника не принимаются.
-       За это время боты успевают расставить позиции и на графике появляется
-       история, так что игрок входит не в пустоту. */
+    this.phase = null;
     this.warmupTicks = 0;
-    this.eyesClusters = null;   // подсказка охотникам, обновляется слоем EYES
+    this.eyesClusters = null;
     this.startingCapital = startingCapital;
     this.C = playerCount * startingCapital;
-    /* Глубина кривой растёт как L^LEV_DEPTH, а не как L.
-       Полное масштабирование (L^1) давало математически чистый результат —
-       траектория цены в точности как без плеча, — но получался мёртвый режим:
-       колебание 0.070% за тик против 0.243% в обычном, размах 3.4% против
-       8.7% и ОДНА ликвидация за сессию. Плечо не чувствовалось вообще.
-       Замер по показателю: L^0.8 -> 0.147%, L^0.6 -> 0.324%, L^0.5 -> 1.479%
-       при полном плече ботов. Взято 0.5. */
-    this.curve = makeCurve(this.C * Math.pow(this.leverage, CONFIG.LEV_DEPTH));
-    this.Q = 0;
-    this.escrow = 0;
+    this.seed = seed;
+    this.rng = mulberry32(seed * 2654435761 + 12345);
+
+    /* СКРЫТЫЙ ЦЕНТР. Точка, в которую вернётся цена, если все закроются,
+       разная в каждой сессии и нигде не показывается. Без этого «торгуй
+       возврат к сотне» давала +3.23 при 95% прибыльных; со скрытым центром
+       игрок вынужден оценивать его по средней цене и получает +0.58 при
+       медиане 0.00 и 48% прибыльных, то есть ничего. */
+    this.center = CONFIG.CENTER_MIN +
+      this.rng() * (CONFIG.CENTER_MAX - CONFIG.CENTER_MIN);
+    this.P = this.center;
+
+    this.curve = makeCurve(this.C, this);
     this.tick = 0;
-    // Суммарный зафиксированный результат всех участников по сторонам.
-    // Сумма longRealized + shortRealized всегда <= 0 по построению рынка:
-    // закрытый рынок с нулевой суммой, разница осядет в открытых позициях.
     this.longRealized = 0;
     this.shortRealized = 0;
-    this.seed = seed;
+    this.crowd = 0;
     this.players = Array.from({ length: playerCount }, (_, i) => ({
       id: i, name: null, isHuman: false,
-      cash: startingCapital, u: 0,
-      entryPrice: null, invested: 0,
-      // basis — стоимость позиции в момент открытия, посчитанная ПО ТОЙ ЖЕ
-      // цене, по которой её потом оценивает settlement(). invested считается
-      // по цене клиринга, и из-за разрыва между ценой клиринга и ценой полной
-      // ликвидации PnL стартовал не с нуля и мог иметь знак, обратный движению
-      // цены (лонг в плюсе при падении). См. комментарий к unrealized().
-      basis: 0,
+      cash: startingCapital,
+      // ставка в деньгах со знаком: + на повышение, − на понижение
+      u: 0,
+      entryPrice: null,
+      // invested и basis — одна и та же величина: сколько денег было
+      // поставлено при входе. Оба поля оставлены, потому что снапшот
+      // отдаёт invested как «маржу» позиции.
+      invested: 0, basis: 0,
       realizedPnL: 0, tradeCount: 0,
       stopLoss: null, takeProfit: null,
       liquidatedAt: null,
@@ -278,40 +252,55 @@ class Market {
     }));
   }
 
-  get mark() { return this.curve.p(this.Q); }
-  get liquidationPrice() { return this.curve.liquidationPrice(this.Q); }
+  /* --------------------------- состояние рынка --------------------------- */
 
-  /** CLOSE VALUE: сколько игрок получит, если ВСЕ позиции закроются в этом тике.
-   *  Не units*mark. Sum по всем игрокам тождественно равна escrow. */
-  settlement(i) {
-    return this.curve.value(this.players[i].u, this.liquidationPrice);
+  get mark() { return this.P; }
+  get liquidationPrice() { return this.P; }
+  /** Перевес сторон в деньгах. Наружу отдаётся только для отладки. */
+  get Q() { let s = 0; for (const p of this.players) s += p.u; return s; }
+  /** Сумма всех ставок. Заменяет прежний escrow в снапшоте. */
+  get escrow() { let s = 0; for (const p of this.players) s += Math.abs(p.u); return s; }
+
+  /** Деньги на повышение, на понижение и сколько из них реально спорит. */
+  sides() {
+    let L = 0, S = 0, N = 0;
+    for (const p of this.players) {
+      if (p.u > 0) { L += p.u; N++; }
+      else if (p.u < 0) { S -= p.u; N++; }
+    }
+    return { L, S, K: Math.min(L, S), N };
   }
-  equity(i) { return this.players[i].cash + this.settlement(i); }
+
   /**
-   * Нереализованный результат = текущая стоимость закрытия минус стоимость
-   * закрытия в момент входа. Обе величины считаются по цене полной
-   * ликвидации, поэтому:
-   *   - при открытии PnL строго равен нулю;
-   *   - знак PnL совпадает со знаком движения марк-цены, потому что цена
-   *     ликвидации L(Q) монотонна по Q, как и марк-цена p(Q).
-   * Раньше вычиталась invested (деньги, уплаченные по цене клиринга), а
-   * разрыв между двумя ценами достигал нескольких процентов — отсюда и
-   * лонг в плюсе при падающей цене.
+   * Глубина рынка: насколько один доллар двигает цену.
+   * База выбрана так, чтобы 0.5% капитала комнаты двигали цену на один пункт.
+   * Это делает модель масштабно-инвариантной: при взносе $100 и при $10 000
+   * относительная динамика одинакова.
+   * Замер размаха за сессию при 99 ботах: DEPTH 0.0025 -> 3.5%,
+   * 0.005 -> 6.3% (95-й перцентиль 15.3%), 0.01 -> 19.7%.
    */
+  depth() {
+    const k0 = 1 / Math.max(1e-9, this.C * CONFIG.DEPTH_FRACTION);
+    return k0 / (1 + CONFIG.DEPTH_CROWD * this.sides().N);
+  }
+
+  /** Сколько участник получит, если закроется сейчас: ровно свою ставку. */
+  settlement(i) { return Math.abs(this.players[i].u); }
+  equity(i) { const p = this.players[i]; return p.cash + Math.abs(p.u); }
+  /** Результат по открытой позиции = ставка сейчас минус ставка при входе. */
   unrealized(i) {
     const pl = this.players[i];
-    return pl.u === 0 ? 0 : this.settlement(i) - pl.basis;
+    return pl.u === 0 ? 0 : Math.abs(pl.u) - pl.basis;
   }
-  sumEquity() { return this.players.reduce((a, _, i) => a + this.equity(i), 0); }
+  sumEquity() { let s = 0; for (const p of this.players) s += p.cash + Math.abs(p.u); return s; }
 
   /**
-   * Досрочный выход. Позиция уже должна быть закрыта. С остатка снимается
-   * доля frac и поровну раздаётся остальным участникам, поэтому Σcash не
-   * меняется и закрытость капитала сохраняется точно.
+   * Досрочный выход. Позиция уже закрыта, поэтому все деньги в cash.
+   * Доля frac снимается и поровну раздаётся остальным: Σ денег не меняется.
    */
   applyExitPenalty(i, frac) {
     const pl = this.players[i];
-    const amount = Math.max(0, pl.cash) * frac;
+    const amount = Math.max(0, this.equity(i)) * frac;
     if (amount <= 0) return 0;
     const others = this.players.filter((p) => p.id !== i);
     if (!others.length) return 0;
@@ -321,94 +310,25 @@ class Market {
     return amount;
   }
 
-  /** Покупательная способность: собственные средства, умноженные на плечо. */
-  buyingPower(i) {
-    const pl = this.players[i];
-    const held = this.curve.value(pl.u, this.mark);
-    return Math.max(0, this.equity(i) * this.leverage - held);
-  }
+  /** Сколько ещё можно поставить: свободные деньги. */
+  buyingPower(i) { return Math.max(0, this.players[i].cash); }
+  maxUnitsSolo(i) { return Math.max(0, this.players[i].cash); }
 
-  /** Уровень маржи: собственные средства к стоимости позиции. null без позиции. */
-  marginLevel(i) {
-    const pl = this.players[i];
-    if (pl.u === 0) return null;
-    const notional = this.curve.value(pl.u, this.mark);
-    return notional > 0 ? this.equity(i) / notional : Infinity;
-  }
+  /* Плеча нет — маржин-коллов и ликвидаций тоже. Заглушки оставлены,
+     потому что интерфейс и RoomV4 их вызывают. */
+  marginLevel() { return null; }
+  liquidationEstimate() { return null; }
+  marginCalls() { return []; }
 
+  /* ------------------------------ КЛИРИНГ -------------------------------- */
   /**
-   * Оценка марк-цены, при которой сработает маржин-колл. Считается перебором
-   * по Q: эквити зависит от Q через цену полной ликвидации, поэтому обратная
-   * формула в замкнутом виде не выписывается.
-   */
-  liquidationEstimate(i) {
-    const pl = this.players[i];
-    if (pl.u === 0 || this.leverage <= 1) return null;
-    const { value, p, liquidationPrice } = this.curve;
-    const level = (Q) => {
-      const eq = pl.cash + value(pl.u, liquidationPrice(Q));
-      const notional = value(pl.u, p(Q));
-      return notional > 0 ? eq / notional : Infinity;
-    };
-    const down = pl.u > 0;                       // лонгу опасно вниз
-    let lo = this.Q, hi = down ? -1e9 : 1e9;
-    if (level(hi) > this.maintenance) return null;
-    for (let k = 0; k < 80; k++) {
-      const mid = (lo + hi) / 2;
-      if (level(mid) > this.maintenance) lo = mid; else hi = mid;
-    }
-    return p(hi);
-  }
-
-  /** Кого нужно принудительно закрыть в следующем клиринге. */
-  marginCalls() {
-    if (this.leverage <= 1) return [];
-    const out = [];
-    for (const pl of this.players) {
-      if (pl.u === 0) continue;
-      const lvl = this.marginLevel(pl.id);
-      if (lvl !== null && lvl <= this.maintenance) {
-        out.push({ i: pl.id, du: -pl.u, reason: "liquidation" });
-      }
-    }
-    return out;
-  }
-
-  /** Максимальный размер позиции для ОДИНОЧНОЙ заявки (для UI-подсказки).
-   *  Внутри тика реальный предел определяет обрезка. */
-  maxUnitsSolo(i, side) {
-    const pl = this.players[i], { R, PMAX } = this.curve, Q = this.Q;
-    const cost = (u) => side > 0 ? R(Q + u) - R(Q) : u * PMAX - (R(Q) - R(Q - u));
-    let lo = 0, hi = 1;
-    while (cost(hi) < pl.cash && hi < 1e9) hi *= 2;
-    for (let k = 0; k < 100; k++) {
-      const m = (lo + hi) / 2;
-      if (cost(m) <= pl.cash) lo = m; else hi = m;
-    }
-    return lo;
-  }
-
-  /**
-   * ДВУХПРОХОДНЫЙ КЛИРИНГ.
-   * orders: [{ i, du }] — желаемое изменение позиции.
+   * orders: [{ i, du, reason }] — желаемое изменение ставки в деньгах.
    *
-   * Обрезка вычисляется ОТ ИСХОДНОГО запроса при текущей P* (не накопительно),
-   * поэтому итерация ищет истинную неподвижную точку, а не консервативную
-   * недооценку (minCash выходит на 1e-13, а не оставляет запас).
-   *
-   * Обрезка каждой заявки — функция ТОЛЬКО от (P*, cash_i, u_i, запрос_i).
-   * Ни от каких чужих заявок и ни от какого порядка. Отсюда
-   * порядко-независимость: перестановка не меняет ни P*, ни исполнение.
+   * Порядок заявок не влияет ни на цену, ни на исполнение: сначала все
+   * заявки складываются по участнику, потом считается один общий перевес,
+   * потом одна переоценка. Проверено: перестановка даёт расхождение 0.
    */
   clear(orders) {
-    /* ОДНА ЗАЯВКА НА УЧАСТНИКА ЗА ТИК.
-       Обрезка по бюджету считает каждую заявку от ПРЕДТИКОВОЙ позиции. Если
-       у участника в одном тике оказывались две заявки — например, стоп на
-       закрытие шорта и новый вход бота, — каждая проходила проверку по
-       отдельности, а исполнялись обе подряд. Участник переворачивался и
-       платил за обе ноги: замер показал кэш 14.15 -> -8.45 на 312-м тике.
-       Складываем объёмы до обрезки; приоритет причины — ликвидация, затем
-       стоп, затем тейк. */
     const PRIORITY = { liquidation: 3, stop: 2, take: 1 };
     const merged = new Map();
     for (const o of orders) {
@@ -419,104 +339,93 @@ class Market {
       cur.du += o.du;
       if ((PRIORITY[reason] || 0) > (PRIORITY[cur.reason] || 0)) cur.reason = reason;
     }
-    const orig = [...merged.values()]
-      .filter((o) => Math.abs(o.du) > 1e-15);
-    if (!orig.length) { this.tick++; return { price: this.mark, executed: [], iters: 0 }; }
+    const work = [...merged.values()].filter((o) => Math.abs(o.du) > 1e-12);
+    if (!work.length) { this.tick++; return { price: this.P, executed: [], iters: 0 }; }
 
-    const { value, clearingPrice, PMAX } = this.curve;
-    const work = orig.map((o) => ({ ...o }));
-    let P = clearingPrice(this.Q, work.reduce((a, o) => a + o.du, 0));
-    let iters = 0;
+    const { PMIN, PMAX } = this.curve;
+    const k = this.depth();
 
-    /* Обрезка по бюджету и цена клиринга зависят друг от друга, поэтому
-       считаются совместно до неподвижной точки. */
-    const clampAll = (price) => {
-      for (let k = 0; k < work.length; k++) {
-        const want = orig[k].du, pl = this.players[work[k].i];
-        const before = pl.u, after = before + want;
-        // Собственные средства = кэш + текущая стоимость позиции.
-        // С плечом на них можно держать в leverage раз больше экспозиции.
-        const budget = (pl.cash + value(before, price)) * this.leverage;
-        let maxAfter = after > 0 ? budget / price
-          : after < 0 ? -budget / (PMAX - price) : 0;
-        let allowed = after;
-        if (after > 0 && after > maxAfter) allowed = maxAfter;
-        if (after < 0 && after < maxAfter) allowed = maxAfter;
-        work[k].du = allowed - before;
-      }
-    };
-    const netDu = () => work.reduce((a, o) => a + o.du, 0);
-
-    for (; iters < CONFIG.CLIP_MAX_ITER; iters++) {
-      clampAll(P);
-      const P2 = clearingPrice(this.Q, netDu());
-      if (Math.abs(P2 - P) < CONFIG.EPS) { P = P2; break; }
-      P = P2;
+    /* 1. Обрезка по деньгам. Ставка после действия не может превышать
+       свободные деньги плюс уже поставленное. Зависит только от своего
+       состояния, поэтому от чужих заявок и от порядка не зависит. */
+    let flow = 0;
+    for (const o of work) {
+      const pl = this.players[o.i];
+      const before = pl.u;
+      let after = before + o.du;
+      const budget = pl.cash + Math.abs(before);
+      if (Math.abs(after) > budget) after = Math.sign(after) * budget;
+      o.after = after;
+      o.before = before;
+      flow += after - before;
     }
 
-    /* ЦЕНА ДОЛЖНА СООТВЕТСТВОВАТЬ ИТОГОВЫМ ОБЪЁМАМ.
-       Тождество escrow = R(Q) + PMAX*S держится только если P — точная цена
-       клиринга именно того сдвига, который исполняется. В предыдущей версии
-       после цикла шла ещё одна обрезка, менявшая объёмы, а цена оставалась
-       старой: расхождение доходило до 7.5e-2 при капитале комнаты 10 000 и
-       валило сессию в аварийную остановку на 1513-м тике. */
-    P = clearingPrice(this.Q, netDu());
+    /* 2. Сдвиг цены от суммарного перевеса. */
+    let Pn = this.P + k * flow;
+    if (Pn > PMAX - 1e-6) Pn = PMAX - 1e-6;
+    if (Pn < PMIN + 1e-6) Pn = PMIN + 1e-6;
+    const dP = Pn - this.P;
 
+    /* 3. Переоценка ОСТАТОЧНОЙ КНИГИ — без тех, кто действует в этом тике.
+       Суммы сторон в остаточной книге равны K', поэтому сумма всех
+       изменений строго ноль и деньги сохраняются точно. */
+    if (dP !== 0) {
+      let L2 = 0, S2 = 0;
+      for (const p of this.players) {
+        if (merged.has(p.id) || p.u === 0) continue;
+        if (p.u > 0) L2 += p.u; else S2 -= p.u;
+      }
+      const K2 = Math.min(L2, S2);
+      if (K2 > 0) {
+        const fL = K2 / L2, fS = K2 / S2;
+        const scale = dP / (CONFIG.P0 * CONFIG.beta);   // полуширина коридора
+        for (const p of this.players) {
+          if (merged.has(p.id) || p.u === 0) continue;
+          const m = Math.abs(p.u) * (p.u > 0 ? fL : fS);
+          p.u += m * scale;
+          if (Math.abs(p.u) < 1e-12) { p.u = 0; p.entryPrice = null; p.basis = 0;
+            p.invested = 0; p.stopLoss = null; p.takeProfit = null; }
+        }
+      }
+    }
+    this.P = Pn;
+
+    /* 4. Применение заявок. Деньги: вернули старую ставку, списали новую. */
     const executed = [];
-    // Цена, по которой позиции будут оценены СРАЗУ ПОСЛЕ этого тика.
-    // basis считается по ней, иначе PnL стартовал бы не с нуля.
-    const Qafter = this.Q + work.reduce((a, o) => a + o.du, 0);
-    const Lafter = this.curve.liquidationPrice(Qafter);
-    // Цена входа для интерфейса — МАРК-цена после тика, а не цена клиринга.
-    // Клиринговая цена — средняя по отрезку сдвига, она отличается от той,
-    // что видит игрок на графике, и линия входа не совпадала с нулём PnL.
-    const Pafter = this.curve.p(Qafter);
     for (const o of work) {
-      if (Math.abs(o.du) < 1e-15) continue;
       const pl = this.players[o.i];
-      const before = pl.u, after = before + o.du;
-      const vb = value(before, P), va = value(after, P);
-      pl.cash += vb - va;
-      this.escrow += va - vb;
+      const before = o.before, after = o.after;
+      if (Math.abs(after - before) < 1e-12) continue;
+      const sb = Math.abs(before), sa = Math.abs(after);
+      pl.cash += sb - sa;
 
-      // учёт реализованного PnL и средней цены входа
       if (before !== 0 && (after === 0 || Math.sign(after) !== Math.sign(before))) {
-        const booked = vb - pl.invested;          // закрыли старую экспозицию целиком
+        const booked = sb - pl.basis;                  // закрыли старую ставку целиком
         pl.realizedPnL += booked;
         if (before > 0) this.longRealized += booked; else this.shortRealized += booked;
-        pl.invested = 0; pl.entryPrice = null; pl.basis = 0;
+        pl.basis = 0; pl.invested = 0; pl.entryPrice = null;
         pl.stopLoss = null; pl.takeProfit = null;
-      } else if (before !== 0 && Math.abs(after) < Math.abs(before)) {
-        const keep = Math.abs(after) / Math.abs(before);
-        const frac = 1 - keep;
-        const closedCost = pl.invested * frac;
-        const booked = (vb - va) - closedCost;
+      } else if (before !== 0 && sa < sb) {
+        const keep = sa / sb;
+        const closedBasis = pl.basis * (1 - keep);
+        const booked = (sb - sa) - closedBasis;
         pl.realizedPnL += booked;
         if (before > 0) this.longRealized += booked; else this.shortRealized += booked;
-        pl.invested -= closedCost;
-        pl.basis *= keep;
+        pl.basis *= keep; pl.invested = pl.basis;
       }
       if (after !== 0) {
         if (before === 0 || Math.sign(after) !== Math.sign(before)) {
-          pl.invested = va; pl.entryPrice = Pafter;
-          pl.basis = value(after, Lafter);
-        } else if (Math.abs(after) > Math.abs(before)) {
-          pl.invested += va - vb;
-          pl.entryPrice = Pafter;   // марк-цена после тика — ориентир UI
-          pl.basis += value(after, Lafter) - value(before, Lafter);
+          pl.basis = sa; pl.invested = sa; pl.entryPrice = Pn;
+        } else if (sa > sb) {
+          pl.basis += sa - sb; pl.invested = pl.basis; pl.entryPrice = Pn;
         }
-      }
-      if (o.reason === "liquidation" && after === 0) {
-        pl.liquidatedAt = this.tick;
-        this.liquidations++;
       }
       pl.u = after;
       pl.tradeCount++;
-      executed.push({ i: o.i, du: o.du, price: P, reason: o.reason });
+      executed.push({ i: o.i, du: after - before, price: Pn, reason: o.reason });
     }
-    this.Q += work.reduce((a, o) => a + o.du, 0);
     this.tick++;
-    return { price: P, executed, iters };
+    return { price: Pn, executed, iters: 0 };
   }
 }
 
@@ -1162,7 +1071,10 @@ function createSnapshot(m, viewerId, { level = "full", devMode = false } = {}) {
     snap.participants = m.players.map((p) =>
       projectPlayer(m, p, { viewer: false, devMode }));
   }
-  if (level === "full" && devMode) snap.debug = { sumEquity: m.sumEquity() };
+  /* Скрытый центр отдаётся ТОЛЬКО в режиме отладки. В обычной игре его нет
+     ни в одном поле снапшота — иначе стратегия «торгуй возврат к центру»
+     снова становится беспроигрышной. */
+  if (level === "full" && devMode) snap.debug = { sumEquity: m.sumEquity(), center: m.center };
   return snap;
 }
 
@@ -1181,7 +1093,8 @@ function createSnapshot(m, viewerId, { level = "full", devMode = false } = {}) {
  */
 class RoomV4 {
   constructor({ playerCount = 100, startingCapital = 100, seed = 1, npcCount = null,
-    leverage = 1, eyes = false, durationTicks = null, warmupTicks = 0 } = {}) {
+    leverage = 1, eyes = false, durationTicks = null, warmupTicks = 0,
+    prerollTicks = null } = {}) {
     this.market = new Market({ playerCount, startingCapital, seed, leverage, eyes });
     this.market.totalTicks = durationTicks;
     this.market.warmupTicks = warmupTicks;
@@ -1191,12 +1104,32 @@ class RoomV4 {
     this.halted = null;
     const npcs = npcCount === null ? playerCount : npcCount;
     if (npcs > 0) attachNPCs(this.market, playerCount - npcs, npcs, seed, eyes);
+    /* ПРЕДВАРИТЕЛЬНЫЙ ПРОГОН. Без него сессия начиналась бы ровно в скрытом
+       центре, и он читался бы прямо со стартовой цены. Боты торгуют заранее,
+       цена уходит в сторону, и к моменту входа игрока центр по графику не
+       восстанавливается. Слот человека (без бота) прогон не затрагивает, его
+       деньги остаются нетронутыми. */
+    const pre = prerollTicks === null ? CONFIG.PREROLL_TICKS : prerollTicks;
+    if (npcs > 0 && pre > 0) {
+      const savedWarmup = this.market.warmupTicks;
+      this.market.warmupTicks = 0;
+      for (let t = 0; t < pre && !this.halted; t++) this.step();
+      this.market.warmupTicks = savedWarmup;
+      this.market.tick = 0;
+      this.market.phase = null;
+      /* На графике остаётся только хвост прогона. Показывать его целиком
+         нельзя: первая точка истории — это и есть скрытый центр. */
+      this.history = this.history.slice(-CONFIG.PREROLL_KEEP);
+    }
   }
 
   /** Человек занимает слот бота: позиция бота закрывается в ближайшем клиринге. */
   join(name) {
     const m = this.market;
-    const slot = m.players.find((p) => p.npc && !p.isHuman);
+    /* Сначала берём слот, за которым вообще нет бота: он не участвовал в
+       предварительном прогоне, поэтому у человека ровно стартовые деньги. */
+    const slot = m.players.find((p) => !p.npc && !p.isHuman)
+      || m.players.find((p) => p.npc && !p.isHuman);
     if (!slot) return null;
     if (slot.u !== 0) this.pendingCommands.push({ i: slot.id, cmd: { type: "TRADE", action: "CLOSE" } });
     slot.npc = null; slot.isHuman = true; slot.name = name;
@@ -1496,6 +1429,7 @@ class LegacyRoom {
     this._priceHistory = this._room.history.map((price, i) => ({
       price, t: i * CONFIG.market.tickMs, volume: 0,
     }));
+    this._openPrice = null;
   }
 
   join(_ignoredId, name) {
@@ -1529,6 +1463,9 @@ class LegacyRoom {
     this._sellPressure = sell;
     this._buyTotal += buy;
     this._sellTotal += sell;
+    if (this._openPrice === null &&
+        this._room.market.tick >= this._room.market.warmupTicks)
+      this._openPrice = this._room.market.mark;
     this._priceHistory.push({
       price: this._room.market.mark,
       t: this._room.market.tick * CONFIG.market.tickMs,
@@ -1582,7 +1519,9 @@ class LegacyRoom {
       previousPrice: this._priceHistory.length >= 2
         ? this._priceHistory[this._priceHistory.length - 2].price
         : this._room.market.mark,
-      initialPrice: CONFIG.market.initialPrice,
+      /* Цена на момент открытия рынка, а не константа P0: точка равновесия
+         у каждой сессии своя и игроку не сообщается. */
+      initialPrice: this._openPrice ?? this._room.market.mark,
       rank: this._rank(viewerId, base.participants || []),
       yourOrders: base.you ? (base.you.limits || []) : [],
       // v4 не хранит историю отдельных сделок игрока (только счётчик tradeCount) —
@@ -1630,8 +1569,6 @@ class LegacyRoom {
       speed: n > 10 ? (now - at(10)) / Math.max(at(10), 1e-9) : 0,
       volatility,
       imbalance,
-      longExposure: L,
-      shortExposure: S,
     };
   }
 
@@ -3040,6 +2977,9 @@ const Icon = ({ name, size = 16, color = TEXT }) => {
     <svg {...common}><rect x="3.5" y="5" width="17" height="15" rx="2" />
       <path d="M3.5 10h17M8 3v4M16 3v4" /></svg>
   );
+  if (name === "arrowUp") return (
+    <svg {...common}><path d="M12 19V5M5 12l7-7 7 7" /></svg>
+  );
   if (name === "plus") return (
     <svg {...common}><path d="M12 5v14M5 12h14" /></svg>
   );
@@ -3562,6 +3502,114 @@ function DepositScreen({ profile, onBack, onDemoTopUp }) {
   );
 }
 
+
+/* -------------------------------- ВЫВОД ----------------------------------
+   Как и пополнение: интерфейс готов, выплаты не подключены. Кнопка честно
+   сообщает об этом и ничего не списывает.
+   ------------------------------------------------------------------------ */
+const WITHDRAW_MIN = 50;
+
+function WithdrawScreen({ profile, onBack }) {
+  const [amount, setAmount] = useState("");
+  const [method, setMethod] = useState("card");
+  const [note, setNote] = useState(null);
+  const value = Number(String(amount).replace(/[^\d.]/g, "")) || 0;
+  const enough = value >= WITHDRAW_MIN && value <= profile.wallet;
+
+  return (
+    <div className="w-full flex flex-col tx-screen"
+      style={{ height: "100dvh", backgroundColor: BG, color: TEXT }}>
+      <div className="max-w-md w-full mx-auto flex-1 min-h-0 overflow-y-auto no-scrollbar px-5 pt-5 pb-4">
+        <div className="flex items-center gap-4">
+          <button onClick={onBack} className="text-[20px] leading-none py-1 tap">←</button>
+          <div className="text-[11px] tracking-[0.25em]" style={{ color: DIM }}>ВЫВОД СРЕДСТВ</div>
+        </div>
+
+        <div className="text-[10px] tracking-[0.25em] mt-6" style={{ color: FAINT }}>
+          ДОСТУПНО К ВЫВОДУ
+        </div>
+        <div className="text-[30px] font-mono leading-none mt-2 tx-pop">{fmt(profile.wallet, 0)}</div>
+
+        <div className="text-[10px] tracking-[0.25em] mt-6 mb-2" style={{ color: FAINT }}>
+          СУММА ВЫВОДА
+        </div>
+        <div className="flex items-center rounded-xl px-4"
+          style={{ backgroundColor: RAISED, border: `1px solid ${HAIR}` }}>
+          <span className="text-[16px] font-mono" style={{ color: DIM }}>$</span>
+          <input value={amount} onChange={(e) => setAmount(e.target.value)}
+            placeholder="0" inputMode="decimal"
+            className="flex-1 min-w-0 bg-transparent outline-none py-4 pl-1 text-[16px] font-mono"
+            style={{ color: TEXT }} />
+          <button onClick={() => setAmount(String(Math.floor(profile.wallet)))}
+            className="pl-3 text-[11px] tracking-[0.1em] tap" style={{ color: LONG }}>
+            ВСЁ
+          </button>
+        </div>
+
+        <div className="grid grid-cols-4 gap-2 mt-2">
+          {[25, 50, 75, 100].map((p) => (
+            <button key={p} onClick={() => setAmount(String(Math.floor(profile.wallet * p / 100)))}
+              className="rounded-xl py-3 text-[12px] font-mono font-semibold tap"
+              style={{ backgroundColor: RAISED, color: TEXT, border: `1px solid ${HAIR}` }}>
+              {p}%
+            </button>
+          ))}
+        </div>
+
+        <div className="text-[10px] tracking-[0.25em] mt-7 mb-2" style={{ color: FAINT }}>
+          КУДА ВЫВЕСТИ
+        </div>
+        <div className="rounded-2xl overflow-hidden"
+          style={{ backgroundColor: SURFACE, border: `1px solid ${HAIR}` }}>
+          {PAY_METHODS.filter((m) => m.id !== "other").map((m, i) => (
+            <button key={m.id} onClick={() => setMethod(m.id)}
+              className={`w-full flex items-center gap-3 px-4 py-3.5 text-left tap ${i ? "border-t" : ""}`}
+              style={{ borderColor: HAIR,
+                backgroundColor: method === m.id ? RAISED : "transparent" }}>
+              <span className="w-8 h-8 rounded-lg flex items-center justify-center shrink-0"
+                style={{ backgroundColor: "#0E0E11" }}>
+                <Icon name={m.icon} size={16} color={m.tint} />
+              </span>
+              <span className="flex-1 min-w-0">
+                <span className="block text-[13px] truncate">{m.label}</span>
+                {m.sub && (
+                  <span className="block text-[11px] font-mono" style={{ color: FAINT }}>{m.sub}</span>
+                )}
+              </span>
+              <span className="w-[18px] h-[18px] rounded-full shrink-0 flex items-center justify-center"
+                style={{ border: `1.5px solid ${method === m.id ? LONG : DIM}` }}>
+                {method === m.id && (
+                  <span className="w-2 h-2 rounded-full" style={{ backgroundColor: LONG }} />
+                )}
+              </span>
+            </button>
+          ))}
+        </div>
+
+        {note && (
+          <div className="text-[12px] text-center mt-5 leading-snug tx-pop" style={{ color: DIM }}>
+            {note}
+          </div>
+        )}
+      </div>
+
+      <div className="max-w-md w-full mx-auto px-5 pb-5 pt-2 shrink-0">
+        <button disabled={!enough}
+          onClick={() => setNote("Выплаты ещё не подключены. Баланс остаётся на месте.")}
+          className="w-full rounded-2xl py-4 text-[13px] tracking-[0.25em] font-bold tap disabled:opacity-40"
+          style={{ backgroundColor: TEXT, color: BG }}>
+          ВЫВЕСТИ
+        </button>
+        <div className="text-[11px] text-center mt-2" style={{ color: FAINT }}>
+          {value > profile.wallet
+            ? "Больше, чем есть на балансе"
+            : `Минимальная сумма — ${fmt(WITHDRAW_MIN, 0)}`}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 /* -------------------------------- РЕЙТИНГ --------------------------------
    Таблица собирается детерминированно из зерна периода, а результат игрока
    берётся из его реальной истории. Это витрина под будущий серверный
@@ -3692,7 +3740,6 @@ function MarketsTab({ onPlay }) {
           <ModeArt kind="offline" />
         </div>
         {row("Участников в комнате", m.totalPlayers)}
-        {row("Стартовая цена", fmt(m.initialPrice))}
         {row("Взнос", m.capitalOptions.map((c) => fmt(c, 0)).join(" · "))}
         {row("Тик", `${m.tickMs} мс`)}
         <button onClick={() => onPlay(false)}
@@ -4062,6 +4109,7 @@ function Lobby({ profile, account, onNew, onReset, onExit, onSignOut, onTopUp })
   const [profileOpen, setProfileOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [deposit, setDeposit] = useState(false);
+  const [withdraw, setWithdraw] = useState(false);
   const [range, setRange] = useState(LOBBY_RANGES[0]);
   const [rangeOpen, setRangeOpen] = useState(false);
   const [period, setPeriod] = useState("ДЕНЬ");
@@ -4086,6 +4134,9 @@ function Lobby({ profile, account, onNew, onReset, onExit, onSignOut, onTopUp })
   if (deposit) {
     return <DepositScreen profile={profile} onBack={() => setDeposit(false)}
       onDemoTopUp={onTopUp} />;
+  }
+  if (withdraw) {
+    return <WithdrawScreen profile={profile} onBack={() => setWithdraw(false)} />;
   }
 
   return (
@@ -4112,20 +4163,27 @@ function Lobby({ profile, account, onNew, onReset, onExit, onSignOut, onTopUp })
 
               {/* -------------------------- баланс --------------------------- */}
               <div className="text-[10px] tracking-[0.3em] mt-5" style={{ color: FAINT }}>БАЛАНС</div>
-              <div className="flex items-end justify-between gap-3 mt-1.5">
-                <div className="text-[36px] leading-none font-mono tracking-tight truncate tx-pop">
-                  {fmt(profile.wallet, 0)}
-                </div>
-                <button onClick={() => setDeposit(true)}
-                  className="flex items-center gap-2 px-4 py-2.5 rounded-full shrink-0 tap"
-                  style={{ backgroundColor: TEXT, color: BG }}>
-                  <Icon name="plus" size={14} color={BG} />
-                  <span className="text-[11px] tracking-[0.15em] font-bold">ПОПОЛНИТЬ</span>
-                </button>
+              <div className="text-[36px] leading-none font-mono tracking-tight truncate tx-pop mt-1.5">
+                {fmt(profile.wallet, 0)}
               </div>
               <div className="text-[13px] font-mono mt-2"
                 style={{ color: st.total > 0 ? LONG : st.total < 0 ? SHORT : DIM }}>
                 {st.count === 0 ? "сессий ещё не было" : `${fmtSigned(st.total)} за ${st.count} сесс.`}
+              </div>
+
+              <div className="grid grid-cols-2 gap-2 mt-4">
+                <button onClick={() => setDeposit(true)}
+                  className="flex items-center justify-center gap-2 py-3 rounded-xl tap"
+                  style={{ backgroundColor: TEXT, color: BG }}>
+                  <Icon name="plus" size={14} color={BG} />
+                  <span className="text-[11px] tracking-[0.15em] font-bold">ПОПОЛНИТЬ</span>
+                </button>
+                <button onClick={() => setWithdraw(true)}
+                  className="flex items-center justify-center gap-2 py-3 rounded-xl tap"
+                  style={{ backgroundColor: RAISED, color: TEXT, border: "1px solid #3A3A40" }}>
+                  <Icon name="arrowUp" size={14} color={TEXT} />
+                  <span className="text-[11px] tracking-[0.15em] font-bold">ВЫВЕСТИ</span>
+                </button>
               </div>
 
               {/* --------------------------- режимы -------------------------- */}
@@ -4153,12 +4211,17 @@ function Lobby({ profile, account, onNew, onReset, onExit, onSignOut, onTopUp })
                     ["ЛУЧШАЯ", st.count ? fmtSigned(st.best, 0) : "—", st.best > 0 ? LONG : TEXT, "star"],
                     ["ХУДШАЯ", st.count ? fmtSigned(st.worst, 0) : "—", st.worst < 0 ? SHORT : TEXT, "star"],
                   ].map(([label, value, color, icon]) => (
+                    /* Иконка стоит в одной строке с подписью, а не под
+                       значением: значения разной ширины (+$2,501 и −$14)
+                       раньше растаскивали иконки по разным местам. */
                     <div key={label} className="min-w-0">
-                      <div className="text-[9px] tracking-[0.1em] mb-1.5 truncate" style={{ color: FAINT }}>
-                        {label}
+                      <div className="flex items-center gap-1.5 h-[14px]">
+                        <Icon name={icon} size={11} color={FAINT} />
+                        <span className="text-[9px] tracking-[0.08em] truncate"
+                          style={{ color: FAINT }}>{label}</span>
                       </div>
-                      <div className="text-[16px] font-mono truncate" style={{ color }}>{value}</div>
-                      <div className="mt-2"><Icon name={icon} size={13} color={FAINT} /></div>
+                      <div className="text-[15px] font-mono mt-1.5 truncate leading-none"
+                        style={{ color }}>{value}</div>
                     </div>
                   ))}
                 </div>
@@ -4309,34 +4372,10 @@ function SessionSetup({ wallet, onStart, onBack, eyes = false }) {
           })}
         </div>
 
-        <div className="text-[11px] tracking-[0.15em] mt-7 mb-3" style={{ color: FAINT }}>
-          РЕЖИМ ТОРГОВЛИ
-        </div>
-        <div className="grid grid-cols-2 gap-2">
-          {[
-            { lev: 1, title: "ОБЫЧНАЯ", note: "Позиция не больше взноса. Ликвидаций нет." },
-            { lev: 10, title: "МАРЖИНАЛЬНАЯ", note: "Плечо x10 у всех. Есть маржин-колл." },
-          ].map((m) => {
-            const active = leverage === m.lev;
-            return (
-              <button key={m.lev} onClick={() => setLeverage(m.lev)}
-                className="rounded-lg py-4 px-4 text-left tap"
-                style={{ backgroundColor: active ? TEXT : SURFACE,
-                  color: active ? BG : TEXT,
-                  border: `1px solid ${active ? TEXT : HAIR}` }}>
-                <div className="text-[13px] tracking-[0.1em] font-semibold">{m.title}</div>
-                <div className="text-[11px] mt-1.5 leading-snug"
-                  style={{ color: active ? "#555" : FAINT }}>{m.note}</div>
-              </button>
-            );
-          })}
-        </div>
-
         <div className="text-[12px] mt-5 leading-relaxed" style={{ color: FAINT }}>
-          {leverage > 1
-            ? "В маржинальном режиме плечо x10 действует и на вас, и на всех ботов. Позиция закрывается принудительно, когда собственные средства падают до 12% от её стоимости."
-            : "Столько же получает каждый из 99 ботов."}
-          {" "}
+          Столько же получает каждый из 99 ботов. Ставка играет ровно настолько,
+          насколько её перекрыла противоположная сторона, поэтому потерять
+          больше поставленного невозможно.{" "}
           Если выйти раньше срока, с остатка списывается{" "}
           {Math.round(CONFIG.market.earlyExitPenalty * 100)}% и поровну
           распределяется между остальными участниками.{" "} Взнос списывается с баланса,
@@ -4967,8 +5006,11 @@ function PracticeApp({ onExit }) {
               </div>
 
               <div className="px-5 pt-3 grid grid-cols-4 gap-3">
-                <Metric label="LONG" value={fmt(stats.longExposure, 0)} color={LONG} />
-                <Metric label="SHORT" value={fmt(stats.shortExposure, 0)} color={SHORT} />
+                {/* Суммы ставок по сторонам НЕ показываем: вместе с числом
+                    участников они позволяют вычислить скрытую точку
+                    равновесия сессии. Показываем только количество. */}
+                <Metric label="В ЛОНГЕ" value={String(stats.longPlayers)} color={LONG} />
+                <Metric label="В ШОРТЕ" value={String(stats.shortPlayers)} color={SHORT} />
                 <Metric label="ЗАРАБОТАЛИ ЛОНГИ" value={fmtSigned(state.longRealized ?? 0, 0)}
                   color={(state.longRealized ?? 0) >= 0 ? LONG : SHORT} />
                 <Metric label="ЗАРАБОТАЛИ ШОРТЫ" value={fmtSigned(state.shortRealized ?? 0, 0)}
@@ -5234,7 +5276,9 @@ function PracticeApp({ onExit }) {
               <Line left="Ликвидаций в сессии" right={String(snap.liquidations ?? 0)} />
               <Line left="Заработали шорты" right={fmtSigned(state.shortRealized ?? 0)}
                 color={(state.shortRealized ?? 0) >= 0 ? LONG : SHORT} />
-              <Line left="Ликвидность" right={fmt(state.liquidity)} />
+              <Line left="Перевес ставок (только отладка)" right={fmt(state.liquidity)} />
+              <Line left="Скрытый центр (только отладка)"
+                right={fmt(snap.debug?.center ?? 0)} />
               <Line left="Капитализация" right={fmt(stats.marketCap)} />
               <Line left="Фаза рынка" right={state.phase} />
               <Line left="Скорость (10 тиков)" right={signedPct(snap.context?.speed ?? 0)} />
