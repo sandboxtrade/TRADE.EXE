@@ -57,8 +57,8 @@ const CONFIG = {
   // не срабатывал: боты открывались в первые тики и держали позицию вечно.
   // Замер: сделок за 25 тиков 76 -> 18 -> 2 -> 0 (полная остановка к 100-му тику).
   NPC_PNL_SCALE: 0.15,   // масштаб порогов под реальный диапазон цены
-  NPC_HOLD_MIN: 40,      // выход по времени: никто не сидит в позиции вечно
-  NPC_HOLD_MAX: 400,
+  NPC_HOLD_MIN: 20,      // выход по времени: никто не сидит в позиции вечно
+  NPC_HOLD_MAX: 200,
 
   // --- характер рынка (подобрано замером на 10 сидах по 3000 тиков) ---
   // Цель: автокорреляция доходности около нуля (тик непредсказуем), но
@@ -73,10 +73,15 @@ const CONFIG = {
   // Пересчитано под THETA=0.8. Более живая цена сама по себе возвращает
   // преимущество трендовым стратегиям, поэтому вес быстрых контр-трендовых
   // поднят: моментум-40 из +0.45 ушёл в −0.65, моментум-10 держится на 1.01.
-  NPC_FAST_FADE_WEIGHT: 3.4,
-  NPC_FAST_TREND_WEIGHT: 1.5,
+  /* Пересчитано после введения минимального интервала между сделками.
+     Редкие сделки делают тренды устойчивее, и моментум снова начал
+     зарабатывать (EV 2.26 при прежних весах). Вес быстрых контр-трендовых
+     поднят с 3.4 до 8.0: моментум-10 вернулся к −0.32. */
+  NPC_FAST_FADE_WEIGHT: 8.0,
+  NPC_FAST_TREND_WEIGHT: 0.7,
   NPC_ACT_SCALE: 1.6,
   NPC_SIZE_SCALE: 0.6,
+  NPC_MIN_GAP: 15,       // база минимального интервала между сделками бота
   // --- маржинальный режим ---
   LEV_DEPTH: 0.7,        // глубина кривой = C * L^LEV_DEPTH
   /* Поддерживающая маржа = LEV_MAINTENANCE / L, то есть 5% при x10.
@@ -659,6 +664,11 @@ function attachNPCs(m, startIdx, count, seed, eyes = false) {
       // Терпение: сколько тиков бот выжидает после выхода. После убытка
       // пауза длиннее — как у человека, который «отходит от сделки».
       patience: 6 + Math.floor(r() * 40),
+      /* Минимальный интервал между действиями, в тиках. Логарифмический
+         разброс: примерно от 1.5 до 45 секунд. Скальперы внизу диапазона,
+         долгосрочные наверху. */
+      minGap: Math.round(CONFIG.NPC_MIN_GAP * Math.pow(30, r())),
+      lastTrade: -1e9, urgent: false,
       // Насколько бот готов нарушить собственную стратегию, когда она
       // перестала работать. 0 — догматик, 1 — легко переобувается.
       flexibility: 0.15 + r() * 0.7,
@@ -746,7 +756,7 @@ function windowRange(history, look) {
  *    выигрывающая сторона наращивает размер, и движения получают инерцию;
  *  - появились пробойщики и стадо, которые усиливают выход из коридора.
  */
-function decide(m, i, history) {
+function decideRaw(m, i, history) {
   const pl = m.players[i], n = pl.npc;
   if (!n) return 0;
   if (n.startEquity === null) n.startEquity = m.equity(i);
@@ -813,21 +823,22 @@ function decide(m, i, history) {
     const withFlow = (pl.u > 0 ? 1 : -1) * Math.sign(slow) > 0;
 
     // Комната вот-вот закроется — держать позицию больше незачем.
-    if (flush) { close(n, pnl > 0, equity); return -pl.u; }
+    if (flush) { n.urgent = true; close(n, pnl > 0, equity); return -pl.u; }
     // Впереди по итогу и осталось мало времени — фиксируем, не рискуя.
     if (endgame && !behind && pnl > 0 && r() < 0.35) { close(n, true, equity); return -pl.u; }
 
-    if (pnl <= n.stop) { close(n, false, equity); return -pl.u; }
+    if (pnl <= n.stop) { n.urgent = true; close(n, false, equity); return -pl.u; }
 
     if (n.trail > 0) {
       if (n.peak >= n.take * 0.6 && pnl <= n.peak * (1 - n.trail)) {
-        close(n, true, equity); return -pl.u;
+        n.urgent = true; close(n, true, equity); return -pl.u;
       }
       // Цель достигнута, но поток всё ещё за нас — жадность против правила.
       if (pnl >= n.take * 2.5 && (!withFlow || r() > n.flexibility)) {
         close(n, true, equity); return -pl.u;
       }
     } else if (pnl >= n.take) {
+      n.urgent = true;
       if (withFlow && r() < n.flexibility * 0.5) {
         // Нарушаем собственный тейк и даём прибыли идти дальше.
         n.take *= 1.4;
@@ -952,6 +963,30 @@ function decide(m, i, history) {
     pl.stopLoss = null; pl.takeProfit = null;
   }
   return dir > 0 ? units : -units;
+}
+
+/**
+ * ЧАСТОТА СДЕЛОК. Раньше бот пересматривал позицию каждый тик, и 96% всех
+ * сделок приходилось на доливки, частичные фиксации и досрочные выходы —
+ * получалось 33 сделки на бота в минуту. Живой человек за минутную сессию
+ * делает 3-5 входов.
+ *
+ * Теперь у каждого бота есть собственный минимальный интервал между
+ * действиями: скальпер шевелится раз в пару секунд, долгосрочный — раз в
+ * полминуты. Интервал не распространяется на жёсткий риск: стоп, тейк,
+ * маржин-колл и разгрузку перед закрытием комнаты, иначе бот не смог бы
+ * защитить деньги.
+ */
+function decide(m, i, history) {
+  const pl = m.players[i], n = pl.npc;
+  if (!n) return 0;
+  const gap = m.tick - (n.lastTrade ?? -1e9);
+  const du = decideRaw(m, i, history);
+  if (du === 0) return 0;
+  if (gap < n.minGap && !n.urgent) return 0;
+  n.urgent = false;
+  n.lastTrade = m.tick;
+  return du;
 }
 
 /**
