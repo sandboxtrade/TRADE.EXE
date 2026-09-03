@@ -117,12 +117,29 @@ const CONFIG = {
      DEPTH_FRACTION: какая доля капитала комнаты двигает цену на один пункт.
      0.005 = полпроцента капитала на 1% цены. Замер размаха за сессию при
      99 ботах: 0.0025 -> 3.5%, 0.005 -> 6.3% (95-й перцентиль 15.3%),
-     0.01 -> 19.7%. Величина относительная, поэтому модель масштабно
-     инвариантна: при взносе $100 и при $10 000 динамика одинакова. */
-  DEPTH_FRACTION: 0.005,
-  /* Насколько глубина растёт с числом участников в позиции. Больше народу —
-     слабее движение на тот же доллар. */
-  DEPTH_CROWD: 0.05,
+     Величина относительная, поэтому модель масштабно инвариантна: при взносе
+     $100 и при $10 000 динамика совпадает до десятых процента.
+
+     ЭТО ГЛАВНЫЙ КОМПРОМИСС МОДЕЛИ, и он измерен. Чем живее график, тем
+     выгоднее механическая стратегия «продавай выше средней цены сессии,
+     покупай ниже»: цена возвращается к равновесию, когда боты закрывают
+     позиции, и чем сильнее она от него уходит, тем больше на этом можно
+     взять. Замер на 25 сессиях по 3 минуты, комната 100 x $1000:
+
+        DEPTH_FRACTION   размах за сессию   выгода стратегии   прибыльных
+           0.008              8.1%              +3.47%            100%
+           0.014              3.4%              +1.90%             84%
+           0.022              2.2%              +0.37%             20%
+           0.035              1.4%               0.00%              0%
+
+     Взято 0.014 — примерно та живость, что была на прежнем движке.
+     Уменьшать это число = делать рынок бодрее и одновременно проще
+     для механических стратегий. */
+  DEPTH_FRACTION: 0.014,
+  /* Насколько глубина растёт с числом участников В ПОЗИЦИИ. Считается от
+     ДОЛИ занятых, а не от их количества: иначе в комнате на 500 человек
+     делитель доходил бы до 26 и рынок замирал. */
+  DEPTH_CROWD: 5.0,
   /* СКРЫТЫЙ ЦЕНТР: диапазон, из которого выбирается точка равновесия сессии.
      Игроку не показывается ни она, ни величины, по которым её можно вычислить
      (суммы ставок по сторонам, число участников на стороне, глубина). */
@@ -280,8 +297,15 @@ class Market {
    * 0.005 -> 6.3% (95-й перцентиль 15.3%), 0.01 -> 19.7%.
    */
   depth() {
-    const k0 = 1 / Math.max(1e-9, this.C * CONFIG.DEPTH_FRACTION);
-    return k0 / (1 + CONFIG.DEPTH_CROWD * this.sides().N);
+    /* Поправка на размер комнаты. Знаки заявок случайны, поэтому суммарный
+       поток за тик растёт не как число участников, а как корень из него.
+       Без поправки комната на 500 человек становилась мёртвой: размах за
+       сессию 3.1% против 16.3% у сотни. Показатель 0.35 подобран замером:
+       при 0.5 комната на 300 разгонялась до 15.6%, при 0.25 — на 500 до
+       11.8%; на 0.35 размах держится в диапазоне 5-10% при любом размере. */
+    const n = this.players.length;
+    const k0 = Math.pow(n / 100, 0.35) / Math.max(1e-9, this.C * CONFIG.DEPTH_FRACTION);
+    return k0 / (1 + CONFIG.DEPTH_CROWD * (this.sides().N / n));
   }
 
   /** Сколько участник получит, если закроется сейчас: ровно свою ставку. */
@@ -605,11 +629,16 @@ function nearestCluster(m, P) {
 }
 
 /**
- * Предторговые заявки ботов. Каждый тик разогрева часть ботов ставит одну
- * лимитку вокруг стартовой цены. Разброс зависит от архетипа: агрессивные
- * встают близко к цене, осторожные — далеко и ждут лучшего входа.
+ * ОТКЛЮЧЕНО. Раньше во время разогрева боты копили лимитные заявки, и в
+ * первом же тике после открытия все они срабатывали одним клирингом: на
+ * графике это давало одну гигантскую свечу на весь экран, из-за которой
+ * прыгала вертикальная шкала и рынок выглядел сломанным.
+ * Теперь до открытия не происходит вообще ничего: цена стоит, заявок нет,
+ * и в момент старта игрок и все боты начинают торговать одновременно.
+ * Функция оставлена пустой, чтобы не менять вызов в RoomV4.
  */
-function npcWarmupOrders(m) {
+function npcWarmupOrders() { return; }
+function npcWarmupOrdersDisabled(m) {
   const P = m.mark;
   for (const pl of m.players) {
     const n = pl.npc;
@@ -1067,14 +1096,14 @@ function createSnapshot(m, viewerId, { level = "full", devMode = false } = {}) {
   };
   const me = m.players.find((p) => p.id === viewerId);
   if (me) snap.you = projectPlayer(m, me, { viewer: true, devMode });
-  if (level === "roster" || level === "full") {
+  if (level === "roster" || level === "full") {   // "you" — только свой срез
     snap.participants = m.players.map((p) =>
       projectPlayer(m, p, { viewer: false, devMode }));
   }
   /* Скрытый центр отдаётся ТОЛЬКО в режиме отладки. В обычной игре его нет
      ни в одном поле снапшота — иначе стратегия «торгуй возврат к центру»
      снова становится беспроигрышной. */
-  if (level === "full" && devMode) snap.debug = { sumEquity: m.sumEquity(), center: m.center };
+  if (devMode) snap.debug = { sumEquity: m.sumEquity(), center: m.center };
   return snap;
 }
 
@@ -1240,6 +1269,7 @@ const LEGACY_HUMAN_ID = 0;
 CONFIG.market = {
   assetSymbol: "SIM",
   totalPlayers: 100,
+  playerOptions: [100, 300, 500],   // сколько всего участников в комнате
   capitalOptions: [100, 500, 1000, 10000],
   durationOptions: [1, 5, 10, 30],     // минуты
   warmupTicks: 100,                    // 10 секунд разогрева перед открытием
@@ -1480,8 +1510,21 @@ class LegacyRoom {
   leave(playerId, fraction) { return this._room.leave(playerId, fraction); }
 
   snapshotFor(viewerId) {
-    const base = this._room.snapshot(viewerId, { level: "full", devMode: this.devMode });
-    const players = (base.participants || []).map((p) => this._legacyPlayer(p));
+    /* Полный список участников пересобирается раз в несколько тиков.
+       Раньше на КАЖДОМ тике создавалось по два объекта на участника
+       (projectPlayer + _legacyPlayer): при 100 игроках это 2000 объектов
+       в секунду, при 500 — 10 000, и телефон захлёбывался на сборке
+       мусора. Экраны «Участники» и счётчики сторон от обновления раз в
+       треть секунды не страдают. */
+    const tick = this._room.market.tick;
+    const fresh = !this._cache || tick - this._cache.tick >= LegacyRoom.ROSTER_EVERY;
+    const base = fresh
+      ? this._room.snapshot(viewerId, { level: "full", devMode: this.devMode })
+      : { ...this._room.snapshot(viewerId, { level: "you", devMode: this.devMode }),
+          participants: this._cache.participants };
+    if (fresh) this._cache = { tick, participants: base.participants,
+      players: (base.participants || []).map((p) => this._legacyPlayer(p)) };
+    const players = this._cache.players;
     return {
       ...base,
       players,
@@ -1623,17 +1666,21 @@ class LegacyRoom {
 }
 
 
+/* Как часто пересобирается список участников, в тиках. 3 тика = 0.3 с. */
+LegacyRoom.ROSTER_EVERY = 3;
+
 // Старый интерфейс ожидает класс "Room" со старым API — LegacyRoom это и есть.
 const Room = LegacyRoom;
 
 // ==== ПРОФИЛЬ / ЛОКАЛЬНЫЙ ТРАНСПОРТ / ИНТЕРФЕЙС ====
 class LocalTransport {
   constructor({ startingCapital, seed, devMode = true, leverage = 1, eyes = false,
-    durationTicks = null, warmupTicks = CONFIG.market.warmupTicks } = {}) {
+    durationTicks = null, warmupTicks = CONFIG.market.warmupTicks,
+    playerCount = null } = {}) {
     this.leverage = leverage;
     this.eyes = eyes;
     this.room = new Room({ startingCapital, seed, devMode, leverage, eyes,
-      durationTicks, warmupTicks });
+      durationTicks, warmupTicks, playerCount });
     this.playerId = this.room.join(null, "ВЫ"); // новый движок сам выдаёт id человека
     this.timer = null;
     this.speed = 1;
@@ -1673,25 +1720,33 @@ const TIMEFRAMES = [
 ];
 
 // Свечи строятся ТОЛЬКО из price stream движка, отдельной генерации нет.
+/* Свечи собираются С КОНЦА истории и ровно столько, сколько влезает на
+   экран. Прежняя версия перебирала все 6000 точек на каждом обновлении
+   (десять раз в секунду) — при 500 участниках это и было главным
+   источником подвисаний графика. */
 function buildCandles(points, bucketMs, maxCandles) {
-  if (points.length === 0) return [];
+  const n = points.length;
+  if (n === 0) return [];
+  const earliest = points[n - 1].t - bucketMs * (maxCandles + 1);
+  let start = n - 1;
+  while (start > 0 && points[start - 1].t >= earliest) start--;
   const candles = [];
   let current = null;
-  const earliest = points[points.length - 1].t - bucketMs * (maxCandles + 1);
-  for (const point of points) {
-    if (point.t < earliest) continue;
+  for (let k = start; k < n; k++) {
+    const point = points[k];
     const bucket = Math.floor(point.t / bucketMs) * bucketMs;
     if (!current || current.t !== bucket) {
-      current = { t: bucket, open: point.price, high: point.price, low: point.price, close: point.price, volume: point.volume };
+      current = { t: bucket, open: point.price, high: point.price,
+        low: point.price, close: point.price, volume: point.volume };
       candles.push(current);
     } else {
-      current.high = Math.max(current.high, point.price);
-      current.low = Math.min(current.low, point.price);
+      if (point.price > current.high) current.high = point.price;
+      if (point.price < current.low) current.low = point.price;
       current.close = point.price;
       current.volume += point.volume;
     }
   }
-  return candles.slice(-maxCandles);
+  return candles.length > maxCandles ? candles.slice(-maxCandles) : candles;
 }
 
 /* ---------------------------------- ТЕМА ---------------------------------- */
@@ -4327,6 +4382,7 @@ function SessionSetup({ wallet, onStart, onBack, eyes = false }) {
   );
   const [leverage, setLeverage] = useState(1);
   const [minutes, setMinutes] = useState(CONFIG.market.durationOptions[1]);
+  const [players, setPlayers] = useState(CONFIG.market.playerOptions[0]);
 
   return (
     <div className="w-full flex flex-col" style={{ height: "100dvh", backgroundColor: BG, color: TEXT }}>
@@ -4348,8 +4404,25 @@ function SessionSetup({ wallet, onStart, onBack, eyes = false }) {
                 }}>
                 <div className="text-[22px] font-mono">${value.toLocaleString("en-US")}</div>
                 <div className="text-[11px] mt-1" style={{ color: active && !locked ? "#555" : FAINT }}>
-                  {locked ? "не хватает баланса" : `рынок $${(value * CONFIG.market.totalPlayers).toLocaleString("en-US")}`}
+                  {locked ? "не хватает баланса" : `рынок $${(value * players).toLocaleString("en-US")}`}
                 </div>
+              </button>
+            );
+          })}
+        </div>
+
+        <div className="text-[11px] tracking-[0.15em] mt-7 mb-3" style={{ color: FAINT }}>
+          УЧАСТНИКОВ В КОМНАТЕ
+        </div>
+        <div className="grid grid-cols-3 gap-2">
+          {CONFIG.market.playerOptions.map((n) => {
+            const active = players === n;
+            return (
+              <button key={n} onClick={() => setPlayers(n)}
+                className="rounded-lg py-3.5 text-[13px] font-mono font-semibold tap"
+                style={{ backgroundColor: active ? TEXT : SURFACE, color: active ? BG : TEXT,
+                  border: `1px solid ${active ? TEXT : HAIR}` }}>
+                {n}
               </button>
             );
           })}
@@ -4373,7 +4446,7 @@ function SessionSetup({ wallet, onStart, onBack, eyes = false }) {
         </div>
 
         <div className="text-[12px] mt-5 leading-relaxed" style={{ color: FAINT }}>
-          Столько же получает каждый из 99 ботов. Ставка играет ровно настолько,
+          Столько же получает каждый из {players - 1} ботов. Ставка играет ровно настолько,
           насколько её перекрыла противоположная сторона, поэтому потерять
           больше поставленного невозможно.{" "}
           Если выйти раньше срока, с остатка списывается{" "}
@@ -4385,10 +4458,10 @@ function SessionSetup({ wallet, onStart, onBack, eyes = false }) {
       </div>
 
       <div className="max-w-md w-full mx-auto px-6 pb-8">
-        <button onClick={() => onStart(capital, leverage, minutes, eyes)}
+        <button onClick={() => onStart(capital, leverage, minutes, eyes, players)}
           className="w-full rounded-lg py-4 text-[15px] tracking-[0.15em] font-semibold tap"
           style={{ backgroundColor: TEXT, color: BG }}>
-          ВОЙТИ В {eyes ? "EYES" : "РЫНОК"} · {fmt(capital, 0)} · {minutes} МИН{leverage > 1 ? " · x10" : ""}
+          ВОЙТИ В {eyes ? "EYES" : "РЫНОК"} · {fmt(capital, 0)} · {minutes} МИН · {players}
         </button>
       </div>
     </div>
@@ -4406,17 +4479,20 @@ const ROOM_NAMES = [
   "Rune", "Sable", "Tessa", "Umka", "Vega", "Wolf", "Xena", "Yuri", "Zara",
 ];
 
-function Matchmaking({ capital, leverage = 1, onReady, onCancel }) {
+function Matchmaking({ capital, leverage = 1, total: totalProp, onReady, onCancel }) {
   const [joined, setJoined] = useState(1);
   const [feed, setFeed] = useState(["вы вошли в комнату"]);
-  const total = CONFIG.market.totalPlayers;
+  const total = totalProp || CONFIG.market.totalPlayers;
 
   useEffect(() => {
     let count = 1;
     let ready = null;               // отложенный старт, снимается при размонтировании
     const timer = setInterval(() => {
       // Набор ускоряется к концу — так очередь не кажется линейной полосой.
-      count = Math.min(total, count + 3 + Math.floor(Math.random() * 9));
+      // Шаг пропорционален размеру комнаты, иначе подбор 500 участников
+      // тянулся бы в пять раз дольше, чем 100.
+      const step = Math.max(1, Math.round(total / 100));
+      count = Math.min(total, count + step * (3 + Math.floor(Math.random() * 9)));
       setJoined(count);
       const who = ROOM_NAMES[Math.floor(Math.random() * ROOM_NAMES.length)];
       setFeed((prev) => [`${who}-${Math.floor(Math.random() * 900 + 100)} присоединился`,
@@ -4637,16 +4713,18 @@ function PracticeApp({ onExit }) {
   const persist = (next) => { setProfile(next); saveProfile(next); };
 
   /** Первая фаза: подбор участников. Реальная комната ещё не создана. */
-  const queueSession = (capital, leverage = 1, minutes = 5, eyes = false) => {
-    setPending({ capital, leverage, minutes, eyes });
+  const queueSession = (capital, leverage = 1, minutes = 5, eyes = false,
+                        players = CONFIG.market.playerOptions[0]) => {
+    setPending({ capital, leverage, minutes, eyes, players });
     setScreen("matching");
   };
 
-  const startSession = ({ capital, leverage, minutes, eyes }) => {
+  const startSession = ({ capital, leverage, minutes, eyes, players }) => {
     // Приложение больше не создаёт движок напрямую — только транспорт.
     // При переезде на сервер здесь меняется одна строка на RemoteTransport.
     engineRef.current = new LocalTransport({
       startingCapital: capital, leverage, eyes,
+      playerCount: players || CONFIG.market.playerOptions[0],
       // Боты видят тот же таймер, что и игрок: старт, середина и концовка
       // сессии влияют на их поведение.
       durationTicks: Math.round(minutes * 60000 / CONFIG.market.tickMs),
@@ -4749,6 +4827,7 @@ function PracticeApp({ onExit }) {
   }
   if (screen === "matching" && pending !== null) {
     return <Matchmaking capital={pending.capital} leverage={pending.leverage}
+      total={pending.players}
       onReady={() => startSession(pending)}
       onCancel={() => { setPending(null); setScreen("lobby"); }} />;
   }
