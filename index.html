@@ -4,11 +4,54 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, viewport-fit=cover" />
   <meta name="theme-color" content="#000000" />
-  <title>trade.exe v20</title>
+  <title>trade.exe v21</title>
   <link rel="manifest" href="./manifest.json" />
   <link rel="apple-touch-icon" href="./apple-touch-icon.png" />
 
   <script src="https://cdn.tailwindcss.com"></script>
+  <!-- Конфиг Tailwind Play CDN обязательно идёт ПОСЛЕ загрузки самого скрипта:
+       так документирует сам Tailwind для CDN-режима без сборки.
+       Здесь переопределяется встроенный класс font-mono — именно им во всём
+       app.js помечены числа (баланс, цена, PnL, таймер, места в рейтинге).
+       Указание DSEG7 Classic первым шрифтом в стеке не трогает ни одну
+       строку в app.js: там, где в этом же элементе встречается русское
+       слово или любой символ, которого нет в DSEG7 Classic (набор шрифта —
+       только базовая латиница и цифры), браузer сам берёт следующий шрифт
+       из стека для конкретно этого символа. Считать это вручную по каждому
+       из 70+ мест с font-mono не нужно — стек решает построчно. -->
+  <script>
+    tailwind.config = {
+      theme: {
+        extend: {
+          fontFamily: {
+            mono: ['"DSEG7 Classic"', 'ui-monospace', 'SFMono-Regular', 'Menlo', 'monospace'],
+          },
+        },
+      },
+    };
+  </script>
+
+  <style>
+    /* DSEG7 Classic — семисегментный шрифт, имитирующий цифровое табло.
+       Подключены два начертания: обычное для большинства чисел и жирное —
+       им в app.js помечены числа на кнопках (font-mono font-semibold),
+       без жирного файла браузер сам утолщил бы обычные штрихи и сегменты
+       стали бы слипаться. */
+    @font-face {
+      font-family: "DSEG7 Classic";
+      font-style: normal;
+      font-weight: 400;
+      font-display: swap;
+      src: url("https://cdn.jsdelivr.net/npm/@fontsource/dseg7-classic/files/dseg7-classic-latin-400-normal.woff2") format("woff2");
+    }
+    @font-face {
+      font-family: "DSEG7 Classic";
+      font-style: normal;
+      font-weight: 700;
+      font-display: swap;
+      src: url("https://cdn.jsdelivr.net/npm/@fontsource/dseg7-classic/files/dseg7-classic-latin-700-normal.woff2") format("woff2");
+    }
+  </style>
 
   <style>
     html, body { margin: 0; padding: 0; background: #000000; overscroll-behavior: none; }
@@ -84,7 +127,7 @@
     };
   })();
   </script>
-  <!-- ?v=20 — при каждой новой версии app.js увеличивайте это число. -->
-  <script type="text/babel" data-presets="react" data-type="module" src="./app.js?v=20"></script>
+  <!-- ?v=21 — при каждой новой версии app.js увеличивайте это число. -->
+  <script type="text/babel" data-presets="react" data-type="module" src="./app.js?v=21"></script>
 </body>
 </html>
