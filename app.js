@@ -4478,10 +4478,10 @@ function profileProgress(profile) {
   /* Кубки тратятся на бонусы, поэтому наружу отдаётся ОСТАТОК. Заработанные
      за всё время (trophiesEarned) нужны отдельно — по ним считается прогресс
      и они не уменьшаются при обмене. */
-  const spent = profile.trophiesSpent || 0;
+  const spentCups = profile.trophiesSpent || 0;
   return { level, wins, done, need, progress: need ? done / need : 0,
-    trophiesEarned: trophies, trophiesSpent: spent,
-    trophies: Math.max(0, trophies - spent),
+    trophiesEarned: trophies, trophiesSpent: spentCups,
+    trophies: Math.max(0, trophies - spentCups),
     streak, bestStreak: best, dayStreak, bestPct,
     toTrophy: (5 - (streak % 5)) % 5 || 5 };
 }
