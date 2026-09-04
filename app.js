@@ -2162,6 +2162,12 @@ const FAINT = "#5A5A63";
 const LONG = "#34C77B";
 const SHORT = "#E05563";
 const GOLD = "#D2A254";   // кубки
+/* Нейтральный акцент. Зелёный оставлен ТОЛЬКО для знака денег (PnL сторон,
+   результат сессии). Всё остальное — прогресс уровня, активная вкладка,
+   ссылки, значки, полосы распределения, линия дневного графика — рисуется
+   этим светло-серым. Зелёная подсветка на каждом втором элементе читалась
+   как оформление подпольной площадки, а не как акцент. */
+const ACCENT = "#DCDCE2";
 
 /** Затемнение цвета — для нижней точки градиента кнопки и её рамки. */
 const shade = (hex, k) => {
@@ -3604,11 +3610,13 @@ function EquityCurve({ sessions, rangeMs }) {
   return (
     <svg viewBox={`0 0 ${W} ${H}`} className="w-full" style={{ height: 128 }}>
       <defs>
-        {/* Заливка над нулём зелёная, под нулём красная — одна и та же
-            фигура рисуется дважды под разными обрезками. */}
+        {/* Заливка над нулём светло-серая, под нулём красная — одна и та же
+            фигура рисуется дважды под разными обрезками. Зелёной верхняя
+            часть была раньше: на весь экран получалось сплошное свечение,
+            а знак результата и так виден по цифре над графиком. */}
         <linearGradient id={`${uid}g`} x1="0" y1="0" x2="0" y2="1">
-          <stop offset="0%" stopColor={LONG} stopOpacity="0.34" />
-          <stop offset="100%" stopColor={LONG} stopOpacity="0.02" />
+          <stop offset="0%" stopColor={ACCENT} stopOpacity="0.26" />
+          <stop offset="100%" stopColor={ACCENT} stopOpacity="0.02" />
         </linearGradient>
         <linearGradient id={`${uid}r`} x1="0" y1="1" x2="0" y2="0">
           <stop offset="0%" stopColor={SHORT} stopOpacity="0.34" />
@@ -3641,7 +3649,7 @@ function EquityCurve({ sessions, rangeMs }) {
         <path d={area} fill={`url(#${uid}r)`} clipPath={`url(#${uid}dn)`} />
       </g>
 
-      <path d={path} fill="none" stroke={LONG} strokeWidth={1.8} strokeLinecap="round"
+      <path d={path} fill="none" stroke={ACCENT} strokeWidth={1.8} strokeLinecap="round"
         strokeLinejoin="round" clipPath={`url(#${uid}up)`} className="tx-line"
         style={{ "--len": W * 2 }} />
       <path d={path} fill="none" stroke={SHORT} strokeWidth={1.8} strokeLinecap="round"
@@ -3651,8 +3659,8 @@ function EquityCurve({ sessions, rangeMs }) {
       {/* Гало без анимации: CSS-transform у SVG-элемента считается от начала
           координат картинки, а не от центра круга, поэтому пульсация уводила
           кружок в сторону — он «летал» по карточке. */}
-      <circle cx={x(t1)} cy={y(acc)} r={5.5} fill={up ? LONG : SHORT} opacity={0.16} />
-      <circle cx={x(t1)} cy={y(acc)} r={2.8} fill={up ? LONG : SHORT} />
+      <circle cx={x(t1)} cy={y(acc)} r={5.5} fill={up ? ACCENT : SHORT} opacity={0.16} />
+      <circle cx={x(t1)} cy={y(acc)} r={2.8} fill={up ? ACCENT : SHORT} />
 
       <text x={0} y={H - 4} fill={FAINT} fontSize={8.5} fontFamily="monospace">{hhmm(t0)}</text>
       <text x={x(t1)} y={H - 4} fill={FAINT} fontSize={8.5} fontFamily="monospace"
@@ -3751,10 +3759,10 @@ function ProfileScreen({ profile, account, onClose, onSettings }) {
             <div className="rounded-2xl px-4 py-4 mt-5 grid grid-cols-3 gap-y-5 gap-x-3 tx-in"
               style={{ ...card, ...stagger(1) }}>
               <Cell label="СЕССИЙ" value={String(n)} />
-              <Cell label="ПРИБЫЛЬНЫХ" value={String(wins)} color={wins ? LONG : TEXT} />
+              <Cell label="ПРИБЫЛЬНЫХ" value={String(wins)} />
               <Cell label="ВИНРЕЙТ" value={`${Math.round((wins / n) * 100)}%`} />
               <Cell label="СРЕДНЯЯ" value={fmtSigned(avg)}
-                color={avg > 0 ? LONG : avg < 0 ? SHORT : TEXT} />
+                color={avg < 0 ? SHORT : TEXT} />
               <Cell label="ЛУЧШАЯ" value={fmtSigned(Math.max(...list.map((x) => x.pnl)))}
                 color={LONG} />
               <Cell label="ХУДШАЯ" value={fmtSigned(Math.min(...list.map((x) => x.pnl)))}
@@ -3783,7 +3791,7 @@ function ProfileScreen({ profile, account, onClose, onSettings }) {
                   <div className="flex-1 h-1.5 rounded-full overflow-hidden"
                     style={{ backgroundColor: HAIR }}>
                     <div style={{ width: `${(b / maxB) * 100}%`, height: "100%",
-                      backgroundColor: i === 0 ? LONG : i === 4 ? SHORT : DIM,
+                      backgroundColor: i === 0 ? ACCENT : i === 4 ? SHORT : DIM,
                       transition: "width var(--tx-slow) var(--tx-ease)" }} />
                   </div>
                   <span className="text-[11px] font-mono w-5 text-right" style={{ color: DIM }}>{b}</span>
@@ -3821,6 +3829,9 @@ function ProfileScreen({ profile, account, onClose, onSettings }) {
 
 function ModeArt({ kind }) {
   // Онлайн: вращающийся каркасный купол. Офлайн: точечная волна.
+  // Обе — светло-серые. Купол был зелёным, и вместе с зелёной кнопкой,
+  // зелёной полосой уровня и зелёной вкладкой экран становился сплошь
+  // подсвеченным.
   // Обе картинки — чистый SVG с CSS-анимацией, без внешних файлов.
   if (kind === "online") {
     const rings = [0.30, 0.48, 0.66, 0.84, 1.0];
@@ -3829,7 +3840,7 @@ function ModeArt({ kind }) {
         <g className="tx-dome">
           {rings.map((k, i) => (
             <ellipse key={i} cx="80" cy="70" rx={64 * k} ry={22 * k}
-              fill="none" stroke={LONG} strokeWidth="0.7"
+              fill="none" stroke={ACCENT} strokeWidth="0.7"
               opacity={0.16 + i * 0.11} />
           ))}
           {Array.from({ length: 14 }, (_, i) => {
@@ -3837,7 +3848,7 @@ function ModeArt({ kind }) {
             return (
               <line key={i} x1="80" y1="70"
                 x2={80 + Math.cos(a) * 64} y2={70 + Math.sin(a) * 22}
-                stroke={LONG} strokeWidth="0.5" opacity="0.22" />
+                stroke={ACCENT} strokeWidth="0.5" opacity="0.22" />
             );
           })}
           {Array.from({ length: 22 }, (_, i) => {
@@ -3845,12 +3856,12 @@ function ModeArt({ kind }) {
             const k = rings[i % rings.length];
             return (
               <circle key={i} cx={80 + Math.cos(a) * 64 * k} cy={70 + Math.sin(a) * 22 * k}
-                r="1.3" fill={LONG} opacity={0.35 + (i % 5) * 0.12}
+                r="1.3" fill={ACCENT} opacity={0.35 + (i % 5) * 0.12}
                 className="tx-twinkle" style={{ animationDelay: `${(i % 7) * 260}ms` }} />
             );
           })}
         </g>
-        <circle cx="80" cy="70" r="2.4" fill={LONG} className="tx-dot" />
+        <circle cx="80" cy="70" r="2.4" fill={ACCENT} className="tx-dot" />
       </svg>
     );
   }
@@ -3908,10 +3919,10 @@ function ModeCard({ kind, title, text, cta, primary, onClick, disabled }) {
    можно было продолжать играть.
    ------------------------------------------------------------------------ */
 const PAY_METHODS = [
-  { id: "card", label: "Банковская карта", sub: "•••• 4242", icon: "card", tint: TEXT },
-  { id: "trc", label: "USDT (TRC20)", icon: "coin", tint: LONG },
-  { id: "erc", label: "USDT (ERC20)", icon: "coin", tint: LONG },
-  { id: "btc", label: "BTC", icon: "coin", tint: "#F7931A" },
+  { id: "card", label: "Банковская карта", icon: "card", tint: TEXT },
+  { id: "trc", label: "USDT (TRC20)", icon: "coin", tint: DIM },
+  { id: "erc", label: "USDT (ERC20)", icon: "coin", tint: DIM },
+  { id: "btc", label: "BTC", icon: "coin", tint: DIM },
   { id: "other", label: "Другой способ", icon: "dots", tint: DIM },
 ];
 
@@ -4081,9 +4092,9 @@ function DepositScreen({ profile, onBack, onDemoTopUp }) {
                 )}
               </span>
               <span className="w-[18px] h-[18px] rounded-full shrink-0 flex items-center justify-center"
-                style={{ border: `1.5px solid ${method === m.id ? LONG : DIM}` }}>
+                style={{ border: `1.5px solid ${method === m.id ? TEXT : DIM}` }}>
                 {method === m.id && (
-                  <span className="w-2 h-2 rounded-full" style={{ backgroundColor: LONG }} />
+                  <span className="w-2 h-2 rounded-full" style={{ backgroundColor: TEXT }} />
                 )}
               </span>
             </button>
@@ -4156,7 +4167,7 @@ function WithdrawScreen({ profile, onBack }) {
             className="flex-1 min-w-0 bg-transparent outline-none py-4 pl-1 text-[16px] font-mono"
             style={{ color: TEXT }} />
           <button onClick={() => setAmount(String(Math.floor(profile.wallet)))}
-            className="pl-3 text-[11px] tracking-[0.1em] tap" style={{ color: LONG }}>
+            className="pl-3 text-[11px] tracking-[0.1em] tap" style={{ color: DIM }}>
             ВСЁ
           </button>
         </div>
@@ -4192,9 +4203,9 @@ function WithdrawScreen({ profile, onBack }) {
                 )}
               </span>
               <span className="w-[18px] h-[18px] rounded-full shrink-0 flex items-center justify-center"
-                style={{ border: `1.5px solid ${method === m.id ? LONG : DIM}` }}>
+                style={{ border: `1.5px solid ${method === m.id ? TEXT : DIM}` }}>
                 {method === m.id && (
-                  <span className="w-2 h-2 rounded-full" style={{ backgroundColor: LONG }} />
+                  <span className="w-2 h-2 rounded-full" style={{ backgroundColor: TEXT }} />
                 )}
               </span>
             </button>
@@ -4285,7 +4296,7 @@ function RankingTab({ profile, period, onPeriod }) {
               <div className="text-[15px] font-mono">{r.place}</div>
               <div className="w-7 h-7 rounded-full mx-auto my-2"
                 style={{ backgroundColor: first ? TEXT : "#26262B" }} />
-              <div className="text-[11px] truncate" style={{ color: r.me ? LONG : TEXT }}>
+              <div className="text-[11px] truncate" style={{ color: r.me ? TEXT : DIM }}>
                 {r.name}
               </div>
               <div className="text-[11px] font-mono mt-0.5"
@@ -4309,7 +4320,7 @@ function RankingTab({ profile, period, onPeriod }) {
             style={{ borderColor: HAIR, backgroundColor: r.me ? RAISED : "transparent" }}>
             <span className="w-7 text-[12px] font-mono" style={{ color: FAINT }}>{r.place}</span>
             <span className="flex-1 min-w-0 text-[13px] truncate"
-              style={{ color: r.me ? LONG : TEXT }}>{r.name}</span>
+              style={{ color: r.me ? TEXT : DIM }}>{r.name}</span>
             <span className="text-[13px] font-mono"
               style={{ color: r.pnl >= 0 ? LONG : SHORT }}>{fmtSigned(r.pnl, 0)}</span>
           </div>
@@ -4346,10 +4357,6 @@ function MarketsTab({ onPlay }) {
             <div className="text-[17px] font-mono">{m.assetSymbol}</div>
             <div className="text-[11px] mt-1" style={{ color: DIM }}>закрытый рынок · практика</div>
           </div>
-          <span className="px-2.5 py-1 rounded-full text-[10px] tracking-[0.15em]"
-            style={{ backgroundColor: RAISED, color: LONG, border: `1px solid ${HAIR}` }}>
-            ОТКРЫТ
-          </span>
         </div>
         <div className="my-3 rounded-xl overflow-hidden" style={{ backgroundColor: "#08080A" }}>
           <ModeArt kind="offline" />
@@ -4365,12 +4372,12 @@ function MarketsTab({ onPlay }) {
       </div>
 
       <div className="rounded-2xl p-4 mt-2 tx-in"
-        style={{ backgroundColor: SURFACE, border: `1px solid #1E4A32`, ...stagger(1) }}>
+        style={{ backgroundColor: SURFACE, border: `1px solid ${HAIR}`, ...stagger(1) }}>
         <div className="flex items-start justify-between gap-3">
           <div className="flex items-center gap-2">
-            <Icon name="eye" size={17} color={LONG} />
+            <Icon name="eye" size={17} color={DIM} />
             <div>
-              <div className="text-[17px] font-mono" style={{ color: LONG }}>
+              <div className="text-[17px] font-mono">
                 {m.assetSymbol} · EYES
               </div>
               <div className="text-[11px] mt-1" style={{ color: DIM }}>
@@ -4378,10 +4385,6 @@ function MarketsTab({ onPlay }) {
               </div>
             </div>
           </div>
-          <span className="px-2.5 py-1 rounded-full text-[10px] tracking-[0.15em]"
-            style={{ backgroundColor: "#0E2A1B", color: LONG, border: "1px solid #1E4A32" }}>
-            ОТКРЫТ
-          </span>
         </div>
         <div className="my-3 rounded-xl overflow-hidden" style={{ backgroundColor: "#08080A" }}>
           <ModeArt kind="online" />
@@ -4397,7 +4400,7 @@ function MarketsTab({ onPlay }) {
         </div>
         <button onClick={() => onPlay(true)}
           className="w-full rounded-xl py-3.5 mt-3 text-[12px] tracking-[0.2em] font-bold tap"
-          style={{ backgroundColor: LONG, color: BG }}>
+          style={btnSoft(true)}>
           ИГРАТЬ В EYES
         </button>
       </div>
@@ -4414,15 +4417,20 @@ const TABS = [
 
 function TabBar({ active, onChange }) {
   return (
-    <div className="max-w-md w-full mx-auto grid grid-cols-4 shrink-0 pt-2 pb-5"
-      style={{ borderTop: `1px solid ${HAIR}` }}>
+    /* Колонок ровно столько, сколько вкладок. Раньше стояло grid-cols-4 при
+       трёх вкладках — они прижимались влево, а справа зияла пустая четверть.
+       Активная вкладка помечается белым, а не зелёным. */
+    <div className="max-w-md w-full mx-auto grid shrink-0 pt-2 pb-5"
+      style={{ borderTop: `1px solid ${HAIR}`,
+        gridTemplateColumns: `repeat(${TABS.length}, minmax(0, 1fr))` }}>
       {TABS.map((t) => {
         const on = t.key === active;
         return (
           <button key={t.key} onClick={() => onChange(t.key)}
             className="flex flex-col items-center gap-1.5 py-1.5 tap">
-            <Icon name={t.icon} size={19} color={on ? (t.key === "rank" ? GOLD : LONG) : FAINT} />
-            <span className="text-[9px] tracking-[0.12em]" style={{ color: on ? LONG : FAINT }}>
+            <Icon name={t.icon} size={20} color={on ? TEXT : FAINT} />
+            <span className="text-[10px] tracking-[0.06em]"
+              style={{ color: on ? TEXT : FAINT }}>
               {t.label}
             </span>
           </button>
@@ -4486,52 +4494,11 @@ function profileProgress(profile) {
     toTrophy: (5 - (streak % 5)) % 5 || 5 };
 }
 
-/**
- * Куб уровня. Нарисован в духе логотипа: рамка-«окно» с угловыми скобками,
- * свечи внутри и разлетающиеся точки по бокам. Всё держится на transform
- * и opacity, поэтому анимация не пересчитывает вёрстку.
- */
-function LevelCube({ size = 84 }) {
-  const top = "M50 12 L84 30 L50 48 L16 30 Z";
-  return (
-    <svg width={size} height={size} viewBox="0 0 100 100" fill="none" className="tx-float">
-      <defs>
-        <linearGradient id="tx-cube" x1="0" y1="0" x2="0" y2="1">
-          <stop offset="0%" stopColor={LONG} stopOpacity="0.55" />
-          <stop offset="100%" stopColor={LONG} stopOpacity="0.05" />
-        </linearGradient>
-      </defs>
+/* Куб уровня удалён из интерфейса: он стоял между числом уровня и блоком
+   кубков, занимал треть строки, ничего не сообщал и добавлял третий
+   светящийся зелёный объект на экран. Разметка блока уровня стала
+   двухколоночной. */
 
-      {/* внешняя коробка */}
-      <path d={top} stroke={LONG} strokeWidth="1.6" opacity="0.75" />
-      <path d="M16 30 L16 62 L50 82 L84 62 L84 30" stroke={LONG} strokeWidth="1.6" opacity="0.5" />
-      <path d="M50 48 L50 82" stroke={LONG} strokeWidth="1.2" opacity="0.35" />
-
-      {/* внутренние слои: пульсируют вразнобой */}
-      <path d="M50 34 L72 46 L50 58 L28 46 Z" fill="url(#tx-cube)" stroke={LONG}
-        strokeWidth="1.2" className="tx-layer" />
-      <path d="M50 48 L72 60 L50 72 L28 60 Z" fill="url(#tx-cube)" stroke={LONG}
-        strokeWidth="1.2" className="tx-layer" style={{ animationDelay: "700ms" }} />
-
-      {/* свечи внутри — отсылка к логотипу */}
-      <g stroke={LONG} strokeWidth="1.4" opacity="0.9" className="tx-layer"
-        style={{ animationDelay: "350ms" }}>
-        <path d="M42 44v14M50 40v20M58 46v12" />
-      </g>
-
-      {/* угловые скобки, как в логотипе */}
-      <g stroke={LONG} strokeWidth="1.6" strokeLinecap="square" opacity="0.6">
-        <path d="M8 22V14h8M92 22V14h-8M8 78v8h8M92 78v8h-8" />
-      </g>
-
-      {/* искры */}
-      {[[6, 40], [12, 56], [90, 44], [95, 60], [24, 12], [78, 90]].map(([x, y], i) => (
-        <circle key={i} cx={x} cy={y} r="1.4" fill={LONG} className="tx-twinkle"
-          style={{ animationDelay: `${i * 380}ms` }} />
-      ))}
-    </svg>
-  );
-}
 
 /** Верхний блок главного экрана: уровень, прогресс, кубки, серия. */
 function LevelBar({ profile }) {
@@ -4549,8 +4516,6 @@ function LevelBar({ profile }) {
           <div className="text-[38px] leading-none font-mono mt-0.5">{p.level}</div>
           <div className="text-[11px] mt-2.5" style={{ color: FAINT }}>до уровня {p.level + 1}</div>
         </div>
-
-        <div className="shrink-0"><LevelCube size={84} /></div>
 
         <div className="rounded-xl px-3 py-2.5 shrink-0 text-right" style={inner}>
           <div className="flex items-center justify-end gap-1.5">
@@ -4573,13 +4538,13 @@ function LevelBar({ profile }) {
           <span className="text-[9px] tracking-[0.2em]" style={{ color: FAINT }}>
             ПРОГРЕСС УРОВНЯ
           </span>
-          <span className="text-[12px] font-mono" style={{ color: LONG }}>
+          <span className="text-[12px] font-mono" style={{ color: DIM }}>
             {Math.round(p.progress * 100)}%
           </span>
         </div>
         <div className="h-2 w-full rounded-full mt-2 overflow-hidden" style={{ backgroundColor: HAIR }}>
           <div style={{ width: `${Math.min(1, p.progress) * 100}%`, height: "100%",
-            backgroundColor: LONG, boxShadow: `0 0 8px ${shade(LONG, 0.6)}`,
+            backgroundColor: ACCENT,
             transition: "width var(--tx-slow) var(--tx-ease)" }} />
         </div>
         <div className="flex items-start justify-between gap-3 mt-2.5">
@@ -4600,7 +4565,7 @@ function LevelBar({ profile }) {
       {/* ---------------------------- нижняя ----------------------------- */}
       <div className="rounded-xl px-3.5 py-3 mt-2 flex items-center gap-3" style={inner}>
         <div className="flex items-center gap-2.5 flex-1 min-w-0">
-          <Icon name="calendar" size={17} color={LONG} />
+          <Icon name="calendar" size={17} color={DIM} />
           <div className="min-w-0">
             <div className="text-[9px] tracking-[0.15em]" style={{ color: FAINT }}>СЕРИЯ УСПЕХА</div>
             <div className="text-[13px] mt-0.5">
@@ -4610,11 +4575,11 @@ function LevelBar({ profile }) {
         </div>
         <div className="w-px self-stretch" style={{ backgroundColor: HAIR }} />
         <div className="flex items-center gap-2.5 flex-1 min-w-0">
-          <Icon name="trend" size={17} color={LONG} />
+          <Icon name="trend" size={17} color={DIM} />
           <div className="min-w-0">
             <div className="text-[9px] tracking-[0.15em]" style={{ color: FAINT }}>ЛУЧШАЯ СЕССИЯ</div>
             <div className="text-[13px] mt-0.5 font-mono"
-              style={{ color: p.bestPct > 0 ? LONG : DIM }}>
+              style={{ color: p.bestPct > 0 ? TEXT : DIM }}>
               {p.wins || p.bestPct ? signedPct(p.bestPct) : "—"}
             </div>
           </div>
@@ -4834,10 +4799,12 @@ function Lobby({ profile, account, onNew, onReset, onExit, onSignOut, onTopUp, o
 
               {/* ------------------------- статистика ------------------------ */}
               <div className="rounded-2xl px-4 py-3.5 mt-5 tx-in" style={{ ...card, ...stagger(3) }}>
-                <div className="grid grid-cols-4 gap-2">
+                {/* Столбец «ПРИБЫЛЬНЫХ» убран: на четверти ширины подпись не
+                    помещалась и обрезалась в «ПРИБЫЛЬ…», а сама цифра
+                    повторяет винрейт из профиля. Осталось три колонки. */}
+                <div className="grid grid-cols-3 gap-2">
                   {[
                     ["СЕССИЙ", String(st.count), TEXT, "flag"],
-                    ["ПРИБЫЛЬНЫХ", st.count ? String(st.wins) : "—", st.wins > 0 ? LONG : TEXT, "trend"],
                     ["ЛУЧШАЯ", st.count ? fmtSigned(st.best, 0) : "—", st.best > 0 ? LONG : TEXT, "star"],
                     ["ХУДШАЯ", st.count ? fmtSigned(st.worst, 0) : "—", st.worst < 0 ? SHORT : TEXT, "star"],
                   ].map(([label, value, color, icon]) => (
@@ -4902,7 +4869,7 @@ function Lobby({ profile, account, onNew, onReset, onExit, onSignOut, onTopUp, o
                 </span>
                 {profile.sessions.length > 0 && (
                   <button onClick={() => setProfileOpen(true)}
-                    className="text-[10px] tracking-[0.2em] tap" style={{ color: LONG }}>
+                    className="text-[10px] tracking-[0.2em] tap" style={{ color: DIM }}>
                     СМОТРЕТЬ ВСЕ
                   </button>
                 )}
@@ -5128,7 +5095,7 @@ function Matchmaking({ capital, leverage = 1, total: totalProp, onReady, onCance
           <Line left="Капитал комнаты" right={fmt(capital * total, 0)} />
           <Line left="Актив" right={CONFIG.market.assetSymbol} />
           <Line left="Режим" right={leverage > 1 ? `маржинальный · плечо x${leverage}` : "обычный"}
-            color={leverage > 1 ? LONG : TEXT} />
+            color={TEXT} />
         </div>
 
         <div className="mt-8 h-[110px]">
@@ -5192,10 +5159,10 @@ function SessionResult({ result, onDone }) {
                   style={{ backgroundColor: p.you ? RAISED : SURFACE,
                     border: `1px solid ${p.you ? "#3A3A40" : HAIR}`, ...stagger(i) }}>
                   <span className="text-[13px] font-mono w-4 shrink-0"
-                    style={{ color: i === 0 ? LONG : FAINT }}>{i + 1}</span>
+                    style={{ color: i === 0 ? GOLD : FAINT }}>{i + 1}</span>
                   {i === 0 && <Icon name="trophy" size={14} color={GOLD} />}
                   <span className="flex-1 min-w-0 text-[13px] truncate"
-                    style={{ color: p.you ? LONG : TEXT }}>
+                    style={{ color: p.you ? TEXT : DIM }}>
                     {p.you ? "вы" : (STRATEGY_LABELS[String(p.name).split("-")[0]] || p.name)}
                   </span>
                   <span className="text-[13px] font-mono shrink-0"
