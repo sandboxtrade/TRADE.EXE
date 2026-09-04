@@ -92,12 +92,11 @@ const CONFIG = {
      комнаты. */
   NPC_SIZE_SCALE: 1.6,
   /* Вес трендовых архетипов (trend, break, hunt) в размере ставки.
-     При 1.0 цена приобретает настоящий тренд: корреляция прошлого и
-     будущего хода на горизонте 40 тиков +0.117, и моментум-стратегия даёт
-     +11.2 при 90% прибыльных сессий. При 0.5 моментум падает до +1.96
-     при 70%. Ниже 0.35 перекос уходит в другую сторону: пассивное
-     держание снова начинает приносить +2.7. */
-  NPC_TREND_SIZE: 0.5,
+     Пересчитано после второй волны архетипов: их трендовая половина
+     (pullback, flow, accel, chase, squeeze, copycat) тоже входит в эту
+     ручку, поэтому прежнее 0.5 оставляло рынок контр-трендовым — моментум
+     −13, возврат к средней +10. При 1.4 обе стратегии в нуле. */
+  NPC_TREND_SIZE: 1.4,
   /* База минимального интервала между сделками бота. Итог: 15…60 тиков.
      Раньше показатель был 30 (то есть 15…450 тиков), и рынок стоял без
      движения в половине тиков — на графике это выглядело как ступеньки и
@@ -115,6 +114,11 @@ const CONFIG = {
      закрытия, 16 ликвидаций за сессию, безнадёжного долга нет. При 5%
      ликвидаций всего 3, при 8% позиция полного размера живёт 2 тика. */
   LEV_MAINTENANCE: 0.65,
+  /* Плата за заём, доля от занятой суммы за тик. Подбирается замером так,
+     чтобы вход на всю покупательную способность при плече x10 давал
+     матожидание около нуля: без платы медиана составляла +141 на взносе
+     1000 (60 сессий). */
+  LEV_BORROW_RATE: 5e-6,
 
   NPC_ORDER_FRACTION: 0.45,        // доля ботов с настоящими стоп/тейк заявками
   NPC_ORDER_FRACTION_EYES: 0.9,    // в режиме EYES смотреть должно быть на что
@@ -160,9 +164,14 @@ const CONFIG = {
      торговля на весь капитал (монетка раз в 40 тиков) давала +4.97 при
      100% прибыльных сессий — то есть выигрывала не стратегия, а сам факт
      участия против ботов.
-     При 0.5 тот же контроль даёт +0.29 при 60%. Значения ниже 0.4 ломают
-     симметрию в другую сторону: моментум уходит в −11. */
-  CLOSE_IMPACT: 0.5,
+     При 0.5 тот же контроль даёт +0.29 при 60%.
+     Пересчитано после второй волны архетипов. Новые типы, работающие от
+     УРОВНЯ (средняя окна, границы диапазона, перекос книги), сделали
+     возврат цены к своей средней предсказуемым: при 0.5 стратегия
+     «возврат к средней» давала +10.9, при 0.8 уже +22.8, при 1.0 +27.2.
+     0.3 возвращает её в +0.55 при 50% прибыльных. Ниже 0.2 симметрия
+     ломается в другую сторону: пассивный шорт уходит в −2.3. */
+  CLOSE_IMPACT: 0.3,
   /* Вес денег, уже стоящих в книге, в глубине рынка. Глубина =
      DEPTH_FRACTION * капитал комнаты + DEPTH_BOOK * сумма ставок.
      Первое слагаемое не даёт глубине обнулиться на пустом рынке, второе
@@ -253,11 +262,15 @@ function makeCurve(totalCapital, marketRef) {
 
 class Market {
   constructor({ playerCount, startingCapital, seed = 1, leverage = 1, eyes = false }) {
-    /* Плеча в модели S нет: убыток ограничен ставкой по построению, а заём
-       потребовал бы отдельной системы кредита. Поле оставлено, чтобы не
-       переписывать интерфейс, и всегда равно 1. */
-    this.leverage = 1;
-    this.maintenance = 0;
+    /* ПЛЕЧО В МОДЕЛИ S.
+       Заём берётся из общей кассы комнаты: cash участника уходит в минус
+       ровно на занятую сумму. Тождество Σcash + Σ|u| = C от этого не
+       страдает — деньги не создаются, они перекладываются. Плата за это —
+       эквити может уйти в ноль и ниже, поэтому нужен маржин-колл, которого
+       в безрычажном режиме нет по построению. */
+    this.leverage = Math.max(1, leverage || 1);
+    this.maintenance = this.leverage > 1
+      ? CONFIG.LEV_MAINTENANCE / this.leverage : 0;
     this.npcLeverage = 1;
     this.liquidations = 0;
     this.badDebt = 0;
@@ -285,6 +298,7 @@ class Market {
     this.longRealized = 0;
     this.shortRealized = 0;
     this.crowd = 0;
+    this.crowdMoney = 0;
     this.players = Array.from({ length: playerCount }, (_, i) => ({
       id: i, name: null, isHuman: false,
       cash: startingCapital,
@@ -310,6 +324,26 @@ class Market {
   get Q() { let s = 0; for (const p of this.players) s += p.u; return s; }
   /** Сумма всех ставок. Заменяет прежний escrow в снапшоте. */
   get escrow() { let s = 0; for (const p of this.players) s += Math.abs(p.u); return s; }
+
+  /**
+   * Перекос книги по ВЛОЖЕННЫМ деньгам (basis), а не по текущей ставке.
+   *
+   * Разница принципиальная. Текущая ставка каждый тик переоценивается, и
+   * выигравшая сторона механически «толстеет» — значит перекос по ставке
+   * есть просто функция недавнего хода цены. Боты, реагирующие на такой
+   * перекос, превращаются в чистых контр-трендовых с идеальным сигналом, и
+   * цена становится предсказуемой: замер показал, что тройка maker +
+   * crowdfade + sniper на перекосе по ставке давала стратегии «возврат к
+   * средней» +9.5 при 97% прибыльных сессий. На basis тот же набор ботов
+   * даёт −2.8 при 40%.
+   */
+  sidesBasis() {
+    let L = 0, S = 0;
+    for (const p of this.players) {
+      if (p.u > 0) L += p.basis; else if (p.u < 0) S += p.basis;
+    }
+    return { L, S };
+  }
 
   /** Деньги на повышение, на понижение и сколько из них реально спорит. */
   sides() {
@@ -374,15 +408,92 @@ class Market {
     return amount;
   }
 
-  /** Сколько ещё можно поставить: свободные деньги. */
-  buyingPower(i) { return Math.max(0, this.players[i].cash); }
-  maxUnitsSolo(i) { return Math.max(0, this.players[i].cash); }
+  /**
+   * ПЛАТА ЗА ЗАЁМ. Начисляется каждый тик на отрицательный cash и делится
+   * между теми, у кого cash положительный, пропорционально свободным
+   * деньгам. Деньги не создаются и не исчезают.
+   *
+   * Зачем она нужна. Маржин-колл обрезает убыток снизу (ниже уровня
+   * поддержки позиция закрывается), а прибыль сверху ничем не ограничена.
+   * Бесплатно такая асимметрия даёт положительное матожидание из воздуха:
+   * замер на 60 сессиях при плече x10 и входе на всю покупательную
+   * способность — медиана +141 при взносе 1000, то есть +14% за сессию
+   * просто за факт использования максимального плеча. Плата за заём
+   * ровно это и компенсирует, как ставка финансирования на бирже.
+   */
+  accrueBorrowCost() {
+    if (this.leverage <= 1 || CONFIG.LEV_BORROW_RATE <= 0) return;
+    let owed = 0, free = 0;
+    for (const p of this.players) {
+      if (p.cash < 0) owed += -p.cash;
+      else free += p.cash;
+    }
+    if (owed <= 0 || free <= 0) return;
+    const fee = Math.min(owed * CONFIG.LEV_BORROW_RATE, free);
+    for (const p of this.players) if (p.cash < 0) p.cash -= (-p.cash / owed) * fee;
+    for (const p of this.players) if (p.cash > 0) p.cash += (p.cash / free) * fee;
+  }
 
-  /* Плеча нет — маржин-коллов и ликвидаций тоже. Заглушки оставлены,
-     потому что интерфейс и RoomV4 их вызывают. */
-  marginLevel() { return null; }
-  liquidationEstimate() { return null; }
-  marginCalls() { return []; }
+  /** Сколько ещё можно поставить сверх уже поставленного. */
+  buyingPower(i) {
+    const pl = this.players[i];
+    return Math.max(0, this.leverage * this.equity(i) - Math.abs(pl.u));
+  }
+  maxUnitsSolo(i) { return this.buyingPower(i); }
+
+  /**
+   * Уровень маржи = эквити / размер позиции. При входе на всю
+   * покупательную способность равен 1/L, то есть 10% при плече x10.
+   * null — позиции нет или режим безрычажный.
+   */
+  marginLevel(i) {
+    if (this.leverage <= 1) return null;
+    const pl = this.players[i];
+    if (!pl || pl.u === 0) return null;
+    return this.equity(i) / Math.abs(pl.u);
+  }
+
+  /**
+   * ОЦЕНКА цены принудительного закрытия. Именно оценка, а не точная
+   * величина: в модели S ставка меняется не от цены напрямую, а от
+   * СМАТЧЕННОЙ доли хода, которая зависит от состава книги в каждом тике.
+   * Формула считает худший случай — полное совпадение сторон (доля 1).
+   */
+  liquidationEstimate(i) {
+    if (this.leverage <= 1) return null;
+    const pl = this.players[i];
+    if (!pl || pl.u === 0 || pl.basis <= 0) return null;
+    const borrowed = -Math.min(0, pl.cash);
+    if (borrowed <= 0) return null;
+    // Порог: |u| * (1 − maintenance) = занятое.
+    const target = borrowed / Math.max(1e-9, 1 - this.maintenance);
+    if (target >= Math.abs(pl.u)) return this.P;
+    const half = CONFIG.P0 * CONFIG.beta;
+    const move = half * (target / pl.basis - 1);
+    const entry = pl.entryPrice ?? this.P;
+    const price = pl.u > 0 ? entry + move : entry - move;
+    return clamp(price, this.curve.PMIN, this.curve.PMAX);
+  }
+
+  /**
+   * Маржин-колл. Позиция закрывается ЦЕЛИКОМ и в общем клиринге тика,
+   * вместе со всеми остальными заявками: отдельной цены для ликвидируемых
+   * нет, иначе они исполнялись бы лучше или хуже прочих.
+   */
+  marginCalls() {
+    if (this.leverage <= 1) return [];
+    const out = [];
+    for (const pl of this.players) {
+      if (pl.u === 0) continue;
+      const lvl = this.equity(pl.id) / Math.abs(pl.u);
+      if (lvl < this.maintenance) {
+        pl.liquidatedAt = this.tick;
+        this.liquidations++;
+        out.push({ i: pl.id, du: -pl.u, reason: "liquidation" });
+      }
+    }
+    return out;
+  }
 
   /* ------------------------------ КЛИРИНГ -------------------------------- */
   /**
@@ -417,8 +528,15 @@ class Market {
       const pl = this.players[o.i];
       const before = pl.u;
       let after = before + o.du;
-      const budget = pl.cash + Math.abs(before);
-      if (Math.abs(after) > budget) after = Math.sign(after) * budget;
+      /* Потолок ставки = плечо × эквити. При L = 1 это ровно прежнее
+         «свободные деньги плюс уже поставленное». Зависит только от
+         своего состояния, поэтому от чужих заявок и от порядка не
+         зависит. Заявки на УМЕНЬШЕНИЕ позиции не режутся никогда:
+         иначе маржин-колл не смог бы закрыть позицию, вышедшую за
+         потолок из-за переоценки. */
+      const budget = this.leverage * (pl.cash + Math.abs(before));
+      if (Math.abs(after) > Math.max(budget, Math.abs(before)))
+        after = Math.sign(after) * Math.max(budget, Math.abs(before));
       o.after = after;
       o.before = before;
       /* Поток делится на ОТКРЫТИЕ (рост риска) и ЗАКРЫТИЕ (движение к нулю).
@@ -602,8 +720,58 @@ const ARCHETYPES = {
   hunter:       { size: [0.5, 0.9], act: 0.45, stop: -0.10, take: 0.20, bias: "hunt" },
   // Ловушка: входит ПРОТИВ свежего пробоя, рассчитывая на ложный выход.
   trap:         { size: [0.4, 0.7], act: 0.35, stop: -0.12, take: 0.30, bias: "trap" },
+
+  /* ---------------------------------------------------------------------
+     ВТОРАЯ ВОЛНА АРХЕТИПОВ. До неё все боты смотрели ровно на две вещи:
+     наклон цены и экстремумы окна. Из-за этого рынок вёл себя однообразно,
+     а «толпа» была величиной, на которую никто не реагировал осмысленно.
+     Каждый тип ниже смотрит на СВОЙ признак состояния рынка.
+     --------------------------------------------------------------------- */
+
+  // Против толпы: чем сильнее перекос ДЕНЕГ в книге, тем охотнее встаёт
+  // на противоположную сторону. Не путать с herd — тот перекос копирует.
+  crowdfade:    { size: [0.4, 0.8], act: 0.30, stop: -0.12, take: 0.28, bias: "crowdfade" },
+  // Возврат к средней цене окна. В отличие от fade смотрит не на наклон,
+  // а на отклонение от собственной скользящей средней.
+  meanrev:      { size: [0.3, 0.7], act: 0.30, stop: -0.10, take: 0.15, bias: "meanrev" },
+  // Работа от границ диапазона: продаёт у верхней, покупает у нижней.
+  range:        { size: [0.3, 0.6], act: 0.35, stop: -0.08, take: 0.18, bias: "range" },
+  // Сжатие волатильности: молчит, пока рынок стоит узко, и входит по
+  // направлению первого выхода из сжатия.
+  squeeze:      { size: [0.4, 0.8], act: 0.30, stop: -0.10, take: 0.35, bias: "squeeze" },
+  // Гашение выброса: одиночная резкая свеча гасится входом против неё.
+  spike:        { size: [0.3, 0.7], act: 0.45, stop: -0.08, take: 0.12, bias: "spike" },
+  // Уравновешивающий: сознательно встаёт на сторону МЕНЬШИНСТВА книги.
+  // Без него книга держит перекос ~39%, цена системно идёт против
+  // большинства и любой участник, чья сторона не связана с толпой,
+  // зарабатывает без навыка (замер в разделе CLOSE_IMPACT).
+  maker:        { size: [0.3, 0.7], act: 0.50, stop: -0.15, take: 0.10, bias: "maker" },
+  // Подражатель: копирует сторону самого прибыльного участника рынка.
+  // Даёт обратную связь «успех притягивает деньги», которой не было.
+  copycat:      { size: [0.3, 0.6], act: 0.25, stop: -0.12, take: 0.25, bias: "copy" },
+  // Снайпер: почти всё время вне рынка, но входит редко и крупно, когда
+  // сходятся отклонение от средней и перекос книги.
+  sniper:       { size: [0.7, 1.0], act: 0.06, stop: -0.10, take: 0.30, bias: "sniper" },
+
+  /* Трендовая половина второй волны. Без неё пул перекосился в контр-тренд:
+     стратегия «возврат к средней» давала +10.6, моментум −18.5. Эти четыре
+     типа входят по направлению движения, но каждый по своему признаку. */
+
+  // Откат: направление длинного тренда, но вход на откате к средней,
+  // а не по факту движения.
+  pullback:     { size: [0.4, 0.8], act: 0.30, stop: -0.10, take: 0.30, bias: "pullback" },
+  // Поток: идёт за перекосом ДЕНЕГ в книге (денежный аналог стада).
+  flow:         { size: [0.3, 0.7], act: 0.30, stop: -0.12, take: 0.25, bias: "flow" },
+  // Ускорение: короткий импульс сильнее длинного и в ту же сторону.
+  accel:        { size: [0.4, 0.8], act: 0.35, stop: -0.10, take: 0.28, bias: "accel" },
+  // Догоняющий: входит по подтверждённому движению, когда оно держится
+  // два окна подряд. Приходит поздно и потому часто ошибается.
+  chase:        { size: [0.3, 0.6], act: 0.30, stop: -0.12, take: 0.30, bias: "chase" },
 };
 const TYPES = Object.keys(ARCHETYPES);
+/** Архетипы, играющие ПО движению. Их общий вес — ручка NPC_TREND_SIZE. */
+const TREND_BIASES = new Set(["trend", "break", "hunt", "pullback", "flow",
+  "accel", "chase", "squeeze", "copy"]);
 
 function attachNPCs(m, startIdx, count, seed, eyes = false) {
   const r = mulberry32(seed);
@@ -617,8 +785,7 @@ function attachNPCs(m, startIdx, count, seed, eyes = false) {
       // Вес быстрых контр-трендовых подобран замером: при множителе 1
       // автокорреляция +0.33, при 5 она −0.35, ноль приходится на 2.2.
       size: CONFIG.NPC_SIZE_SCALE * (spec.size[0] + r() * (spec.size[1] - spec.size[0]))
-        * (spec.bias === "trend" || spec.bias === "break" || spec.bias === "hunt"
-          ? CONFIG.NPC_TREND_SIZE : 1)
+        * (TREND_BIASES.has(spec.bias) ? CONFIG.NPC_TREND_SIZE : 1)
         * (spec.fast
           ? (spec.bias === "fade" ? CONFIG.NPC_FAST_FADE_WEIGHT : CONFIG.NPC_FAST_TREND_WEIGHT)
           : 1),
@@ -663,6 +830,38 @@ function attachNPCs(m, startIdx, count, seed, eyes = false) {
       rng: mulberry32(seed * 7919 + k + 1),
     };
   }
+}
+
+/* --- Признаки состояния рынка для новых архетипов --- */
+
+/** Средняя цена за look тиков. */
+function windowMean(history, look) {
+  const n = Math.min(look, history.length);
+  if (n <= 0) return NaN;
+  let s = 0;
+  for (let k = 0; k < n; k++) s += history[history.length - 1 - k];
+  return s / n;
+}
+
+/** Ширина диапазона окна в долях цены — мера волатильности. */
+function windowWidth(history, look, P) {
+  const { hi, lo } = windowRange(history, look);
+  if (!Number.isFinite(hi) || !Number.isFinite(lo) || P <= 0) return NaN;
+  return (hi - lo) / P;
+}
+
+/**
+ * Сторона самого прибыльного участника, кто сейчас в позиции.
+ * Считается по реализованному результату — по нему копировать честно,
+ * скрытых полей снапшота это не раскрывает: подражатель — такой же бот.
+ */
+function leaderSide(m) {
+  let best = null, bestPnL = 0;
+  for (const p of m.players) {
+    if (p.u === 0) continue;
+    if (p.realizedPnL > bestPnL) { bestPnL = p.realizedPnL; best = p; }
+  }
+  return best ? Math.sign(best.u) : 0;
 }
 
 /** Центр ближайшего крупного кластера EYES. null, если смотреть не на что. */
@@ -916,6 +1115,88 @@ function decideRaw(m, i, history) {
     const sig = n.spec.fast ? mom : slow;
     if (Math.abs(sig) < n.thresh * phThresh) return 0;
     dir = -Math.sign(sig); strength = Math.abs(sig);
+  } else if (n.spec.bias === "crowdfade") {
+    /* Перекос ДЕНЕГ, а не голов: сто участников по доллару весят меньше
+       одного крупного. Именно денежный перекос двигает цену. */
+    const cm = m.crowdMoney || 0;
+    if (Math.abs(cm) < 0.12) return 0;
+    dir = -Math.sign(cm); strength = Math.abs(cm) * 0.02;
+  } else if (n.spec.bias === "meanrev") {
+    const avg = windowMean(history, n.look);
+    if (!Number.isFinite(avg) || avg <= 0) return 0;
+    const dev = (P - avg) / avg;
+    if (Math.abs(dev) < n.thresh * phThresh * 1.5) return 0;
+    dir = -Math.sign(dev); strength = Math.abs(dev);
+  } else if (n.spec.bias === "range") {
+    const { hi, lo } = windowRange(history, n.look);
+    if (!Number.isFinite(hi) || hi <= lo) return 0;
+    const pos = (P - lo) / (hi - lo);
+    if (pos > 0.82) { dir = -1; strength = (P - lo) / P * 0.5; }
+    else if (pos < 0.18) { dir = 1; strength = (hi - P) / P * 0.5; }
+    else return 0;
+  } else if (n.spec.bias === "squeeze") {
+    /* Сжатие: ширина короткого окна заметно меньше ширины длинного.
+       Вход по направлению уже начавшегося выхода из сжатия. */
+    const wS = windowWidth(history, Math.max(5, Math.round(n.look / 4)), P);
+    const wL = windowWidth(history, n.look * 2, P);
+    if (!Number.isFinite(wS) || !Number.isFinite(wL) || wL <= 0) return 0;
+    if (wS > wL * 0.45) return 0;
+    if (Math.abs(mom) < n.thresh * 0.5) return 0;
+    dir = Math.sign(mom); strength = wL * 0.5;
+  } else if (n.spec.bias === "spike") {
+    /* Выброс: ход за 3 тика больше обычной ширины окна. Гасится входом
+       против него — это то, что на живом рынке делают маркетмейкеры. */
+    const p3 = at(3);
+    const jump = (P - p3) / Math.max(p3, 1e-9);
+    const w = windowWidth(history, n.look, P);
+    if (!Number.isFinite(w) || Math.abs(jump) < Math.max(w * 0.5, n.thresh * 2)) return 0;
+    dir = -Math.sign(jump); strength = Math.abs(jump) * 0.6;
+  } else if (n.spec.bias === "maker") {
+    const { L, S } = m.sidesBasis();
+    const skew = (L - S) / Math.max(1e-9, L + S);
+    if (Math.abs(skew) < 0.06) return 0;
+    dir = -Math.sign(skew); strength = Math.max(n.thresh, Math.abs(skew) * 0.015);
+  } else if (n.spec.bias === "copy") {
+    const side = leaderSide(m);
+    if (side === 0) return 0;
+    dir = side; strength = n.thresh * 1.6;
+  } else if (n.spec.bias === "sniper") {
+    /* Редкий крупный вход: нужно СОВПАДЕНИЕ двух независимых признаков —
+       цена далеко от средней И книга перекошена в ту же сторону. */
+    const avg = windowMean(history, n.look);
+    if (!Number.isFinite(avg) || avg <= 0) return 0;
+    const dev = (P - avg) / avg;
+    const cm = m.crowdMoney || 0;
+    if (Math.abs(dev) < n.thresh * 3 || Math.sign(dev) !== Math.sign(cm)
+        || Math.abs(cm) < 0.2) return 0;
+    dir = -Math.sign(dev); strength = Math.abs(dev) * 1.2;
+  } else if (n.spec.bias === "pullback") {
+    const avg = windowMean(history, n.look);
+    if (!Number.isFinite(avg) || avg <= 0) return 0;
+    const trend = Math.sign(slow);
+    const dev = (P - avg) / avg;
+    if (trend === 0 || Math.abs(slow) < n.thresh * phThresh) return 0;
+    if (Math.sign(dev) === trend || Math.abs(dev) < n.thresh * 0.5) return 0;
+    dir = trend; strength = Math.abs(slow);
+  } else if (n.spec.bias === "flow") {
+    const cm = m.crowdMoney || 0;
+    if (Math.abs(cm) < 0.12) return 0;
+    dir = Math.sign(cm); strength = Math.abs(cm) * 0.02;
+  } else if (n.spec.bias === "accel") {
+    const fast = mom;
+    if (Math.sign(fast) !== Math.sign(slow) || Math.sign(fast) === 0) return 0;
+    if (Math.abs(fast) < Math.abs(slow) * 0.6 || Math.abs(fast) < n.thresh * phThresh) return 0;
+    dir = Math.sign(fast); strength = Math.abs(fast);
+  } else if (n.spec.bias === "chase") {
+    const half = Math.max(2, Math.round(n.look / 2));
+    const mid = at(lag + half);
+    const older = at(lag + n.look);
+    if (!Number.isFinite(mid) || !Number.isFinite(older)) return 0;
+    const a = (P - mid) / Math.max(mid, 1e-9);
+    const b = (mid - older) / Math.max(older, 1e-9);
+    if (Math.sign(a) !== Math.sign(b) || Math.sign(a) === 0) return 0;
+    if (Math.abs(a) < n.thresh * phThresh) return 0;
+    dir = Math.sign(a); strength = Math.abs(a);
   } else {
     dir = r() < 0.5 ? 1 : -1; strength = n.thresh * 1.5;
   }
@@ -941,7 +1222,7 @@ function decideRaw(m, i, history) {
   /* --- Ожидаемая выгода против стоимости входа и выхода ---
      Собственный сдвиг цены считается той же функцией клиринга, что и в
      движке, поэтому оценка честная, а не выдуманный коэффициент.         */
-  const own = Math.max(0, pl.cash);
+  const own = Math.max(0, m.equity(i));
   // Отстал от старта — рискует смелее; вышел вперёд — бережёт прибыль.
   const drawdown = n.startEquity ? (n.startEquity - equity) / n.startEquity : 0;
   const appetite = clamp(1 + drawdown * 1.5, 0.55, 1.7);
@@ -1311,6 +1592,8 @@ class RoomV4 {
       return { executed: [], price: m.mark, warmup: true };
     }
 
+    m.accrueBorrowCost();
+
     const intents = [];
     // Маржин-колл идёт ПЕРВЫМ и в том же клиринге, что и всё остальное:
     // единая цена тика не даёт ликвидируемым проскочить раньше других.
@@ -1330,6 +1613,11 @@ class RoomV4 {
     let L = 0, S = 0;
     for (const p of m.players) { if (p.u > 0) L++; else if (p.u < 0) S++; }
     m.crowd = L + S > 0 ? (L - S) / (L + S) : 0;
+    /* Перекос ДЕНЕГ в книге. Считается один раз за тик и раздаётся всем,
+       как и m.crowd: боты не имеют права заглядывать в чужие позиции по
+       отдельности, им доступна только агрегированная величина. */
+    const sd = m.sidesBasis();
+    m.crowdMoney = sd.L + sd.S > 0 ? (sd.L - sd.S) / (sd.L + sd.S) : 0;
     this.history.push(m.mark);
     if (this.history.length > 5000) this.history.shift();
 
@@ -1361,6 +1649,11 @@ CONFIG.market = {
   playerOptions: [100, 300, 500],   // сколько всего участников в комнате
   capitalOptions: [100, 500, 1000, 10000],
   durationOptions: [1, 5, 10, 30],     // минуты
+  /* Плечо. Заём берётся из общей кассы комнаты, за него взимается плата
+     (LEV_BORROW_RATE), ниже уровня поддержки позиция закрывается
+     принудительно. Без платы максимальное плечо давало +14% за сессию
+     из воздуха — см. accrueBorrowCost. */
+  leverageOptions: [1, 3, 10],
   warmupTicks: 100,                    // 10 секунд разогрева перед открытием
   earlyExitPenalty: 0.10,              // доля остатка, если выйти раньше срока
   initialPrice: CONFIG.P0,
@@ -4524,6 +4817,31 @@ function SessionSetup({ wallet, onStart, onBack, eyes = false }) {
             );
           })}
         </div>
+
+        <div className="text-[11px] tracking-[0.15em] mt-7 mb-3" style={{ color: FAINT }}>
+          ПЛЕЧО
+        </div>
+        <div className="grid grid-cols-3 gap-2">
+          {CONFIG.market.leverageOptions.map((lv) => {
+            const active = leverage === lv;
+            return (
+              <button key={lv} onClick={() => setLeverage(lv)}
+                className="rounded-lg py-3.5 text-[13px] font-mono font-semibold tap"
+                style={{ backgroundColor: active ? TEXT : SURFACE, color: active ? BG : TEXT,
+                  border: `1px solid ${active ? TEXT : HAIR}` }}>
+                {lv === 1 ? "без плеча" : `x${lv}`}
+              </button>
+            );
+          })}
+        </div>
+        {leverage > 1 && (
+          <div className="text-[12px] mt-3 leading-relaxed" style={{ color: FAINT }}>
+            Ставка до x{leverage} от ваших денег. Заём берётся из кассы комнаты,
+            за него идёт плата остальным участникам. Если запас упадёт ниже{" "}
+            {(CONFIG.LEV_MAINTENANCE / leverage * 100).toFixed(1)}% от размера позиции,
+            она закрывается принудительно.
+          </div>
+        )}
 
         <div className="text-[11px] tracking-[0.15em] mt-7 mb-3" style={{ color: FAINT }}>
           ДЛИТЕЛЬНОСТЬ
