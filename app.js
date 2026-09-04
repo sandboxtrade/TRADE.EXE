@@ -2946,6 +2946,27 @@ const GLOBAL_CSS = `
                         50% { opacity: 1; transform: translateY(-2.5px); } }
 @keyframes tx-breathe { 0%,100% { transform: scale(1); opacity: .85; }
                         50% { transform: scale(1.06); opacity: 1; } }
+/* Живой логотип на стартовом экране: медленное всплытие с почти
+   незаметным покачиванием и дыханием яркости. Три параметра в одном
+   ключевом кадре, чтобы браузер анимировал одним слоем. */
+@keyframes tx-logo-live {
+  0%   { transform: translateY(0)      rotate(0deg)      scale(1);     opacity: .92; }
+  25%  { transform: translateY(-5px)   rotate(-0.7deg)   scale(1.015); opacity: 1;   }
+  50%  { transform: translateY(-7px)   rotate(0deg)      scale(1.02);  opacity: .97; }
+  75%  { transform: translateY(-3px)   rotate(0.7deg)    scale(1.01);  opacity: 1;   }
+  100% { transform: translateY(0)      rotate(0deg)      scale(1);     opacity: .92; }
+}
+/* Смена слайда: содержимое приходит со сдвигом по горизонтали и лёгким
+   приближением. Прежний tx-in двигал всё снизу вверх — для листания вбок
+   это читалось как «страница дёрнулась», а не «перелистнулась». */
+@keyframes tx-slide-in {
+  from { opacity: 0; transform: translateX(26px) scale(.985); }
+  to   { opacity: 1; transform: translateX(0)    scale(1);    }
+}
+@keyframes tx-slide-back {
+  from { opacity: 0; transform: translateX(-26px) scale(.985); }
+  to   { opacity: 1; transform: translateX(0)     scale(1);    }
+}
 @keyframes tx-pulsedot{ 0%,100% { transform: scale(.7); opacity: .5; }
                         50% { transform: scale(1); opacity: 1; } }
 
@@ -2964,6 +2985,9 @@ const GLOBAL_CSS = `
 .tx-layer   { transform-origin: 50px 50px; animation: tx-layer 2.8s ease-in-out infinite; }
 .tx-breathe { animation: tx-breathe 2.4s var(--tx-ease) infinite; }
 .tx-pulse-dot { animation: tx-pulsedot 1s var(--tx-ease) infinite; }
+.tx-logo-live  { animation: tx-logo-live 6.5s cubic-bezier(.45,0,.25,1) infinite; }
+.tx-slide      { animation: tx-slide-in .52s cubic-bezier(.22,.9,.28,1) both; }
+.tx-slide-back { animation: tx-slide-back .52s cubic-bezier(.22,.9,.28,1) both; }
 
 /* Нажатие: лёгкое сжатие. Работает и на тач-устройствах. */
 .tap { transition: transform var(--tx-fast) var(--tx-ease),
@@ -2975,7 +2999,8 @@ const GLOBAL_CSS = `
 
 @media (prefers-reduced-motion: reduce) {
   .tx-screen, .tx-in, .tx-fade, .tx-pop, .tx-sheet, .tx-dot, .tx-line, .tx-spin,
-  .tx-dome, .tx-twinkle, .tx-wave, .tx-float, .tx-layer { animation: none !important; }
+  .tx-dome, .tx-twinkle, .tx-wave, .tx-float, .tx-layer,
+  .tx-logo-live, .tx-slide, .tx-slide-back { animation: none !important; }
 }
 `;
 
@@ -3026,24 +3051,24 @@ const authStore = {
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/;
 
 /** Логотип: рамка-«окно» с котировками внутри. Чистый SVG, без картинок. */
-function Logo({ size = 96 }) {
+/* НАСТОЯЩИЙ ЗНАК. Раньше здесь лежала самодельная перерисовка: рамка-скобки
+   и три свечки, нарисованные вручную по памяти. Она не совпадала с
+   оригиналом ни пропорциями, ни характером. Теперь встроен сам файл —
+   белый знак на прозрачном фоне, 384x384, вырезан из исходника порогом по
+   яркости (мягкая тень отброшена) и упакован в base64, чтобы не тянуть
+   отдельный файл с диска и не ломать офлайн-режим.
+   Цветом не красится: он уже белый, оттенок задаётся через opacity. */
+const LOGO_SRC = "data:image/png;base64,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";
+
+function Logo({ size = 96, live = false }) {
   return (
-    <svg width={size} height={size} viewBox="0 0 100 100" fill="none">
-      <path d="M22 16H16v14M78 16h6v14M22 84H16V70M78 84h6V70"
-        stroke={TEXT} strokeWidth={5} strokeLinecap="square" />
-      <rect x="28" y="24" width="44" height="52" stroke={TEXT} strokeWidth={3} />
-      <g stroke={TEXT} strokeWidth={3}>
-        <path d="M38 34v32" /><path d="M50 28v44" /><path d="M62 38v24" />
-      </g>
-      <g fill={BG} stroke={TEXT} strokeWidth={3}>
-        <rect x="34" y="41" width="8" height="16" />
-        <rect x="46" y="35" width="8" height="24" />
-        <rect x="58" y="45" width="8" height="12" />
-      </g>
-      <g stroke={TEXT} strokeWidth={3} strokeLinecap="square">
-        <path d="M6 44h10M6 54h6M84 44h10M88 54h6" />
-      </g>
-    </svg>
+    <span className={live ? "tx-logo-live" : undefined}
+      style={{ display: "inline-block", width: size, height: size,
+        lineHeight: 0, willChange: live ? "transform" : undefined }}>
+      <img src={LOGO_SRC} alt="trade.exe" draggable={false}
+        style={{ width: "100%", height: "100%", display: "block",
+          userSelect: "none", WebkitUserDrag: "none" }} />
+    </span>
   );
 }
 
@@ -3086,7 +3111,7 @@ function Boot({ done }) {
           })}
         </svg>
         <div className="w-[132px] h-[132px] flex items-center justify-center">
-          <div className="tx-breathe"><Logo size={62} /></div>
+          <Logo size={62} live />
         </div>
       </div>
 
@@ -3158,6 +3183,12 @@ const FeatureIcon = ({ name }) => {
 /** Онбординг: три слайда, переключаются кнопкой и точками. */
 function Onboarding({ onSignIn, onSignUp }) {
   const [slide, setSlide] = useState(0);
+  /* Направление последнего перехода. Нужно, чтобы слайд въезжал с той
+     стороны, откуда его позвали: вперёд — справа, назад по точкам —
+     слева. Без этого возврат по точкам выглядел как повтор шага вперёд. */
+  const [back, setBack] = useState(false);
+  const go = (i) => { setBack(i < slide); setSlide(i); };
+  const anim = back ? "tx-slide-back" : "tx-slide";
   const last = slide === 2;
 
   return (
@@ -3166,8 +3197,8 @@ function Onboarding({ onSignIn, onSignUp }) {
       <div className="max-w-md w-full mx-auto flex-1 min-h-0 flex flex-col justify-center px-7">
 
         {slide === 0 && (
-          <div key="s0" className="flex flex-col items-center tx-in">
-            <Logo size={104} />
+          <div key="s0" className={`flex flex-col items-center ${anim}`}>
+            <Logo size={112} live />
             <div className="text-[30px] tracking-tight mt-5">trade.exe</div>
             <div className="text-[12px] tracking-[0.35em] text-center mt-10 leading-loose"
               style={{ color: DIM }}>
@@ -3177,13 +3208,13 @@ function Onboarding({ onSignIn, onSignUp }) {
         )}
 
         {slide === 1 && (
-          <div key="s1" className="flex flex-col items-center tx-in">
-            <Logo size={72} />
+          <div key="s1" className={`flex flex-col items-center ${anim}`}>
+            <Logo size={72} live />
             <div className="text-[22px] tracking-tight mt-3 mb-8">trade.exe</div>
             <div className="w-full">
               {FEATURES.map((f, i) => (
                 <div key={f.title}
-                  className={`flex items-start gap-5 py-6 tx-in ${i ? "border-t" : ""}`}
+                  className={`flex items-start gap-5 py-6 ${anim} ${i ? "border-t" : ""}`}
                   style={{ borderColor: HAIR, ...stagger(i + 1) }}>
                   <div className="shrink-0 mt-0.5"><FeatureIcon name={f.icon} /></div>
                   <div className="min-w-0">
@@ -3199,8 +3230,8 @@ function Onboarding({ onSignIn, onSignUp }) {
         )}
 
         {slide === 2 && (
-          <div key="s2" className="flex flex-col items-center text-center tx-in">
-            <Logo size={84} />
+          <div key="s2" className={`flex flex-col items-center text-center ${anim}`}>
+            <Logo size={84} live />
             <div className="text-[26px] tracking-tight mt-4">Готовы начать?</div>
             <div className="text-[13px] mt-4 leading-relaxed max-w-[280px]" style={{ color: DIM }}>
               Сессия — это закрытая комната на 100 участников с одинаковым взносом.
@@ -3213,14 +3244,14 @@ function Onboarding({ onSignIn, onSignUp }) {
       <div className="max-w-md w-full mx-auto px-7 pb-8 shrink-0">
         <div className="flex justify-center gap-2 mb-7">
           {[0, 1, 2].map((i) => (
-            <button key={i} onClick={() => setSlide(i)} className="rounded-full"
+            <button key={i} onClick={() => go(i)} className="rounded-full"
               style={{ width: i === slide ? 22 : 7, height: 7,
                 backgroundColor: i === slide ? TEXT : HAIR,
                 transition: "width var(--tx-mid) var(--tx-ease), background-color var(--tx-mid) var(--tx-ease)" }} />
           ))}
         </div>
 
-        <button onClick={() => (last ? onSignIn() : setSlide(slide + 1))}
+        <button onClick={() => (last ? onSignIn() : go(slide + 1))}
           className="w-full rounded-2xl py-5 text-[14px] tracking-[0.25em] font-bold tap"
           style={btnSoft(true)}>
           {last ? "ВОЙТИ" : "ДАЛЕЕ"}
