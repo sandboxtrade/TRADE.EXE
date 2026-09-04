@@ -2146,16 +2146,44 @@ function buildCandles(points, bucketMs, maxCandles) {
  * (PnL, экспозиция сторон). Всё остальное намеренно бесцветно, иначе
  * акценты перестают работать как акценты.
  */
+/* Тона приглушены осознанно. Прежние #19D67E и #FF3F52 — чистые
+   неоновые цвета: на чёрном фоне они светятся, тянут на себя всё внимание
+   и делают экран «кислотным». Новые сохраняют то же значение (зелёное
+   вверх, красное вниз), но по светлоте близки к тексту, поэтому цифра
+   читается как цифра, а не как подсветка. Белый тоже смягчён до #F2F2F5:
+   чистый #FFFFFF на чистом чёрном даёт заметный ореол на OLED. */
 const BG = "#000000";
-const SURFACE = "#0B0B0C";
-const RAISED = "#141416";
-const HAIR = "#1E1E21";
-const TEXT = "#FFFFFF";
-const DIM = "#7A7A80";
-const FAINT = "#46464C";
-const LONG = "#19D67E";
-const SHORT = "#FF3F52";
-const GOLD = "#E8B44A";   // кубки
+const SURFACE = "#0C0C0E";
+const RAISED = "#161618";
+const HAIR = "#232326";
+const TEXT = "#F2F2F5";
+const DIM = "#8A8A93";
+const FAINT = "#5A5A63";
+const LONG = "#34C77B";
+const SHORT = "#E05563";
+const GOLD = "#D2A254";   // кубки
+
+/** Затемнение цвета — для нижней точки градиента кнопки и её рамки. */
+const shade = (hex, k) => {
+  const n = parseInt(hex.slice(1), 16);
+  const f = (v) => Math.max(0, Math.min(255, Math.round(v * k)));
+  return `#${((f(n >> 16) << 16) | (f((n >> 8) & 255) << 8) | f(n & 255))
+    .toString(16).padStart(6, "0")}`;
+};
+
+/* Единый вид кнопок. Плоская заливка на чёрном читается как дырка в
+   экране, поэтому у всех кнопок мягкий вертикальный градиент и волосяная
+   светлая рамка. Свечения (boxShadow с неоновым цветом) убраны. */
+const btnAccent = (c) => ({
+  backgroundImage: `linear-gradient(180deg, ${c}, ${shade(c, 0.84)})`,
+  color: "#07120C", border: `1px solid ${shade(c, 0.78)}`,
+  boxShadow: `0 4px 14px ${shade(c, 0.5)}55`,
+});
+const btnSoft = (on) => on
+  ? { backgroundImage: "linear-gradient(180deg,#F4F4F6,#DEDEE2)", color: "#0A0A0B",
+      border: "1px solid rgba(255,255,255,0.18)" }
+  : { backgroundImage: "linear-gradient(180deg,#1A1A1C,#0E0E10)", color: TEXT,
+      border: "1px solid rgba(255,255,255,0.08)" };
 
 const fmt = (v, d = 2) => {
   const digits = Math.abs(v) >= 1000 ? 0 : d;
@@ -2809,6 +2837,7 @@ const emptyProfile = () => ({
   wallet: STARTING_WALLET,
   deposited: STARTING_WALLET,
   sessions: [],
+  trophiesSpent: 0,   // сколько кубков уже обменяно на бонусы
 });
 
 /**
@@ -3187,7 +3216,7 @@ function Onboarding({ onSignIn, onSignUp }) {
 
         <button onClick={() => (last ? onSignIn() : setSlide(slide + 1))}
           className="w-full rounded-2xl py-5 text-[14px] tracking-[0.25em] font-bold tap"
-          style={{ backgroundColor: TEXT, color: BG }}>
+          style={btnSoft(true)}>
           {last ? "ВОЙТИ" : "ДАЛЕЕ"}
         </button>
         <button onClick={last ? onSignUp : () => onSignIn()}
@@ -3321,7 +3350,7 @@ function AuthScreen({ mode, onMode, onBack, onDone }) {
 
         <button onClick={submit} disabled={busy}
           className="w-full rounded-2xl py-5 text-[14px] tracking-[0.25em] font-bold disabled:opacity-40 tap"
-          style={{ backgroundColor: TEXT, color: BG }}>
+          style={btnSoft(true)}>
           {busy ? "ПОДОЖДИТЕ…" : signup ? "СОЗДАТЬ АККАУНТ" : "ВОЙТИ"}
         </button>
 
@@ -3336,7 +3365,7 @@ function AuthScreen({ mode, onMode, onBack, onDone }) {
               {["Google", "Apple"].map((p) => (
                 <button key={p} onClick={() => setError(`Вход через ${p} появится вместе с сервером`)}
                   className="rounded-2xl py-4 text-[13px] font-semibold tap"
-                  style={{ backgroundColor: RAISED, color: TEXT, border: `1px solid ${HAIR}` }}>
+                  style={btnSoft(false)}>
                   {p}
                 </button>
               ))}
@@ -3431,6 +3460,15 @@ const Icon = ({ name, size = 16, color = TEXT }) => {
   if (name === "check") return (
     <svg {...common}><path d="M5 12l5 5 9-10" /></svg>
   );
+  if (name === "arrowUpRight") return (
+    <svg {...common}><path d="M7 17L17 7M8 7h9v9" /></svg>
+  );
+  if (name === "grid") return (
+    <svg {...common}><rect x="4" y="4" width="6.5" height="6.5" rx="1.6" />
+      <rect x="13.5" y="4" width="6.5" height="6.5" rx="1.6" />
+      <rect x="4" y="13.5" width="6.5" height="6.5" rx="1.6" />
+      <rect x="13.5" y="13.5" width="6.5" height="6.5" rx="1.6" /></svg>
+  );
   if (name === "caret") return (
     <svg {...common}><path d="M6 9l6 6 6-6" /></svg>
   );
@@ -3441,8 +3479,42 @@ const Icon = ({ name, size = 16, color = TEXT }) => {
 const IconButton = ({ name, onClick, active }) => (
   <button onClick={onClick}
     className="w-11 h-11 rounded-xl flex items-center justify-center shrink-0 tap"
-    style={{ backgroundColor: active ? TEXT : RAISED, border: `1px solid ${active ? TEXT : HAIR}` }}>
-    <Icon name={name} size={18} color={active ? BG : TEXT} />
+    style={btnSoft(active)}>
+    <Icon name={name} size={18} color={active ? "#0A0A0B" : TEXT} />
+  </button>
+);
+
+/**
+ * Круглая кнопка в шапке кошелька. Отличается от IconButton формой и
+ * размером: в шапке кнопки стоят рядом с крупным логотипом, и квадраты
+ * 44px рядом с ним выглядели мелкими.
+ */
+const RoundButton = ({ name, onClick, dot }) => (
+  <button onClick={onClick}
+    className="relative w-12 h-12 rounded-full flex items-center justify-center shrink-0 tap"
+    style={{ backgroundImage: "linear-gradient(180deg,#181819,#0D0D0E)",
+      border: "1px solid rgba(255,255,255,0.09)" }}>
+    <Icon name={name} size={19} color="#EDEDF0" />
+    {dot && (
+      <span className="absolute rounded-full"
+        style={{ width: 8, height: 8, top: 2, right: 2, backgroundColor: LONG,
+          border: `2px solid ${BG}` }} />
+    )}
+  </button>
+);
+
+/**
+ * Плитка действия кошелька: иконка сверху, подпись снизу. Мягкий
+ * вертикальный градиент и волосяная светлая рамка вместо плоской заливки —
+ * на чёрном фоне плоский прямоугольник читается как дырка, а не как кнопка.
+ */
+const WalletAction = ({ icon, label, onClick }) => (
+  <button onClick={onClick}
+    className="flex flex-col items-center justify-center gap-2 rounded-[22px] tap"
+    style={{ height: 84, backgroundImage: "linear-gradient(180deg,#1A1A1C,#0E0E10)",
+      border: "1px solid rgba(255,255,255,0.08)" }}>
+    <Icon name={icon} size={21} color="#EDEDF0" />
+    <span className="text-[12.5px]" style={{ color: "#EDEDF0" }}>{label}</span>
   </button>
 );
 
@@ -3821,8 +3893,8 @@ function ModeCard({ kind, title, text, cta, primary, onClick, disabled }) {
       <button onClick={onClick} disabled={disabled}
         className="w-full rounded-xl py-3 mt-auto text-[11px] tracking-[0.15em] font-bold tap disabled:opacity-45"
         style={primary
-          ? { backgroundColor: TEXT, color: BG }
-          : { backgroundColor: RAISED, color: TEXT, border: "1px solid #3A3A40" }}>
+          ? btnSoft(true)
+          : btnSoft(false)}>
         {cta}
       </button>
     </div>
@@ -3842,6 +3914,104 @@ const PAY_METHODS = [
   { id: "btc", label: "BTC", icon: "coin", tint: "#F7931A" },
   { id: "other", label: "Другой способ", icon: "dots", tint: DIM },
 ];
+
+/* Обмен кубков на бонус. Курс растёт со ступенью: $5 за кубок на первых
+   двух, $6.67 на третьей и $8.33 на последней. Копить выгоднее, чем
+   разменивать по одному, но и мелкий обмен не выглядит наказанием. */
+const TROPHY_TIERS = [
+  { cups: 1, bonus: 5 },
+  { cups: 2, bonus: 10 },
+  { cups: 3, bonus: 20 },
+  { cups: 12, bonus: 100 },
+];
+
+function TrophyScreen({ profile, onBack, onRedeem }) {
+  const p = profileProgress(profile);
+  const [note, setNote] = useState(null);
+
+  return (
+    <div className="w-full flex flex-col tx-screen"
+      style={{ height: "100dvh", backgroundColor: BG, color: TEXT }}>
+      <div className="max-w-md w-full mx-auto flex-1 min-h-0 overflow-y-auto no-scrollbar px-5 pt-5 pb-4">
+        <div className="flex items-center gap-4">
+          <button onClick={onBack} className="text-[20px] leading-none py-1 tap">←</button>
+          <div className="text-[11px] tracking-[0.25em]" style={{ color: DIM }}>ТРОФЕИ</div>
+        </div>
+
+        <div className="rounded-2xl px-4 py-5 mt-6 flex items-center gap-4"
+          style={{ backgroundImage: "linear-gradient(180deg,#141416,#0B0B0C)",
+            border: "1px solid rgba(255,255,255,0.07)" }}>
+          <span className="w-14 h-14 rounded-2xl flex items-center justify-center shrink-0"
+            style={{ backgroundImage: "linear-gradient(180deg,#211C10,#141210)",
+              border: `1px solid ${shade(GOLD, 0.45)}` }}>
+            <Icon name="trophy" size={26} color={GOLD} />
+          </span>
+          <div className="min-w-0">
+            <div className="text-[32px] leading-none font-semibold"
+              style={{ color: p.trophies > 0 ? GOLD : TEXT }}>{p.trophies}</div>
+            <div className="text-[12px] mt-1.5" style={{ color: DIM }}>
+              кубков на счету{p.trophiesSpent > 0 ? ` · обменяно ${p.trophiesSpent}` : ""}
+            </div>
+          </div>
+        </div>
+
+        <div className="text-[12px] mt-4 leading-relaxed" style={{ color: DIM }}>
+          Кубок даётся за каждые пять прибыльных сессий подряд.
+          {p.streak > 0 && p.toTrophy > 0
+            ? ` До следующего осталось ${p.toTrophy}.`
+            : " Серия прерывается на первой убыточной сессии."}
+        </div>
+
+        <div className="text-[10px] tracking-[0.25em] mt-7 mb-2.5" style={{ color: FAINT }}>
+          ОБМЕН НА БОНУС
+        </div>
+        <div className="flex flex-col gap-2.5">
+          {TROPHY_TIERS.map((t) => {
+            const can = p.trophies >= t.cups;
+            return (
+              <button key={t.cups} disabled={!can}
+                onClick={() => {
+                  onRedeem(t.cups, t.bonus);
+                  setNote(`${fmt(t.bonus, 0)} зачислены на баланс`);
+                }}
+                className="flex items-center gap-3.5 rounded-2xl px-4 py-3.5 text-left tap disabled:opacity-35"
+                style={btnSoft(false)}>
+                <span className="w-10 h-10 rounded-xl flex items-center justify-center shrink-0"
+                  style={{ backgroundColor: "#0C0C0E",
+                    border: `1px solid ${can ? shade(GOLD, 0.5) : "rgba(255,255,255,0.07)"}` }}>
+                  <Icon name="trophy" size={17} color={can ? GOLD : FAINT} />
+                </span>
+                <span className="flex-1 min-w-0">
+                  <span className="block text-[15px] font-semibold">
+                    {fmt(t.bonus, 0)} на баланс
+                  </span>
+                  <span className="block text-[12px] mt-0.5" style={{ color: DIM }}>
+                    {t.cups} {t.cups === 1 ? "кубок" : t.cups < 5 ? "кубка" : "кубков"}
+                    {" · "}{fmt(t.bonus / t.cups, t.bonus / t.cups % 1 ? 2 : 0)} за кубок
+                  </span>
+                </span>
+                <span className="text-[12px] shrink-0 tracking-[0.15em]"
+                  style={{ color: can ? TEXT : FAINT }}>
+                  {can ? "ОБМЕНЯТЬ" : "НЕ ХВАТАЕТ"}
+                </span>
+              </button>
+            );
+          })}
+        </div>
+
+        {note && (
+          <div className="text-[12px] text-center mt-5 leading-snug tx-pop" style={{ color: LONG }}>
+            {note}
+          </div>
+        )}
+
+        <div className="text-[11px] text-center mt-6 leading-relaxed" style={{ color: FAINT }}>
+          Бонус попадает на баланс и участвует в сессиях наравне с пополнением.
+        </div>
+      </div>
+    </div>
+  );
+}
 
 function DepositScreen({ profile, onBack, onDemoTopUp }) {
   const [amount, setAmount] = useState("100");
@@ -3931,7 +4101,7 @@ function DepositScreen({ profile, onBack, onDemoTopUp }) {
         <button disabled={!ok}
           onClick={() => setNote("Приём оплат ещё не подключён. Пока баланс можно пополнить только в демо-режиме.")}
           className="w-full rounded-2xl py-4 text-[13px] tracking-[0.25em] font-bold tap disabled:opacity-40"
-          style={{ backgroundColor: TEXT, color: BG }}>
+          style={btnSoft(true)}>
           ПОПОЛНИТЬ
         </button>
         <button disabled={!ok} onClick={() => { onDemoTopUp(value); onBack(); }}
@@ -3995,7 +4165,7 @@ function WithdrawScreen({ profile, onBack }) {
           {[25, 50, 75, 100].map((p) => (
             <button key={p} onClick={() => setAmount(String(Math.floor(profile.wallet * p / 100)))}
               className="rounded-xl py-3 text-[12px] font-mono font-semibold tap"
-              style={{ backgroundColor: RAISED, color: TEXT, border: `1px solid ${HAIR}` }}>
+              style={btnSoft(false)}>
               {p}%
             </button>
           ))}
@@ -4042,7 +4212,7 @@ function WithdrawScreen({ profile, onBack }) {
         <button disabled={!enough}
           onClick={() => setNote("Выплаты ещё не подключены. Баланс остаётся на месте.")}
           className="w-full rounded-2xl py-4 text-[13px] tracking-[0.25em] font-bold tap disabled:opacity-40"
-          style={{ backgroundColor: TEXT, color: BG }}>
+          style={btnSoft(true)}>
           ВЫВЕСТИ
         </button>
         <div className="text-[11px] text-center mt-2" style={{ color: FAINT }}>
@@ -4189,7 +4359,7 @@ function MarketsTab({ onPlay }) {
         {row("Тик", `${m.tickMs} мс`)}
         <button onClick={() => onPlay(false)}
           className="w-full rounded-xl py-3.5 mt-3 text-[12px] tracking-[0.2em] font-bold tap"
-          style={{ backgroundColor: TEXT, color: BG }}>
+          style={btnSoft(true)}>
           ИГРАТЬ
         </button>
       </div>
@@ -4305,8 +4475,14 @@ function profileProgress(profile) {
   const bestPct = list.length
     ? Math.max(...list.map((x) => (x.capital ? x.pnl / x.capital : 0))) : 0;
 
+  /* Кубки тратятся на бонусы, поэтому наружу отдаётся ОСТАТОК. Заработанные
+     за всё время (trophiesEarned) нужны отдельно — по ним считается прогресс
+     и они не уменьшаются при обмене. */
+  const spent = profile.trophiesSpent || 0;
   return { level, wins, done, need, progress: need ? done / need : 0,
-    trophies, streak, bestStreak: best, dayStreak, bestPct,
+    trophiesEarned: trophies, trophiesSpent: spent,
+    trophies: Math.max(0, trophies - spent),
+    streak, bestStreak: best, dayStreak, bestPct,
     toTrophy: (5 - (streak % 5)) % 5 || 5 };
 }
 
@@ -4403,7 +4579,7 @@ function LevelBar({ profile }) {
         </div>
         <div className="h-2 w-full rounded-full mt-2 overflow-hidden" style={{ backgroundColor: HAIR }}>
           <div style={{ width: `${Math.min(1, p.progress) * 100}%`, height: "100%",
-            backgroundColor: LONG, boxShadow: `0 0 10px ${LONG}`,
+            backgroundColor: LONG, boxShadow: `0 0 8px ${shade(LONG, 0.6)}`,
             transition: "width var(--tx-slow) var(--tx-ease)" }} />
         </div>
         <div className="flex items-start justify-between gap-3 mt-2.5">
@@ -4523,7 +4699,7 @@ function SettingsScreen({ account, onClose, onReset, onExit, onSignOut }) {
               <div className="grid grid-cols-2 gap-2 mt-3">
                 <button onClick={() => setConfirmReset(false)}
                   className="rounded-xl py-3 text-[13px] font-semibold tap"
-                  style={{ backgroundColor: RAISED, color: TEXT, border: "1px solid #3A3A40" }}>
+                  style={btnSoft(false)}>
                   Отмена
                 </button>
                 <button onClick={() => { onReset(); setConfirmReset(false); }}
@@ -4548,13 +4724,14 @@ function SettingsScreen({ account, onClose, onReset, onExit, onSignOut }) {
 }
 
 /* --------------------------------- ЛОББИ --------------------------------- */
-function Lobby({ profile, account, onNew, onReset, onExit, onSignOut, onTopUp }) {
+function Lobby({ profile, account, onNew, onReset, onExit, onSignOut, onTopUp, onRedeem }) {
   const st = profileStats(profile);
   const [tab, setTab] = useState("home");
   const [profileOpen, setProfileOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [deposit, setDeposit] = useState(false);
   const [withdraw, setWithdraw] = useState(false);
+  const [trophy, setTrophy] = useState(false);
   const [range, setRange] = useState(LOBBY_RANGES[0]);
   const [rangeOpen, setRangeOpen] = useState(false);
   const [period, setPeriod] = useState("ДЕНЬ");
@@ -4583,6 +4760,9 @@ function Lobby({ profile, account, onNew, onReset, onExit, onSignOut, onTopUp })
   if (withdraw) {
     return <WithdrawScreen profile={profile} onBack={() => setWithdraw(false)} />;
   }
+  if (trophy) {
+    return <TrophyScreen profile={profile} onBack={() => setTrophy(false)} onRedeem={onRedeem} />;
+  }
 
   return (
     <div className="w-full flex flex-col tx-screen"
@@ -4592,44 +4772,49 @@ function Lobby({ profile, account, onNew, onReset, onExit, onSignOut, onTopUp })
 
           {tab === "home" && (
             <div className="px-5 pt-5">
-              {/* --------------------------- шапка --------------------------- */}
-              <div className="flex items-start justify-between gap-3 tx-in" style={stagger(0)}>
-                <div className="min-w-0">
+              {/* ---------------------------- шапка --------------------------
+                 Логотип и название в одну строку, действия — круглыми
+                 кнопками справа. Раньше название стояло ПОД логотипом, из-за
+                 чего шапка занимала две строки и отжимала баланс вниз. */}
+              <div className="flex items-center justify-between gap-3 tx-in" style={stagger(0)}>
+                <div className="flex items-center gap-3 min-w-0">
                   <Logo size={46} />
-                  <div className="text-[19px] tracking-tight mt-1">trade.exe</div>
+                  <div className="text-[23px] font-semibold tracking-tight truncate">trade.exe</div>
                 </div>
-                <div className="flex gap-2">
-                  <IconButton name="user" active={false} onClick={() => setProfileOpen(true)} />
-                  <IconButton name="gear" active={false} onClick={() => setSettingsOpen(true)} />
+                <div className="flex gap-2.5">
+                  <RoundButton name="user" onClick={() => setProfileOpen(true)} />
+                  <RoundButton name="gear" dot onClick={() => setSettingsOpen(true)} />
                 </div>
+              </div>
+
+              {/* --------------------------- баланс ---------------------------
+                 Идёт сразу за шапкой, как в кошельках: сумма — первое, что
+                 человек ищет глазами. Блок уровня и трофеев переехал ниже
+                 кнопок, раньше он стоял между шапкой и балансом и отжимал
+                 сумму на середину экрана.
+                 Сумма набрана обычным шрифтом, а не моноширинным:
+                 моноширинный на большом кегле читается как терминал. */}
+              <div className="mt-6">
+                <div className="text-[11px] tracking-[0.18em]" style={{ color: "#6E6E76" }}>
+                  БАЛАНС
+                </div>
+                <div className="text-[38px] leading-[1.05] font-semibold tracking-tight truncate tx-pop mt-1">
+                  {fmt(profile.wallet, 0)}
+                </div>
+                <div className="text-[13px] mt-1.5"
+                  style={{ color: st.total > 0 ? LONG : st.total < 0 ? SHORT : DIM }}>
+                  {st.count === 0 ? "сессий ещё не было"
+                    : `${fmtSigned(st.total)} за ${st.count} сесс.`}
+                </div>
+              </div>
+
+              <div className="grid grid-cols-3 gap-2.5 mt-4">
+                <WalletAction icon="plus" label="Пополнить" onClick={() => setDeposit(true)} />
+                <WalletAction icon="arrowUpRight" label="Вывести" onClick={() => setWithdraw(true)} />
+                <WalletAction icon="trophy" label="Трофеи" onClick={() => setTrophy(true)} />
               </div>
 
               <LevelBar profile={profile} />
-
-              {/* -------------------------- баланс --------------------------- */}
-              <div className="text-[10px] tracking-[0.3em] mt-5" style={{ color: FAINT }}>БАЛАНС</div>
-              <div className="text-[36px] leading-none font-mono tracking-tight truncate tx-pop mt-1.5">
-                {fmt(profile.wallet, 0)}
-              </div>
-              <div className="text-[13px] font-mono mt-2"
-                style={{ color: st.total > 0 ? LONG : st.total < 0 ? SHORT : DIM }}>
-                {st.count === 0 ? "сессий ещё не было" : `${fmtSigned(st.total)} за ${st.count} сесс.`}
-              </div>
-
-              <div className="grid grid-cols-2 gap-2 mt-4">
-                <button onClick={() => setDeposit(true)}
-                  className="flex items-center justify-center gap-2 py-3 rounded-xl tap"
-                  style={{ backgroundColor: TEXT, color: BG }}>
-                  <Icon name="plus" size={14} color={BG} />
-                  <span className="text-[11px] tracking-[0.15em] font-bold">ПОПОЛНИТЬ</span>
-                </button>
-                <button onClick={() => setWithdraw(true)}
-                  className="flex items-center justify-center gap-2 py-3 rounded-xl tap"
-                  style={{ backgroundColor: RAISED, color: TEXT, border: "1px solid #3A3A40" }}>
-                  <Icon name="arrowUp" size={14} color={TEXT} />
-                  <span className="text-[11px] tracking-[0.15em] font-bold">ВЫВЕСТИ</span>
-                </button>
-              </div>
 
               {/* --------------------------- режимы -------------------------- */}
               <div className="flex items-stretch gap-2.5 mt-5 tx-in" style={stagger(1)}>
@@ -4688,7 +4873,7 @@ function Lobby({ profile, account, onNew, onReset, onExit, onSignOut, onTopUp })
                   <div className="relative shrink-0">
                     <button onClick={() => setRangeOpen((v) => !v)}
                       className="flex items-center gap-2 px-3 py-2 rounded-xl text-[11px] tracking-[0.15em] tap"
-                      style={{ backgroundColor: RAISED, color: TEXT, border: `1px solid ${HAIR}` }}>
+                      style={btnSoft(false)}>
                       {range.key}<Icon name="caret" size={13} color={DIM} />
                     </button>
                     {rangeOpen && (
@@ -4875,7 +5060,7 @@ function SessionSetup({ wallet, onStart, onBack, eyes = false }) {
       <div className="max-w-md w-full mx-auto px-6 pb-8">
         <button onClick={() => onStart(capital, leverage, minutes, eyes, players)}
           className="w-full rounded-lg py-4 text-[15px] tracking-[0.15em] font-semibold tap"
-          style={{ backgroundColor: TEXT, color: BG }}>
+          style={btnSoft(true)}>
           ВОЙТИ В {eyes ? "EYES" : "РЫНОК"} · {fmt(capital, 0)} · {minutes} МИН · {players}
         </button>
       </div>
@@ -4958,7 +5143,7 @@ function Matchmaking({ capital, leverage = 1, total: totalProp, onReady, onCance
 
       <div className="max-w-md w-full mx-auto px-6 pb-8">
         <button onClick={onCancel} className="w-full rounded-lg py-4 text-[13px] tracking-[0.15em] font-semibold tap"
-          style={{ backgroundColor: RAISED, color: TEXT, border: `1px solid #3A3A40` }}>
+          style={btnSoft(false)}>
           ОТМЕНИТЬ ПОДБОР
         </button>
       </div>
@@ -5023,7 +5208,7 @@ function SessionResult({ result, onDone }) {
       </div>
       <div className="max-w-md w-full mx-auto px-6 pb-8">
         <button onClick={onDone} className="w-full rounded-lg py-4 text-[15px] tracking-[0.15em] font-semibold"
-          style={{ backgroundColor: TEXT, color: BG }}>
+          style={btnSoft(true)}>
           В ЛОББИ
         </button>
       </div>
@@ -5229,10 +5414,18 @@ function PracticeApp({ onExit }) {
     deposited: profile.deposited + value,
   });
 
+  /* Обмен кубков. Растёт только wallet: deposited не трогаем, иначе бонус
+     попал бы в «внесено» и исказил статистику пополнений. */
+  const redeem = (cups, bonus) => persist({
+    ...profile,
+    wallet: profile.wallet + bonus,
+    trophiesSpent: (profile.trophiesSpent || 0) + cups,
+  });
+
   const signOut = async () => { await authStore.signOut(); setAccount(null); setAuthStage("intro"); };
 
   if (screen === "lobby") {
-    return <Lobby profile={profile} account={account} onSignOut={signOut} onTopUp={topUp}
+    return <Lobby profile={profile} account={account} onSignOut={signOut} onTopUp={topUp} onRedeem={redeem}
       onNew={(e) => { setPendingEyes(!!e); setScreen("setup"); }} onExit={onExit}
       onReset={() => persist({ ...profile, wallet: 0 })} />;
   }
@@ -5250,7 +5443,7 @@ function PracticeApp({ onExit }) {
     return <SessionResult result={result} onDone={() => { setResult(null); setScreen("lobby"); }} />;
   }
   if (!engineRef.current || !snapshot) {
-    return <Lobby profile={profile} account={account} onSignOut={signOut} onTopUp={topUp}
+    return <Lobby profile={profile} account={account} onSignOut={signOut} onTopUp={topUp} onRedeem={redeem}
       onNew={(e) => { setPendingEyes(!!e); setScreen("setup"); }} onExit={onExit}
       onReset={() => persist({ ...profile, wallet: 0 })} />;
   }
@@ -5394,7 +5587,7 @@ function PracticeApp({ onExit }) {
             {confirmingEnd ? (
               <div className="flex gap-2">
                 <button onClick={() => setConfirmingEnd(false)} className="flex-1 rounded-lg py-3 text-[13px] font-semibold tap"
-                  style={{ backgroundColor: RAISED, color: TEXT, border: `1px solid #3A3A40` }}>
+                  style={btnSoft(false)}>
                   Отмена
                 </button>
                 <button onClick={() => finishSession(left > 0)}
@@ -5405,7 +5598,7 @@ function PracticeApp({ onExit }) {
               </div>
             ) : (
               <button onClick={() => setConfirmingEnd(true)} className="rounded-lg py-3 text-[13px] font-semibold tap"
-                style={{ backgroundColor: RAISED, color: TEXT, border: `1px solid #3A3A40` }}>
+                style={btnSoft(false)}>
                 Завершить сессию · {fmt(left > 0
                   ? equity * (1 - CONFIG.market.earlyExitPenalty) : equity)} на баланс
               </button>
@@ -5445,7 +5638,7 @@ function PracticeApp({ onExit }) {
                   </div>
                   <button onClick={() => setSheet(sheet === "limit" ? null : "limit")}
                     className="mt-4 px-4 py-2.5 rounded-xl text-[11px] tracking-[0.15em] font-bold tap"
-                    style={{ backgroundColor: TEXT, color: BG }}>
+                    style={btnSoft(true)}>
                     ВЫСТАВИТЬ ЛИМИТКУ
                   </button>
                 </div>
@@ -5603,7 +5796,7 @@ function PracticeApp({ onExit }) {
                     {[[0.25, "25%"], [0.5, "50%"], [1, "всё"]].map(([f, l]) => (
                       <button key={l} onClick={() => doClose(f, `закрыто ${l}`)}
                         className="rounded-lg py-3 text-[13px] font-semibold tap"
-                        style={{ backgroundColor: RAISED, color: TEXT, border: `1px solid #3A3A40` }}>{l}</button>
+                        style={btnSoft(false)}>{l}</button>
                     ))}
                   </div>
                 </>
@@ -5876,7 +6069,7 @@ function PracticeApp({ onExit }) {
                             {steps.map((d) => (
                               <button key={d} disabled={!pos} onClick={() => setRisk(kind, d)}
                                 className="flex-1 py-2.5 rounded text-[12px] font-mono font-semibold disabled:opacity-25"
-                                style={{ backgroundColor: RAISED, color: TEXT, border: `1px solid #3A3A40` }}>
+                                style={btnSoft(false)}>
                                 {sign}{(d * 100).toFixed(0)}%
                               </button>
                             ))}
@@ -5911,7 +6104,7 @@ function PracticeApp({ onExit }) {
                           if (res.ok) { setLimitPrice(""); setSheet(null); say("заявка выставлена"); }
                         }}
                         className="px-4 py-2.5 rounded text-[12px] font-semibold"
-                        style={{ backgroundColor: TEXT, color: BG }}>ОК</button>
+                        style={btnSoft(true)}>ОК</button>
                     </div>
                   )}
                 </div>
@@ -5930,43 +6123,40 @@ function PracticeApp({ onExit }) {
                 <button key={f}
                   onClick={() => setSize(String(Math.round(
                     (leverage > 1 ? human.buyingPower : human.cash) * f)))}
-                  className="px-2.5 py-2.5 rounded font-mono text-[11px] font-semibold tap"
-                  style={{ backgroundColor: RAISED, color: TEXT, border: `1px solid ${HAIR}` }}>
+                  className="px-2.5 py-2.5 rounded-lg font-mono text-[11px] font-semibold tap"
+                  style={btnSoft(false)}>
                   {f * 100}%
                 </button>
               ))}
               <button onClick={() => setSheet(sheet === "risk" ? null : "risk")}
-                className="px-2.5 py-2.5 rounded text-[11px] font-semibold tap"
-                style={{ backgroundColor: sheet === "risk" ? TEXT : RAISED,
-                  color: sheet === "risk" ? BG : TEXT, border: `1px solid ${HAIR}` }}>
+                className="px-2.5 py-2.5 rounded-lg text-[11px] font-semibold tap"
+                style={btnSoft(sheet === "risk")}>
                 SL/TP
               </button>
               <button onClick={() => setSheet(sheet === "limit" ? null : "limit")}
-                className="px-2.5 py-2.5 rounded text-[11px] font-semibold tap"
-                style={{ backgroundColor: sheet === "limit" ? TEXT
-                    : !snap.tradingOpen ? LONG : RAISED,
-                  color: sheet === "limit" || !snap.tradingOpen ? BG : TEXT,
-                  border: `1px solid ${HAIR}` }}>
+                className="px-2.5 py-2.5 rounded-lg text-[11px] font-semibold tap"
+                style={sheet === "limit" || !snap.tradingOpen
+                  ? btnSoft(true) : btnSoft(false)}>
                 лимит{myLimits.length ? ` ${myLimits.length}` : ""}
               </button>
             </div>
 
             <div className="grid grid-cols-3 gap-2">
               <button disabled={!snap.tradingOpen || (notional < 1 && !(pos && pos.side === "short"))} onClick={doBuy}
-                className="rounded-lg py-2.5 disabled:opacity-25 flex flex-col items-center"
-                style={{ backgroundColor: LONG, color: BG, boxShadow: `0 0 26px ${LONG}38` }}>
+                className="rounded-xl py-2.5 disabled:opacity-25 flex flex-col items-center tap"
+                style={btnAccent(LONG)}>
                 <span className="font-bold text-[16px] tracking-wide">ЛОНГ</span>
                 <span className="text-[9px] opacity-70 leading-tight">{buyHint}</span>
               </button>
               <button disabled={!snap.tradingOpen || (notional < 1 && !(pos && pos.side === "long"))} onClick={doSell}
-                className="rounded-lg py-2.5 disabled:opacity-25 flex flex-col items-center"
-                style={{ backgroundColor: SHORT, color: BG, boxShadow: `0 0 26px ${SHORT}38` }}>
+                className="rounded-xl py-2.5 disabled:opacity-25 flex flex-col items-center tap"
+                style={btnAccent(SHORT)}>
                 <span className="font-bold text-[16px] tracking-wide">ШОРТ</span>
                 <span className="text-[9px] opacity-70 leading-tight">{sellHint}</span>
               </button>
               <button disabled={!pos || !snap.tradingOpen} onClick={() => doClose(1, "позиция закрыта")}
-                className="rounded-lg py-2.5 disabled:opacity-25 flex flex-col items-center"
-                style={{ backgroundColor: RAISED, color: TEXT, border: `1px solid #3A3A40` }}>
+                className="rounded-xl py-2.5 disabled:opacity-25 flex flex-col items-center tap"
+                style={btnSoft(false)}>
                 <span className="font-bold text-[16px] tracking-wide">ЗАКРЫТЬ</span>
                 <span className="text-[9px] leading-tight" style={{ color: pos ? pnlColor : FAINT }}>
                   {pos ? fmtSigned(pnl) : "нет позиции"}
