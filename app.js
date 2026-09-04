@@ -3773,7 +3773,7 @@ function ProfileScreen({ profile, account, onClose, onSettings }) {
         {n === 0 ? (
           <div className="rounded-2xl py-12 text-center text-[12px] mt-6"
             style={{ ...card, color: FAINT }}>
-            пока нечего разбирать — сыграйте первую сессию
+            пока нечего разбирать — проведите первую сессию
           </div>
         ) : (
           <>
@@ -4398,7 +4398,7 @@ function MarketsTab({ onPlay }) {
         <button onClick={() => onPlay(false)}
           className="w-full rounded-xl py-3.5 mt-3 text-[12px] tracking-[0.2em] font-bold tap"
           style={btnSoft(true)}>
-          ИГРАТЬ
+          ТОРГОВАТЬ
         </button>
       </div>
 
@@ -4432,7 +4432,7 @@ function MarketsTab({ onPlay }) {
         <button onClick={() => onPlay(true)}
           className="w-full rounded-xl py-3.5 mt-3 text-[12px] tracking-[0.2em] font-bold tap"
           style={btnSoft(true)}>
-          ИГРАТЬ В EYES
+          ТОРГОВАТЬ В EYES
         </button>
       </div>
     </div>
@@ -4815,12 +4815,12 @@ function Lobby({ profile, account, onNew, onReset, onExit, onSignOut, onTopUp, o
               {/* --------------------------- режимы -------------------------- */}
               <div className="flex items-stretch gap-2.5 mt-5 tx-in" style={stagger(1)}>
                 <ModeCard kind="online" title="ОНЛАЙН РЫНОК"
-                  text="Торгуй с реальными игроками в реальном времени"
-                  cta="ИГРАТЬ ОНЛАЙН" primary
+                  text="Торгуй против реальных участников в реальном времени"
+                  cta="ТОРГОВАТЬ ОНЛАЙН" primary
                   onClick={() => setNotice("Онлайн-комнаты появятся после подключения сервера. Пока доступна офлайн-практика.")} />
                 <ModeCard kind="offline" title="ОФЛАЙН ПРАКТИКА"
-                  text="Практикуй стратегии без риска для баланса"
-                  cta="ИГРАТЬ ОФЛАЙН" onClick={() => onNew(false)} disabled={!affordable} />
+                  text="Отрабатывай стратегии без риска для баланса"
+                  cta="ТОРГОВАТЬ ОФЛАЙН" onClick={() => onNew(false)} disabled={!affordable} />
               </div>
 
               {notice && (
@@ -5019,7 +5019,7 @@ function SessionSetup({ wallet, onStart, onBack, eyes = false }) {
         </div>
         {leverage > 1 && (
           <div className="text-[12px] mt-3 leading-relaxed" style={{ color: FAINT }}>
-            Ставка до x{leverage} от ваших денег. Заём берётся из кассы комнаты,
+            Позиция до x{leverage} от ваших денег. Заём берётся из кассы комнаты,
             за него идёт плата остальным участникам. Если запас упадёт ниже{" "}
             {(CONFIG.LEV_MAINTENANCE / leverage * 100).toFixed(1)}% от размера позиции,
             она закрывается принудительно.
@@ -5044,9 +5044,9 @@ function SessionSetup({ wallet, onStart, onBack, eyes = false }) {
         </div>
 
         <div className="text-[12px] mt-5 leading-relaxed" style={{ color: FAINT }}>
-          Столько же получает каждый из {players - 1} ботов. Ставка играет ровно настолько,
+          Столько же получает каждый из {players - 1} ботов. Позиция работает ровно настолько,
           насколько её перекрыла противоположная сторона, поэтому потерять
-          больше поставленного невозможно.{" "}
+          больше вложенного невозможно.{" "}
           Если выйти раньше срока, с остатка списывается{" "}
           {Math.round(CONFIG.market.earlyExitPenalty * 100)}% и поровну
           распределяется между остальными участниками.{" "} Взнос списывается с баланса,
@@ -5207,7 +5207,7 @@ function SessionResult({ result, onDone }) {
       <div className="max-w-md w-full mx-auto px-6 pb-8">
         <button onClick={onDone} className="w-full rounded-lg py-4 text-[15px] tracking-[0.15em] font-semibold"
           style={btnSoft(true)}>
-          В ЛОББИ
+          НА ГЛАВНУЮ
         </button>
       </div>
     </div>
@@ -5911,7 +5911,7 @@ function PracticeApp({ onExit }) {
                           )}
                         </div>
                         <div className="text-[11px] truncate" style={{ color: FAINT }}>
-                          {p.isHuman ? "живой игрок" : STRATEGY_LABELS[p.archetype]} · сделок {p.tradeCount}
+                          {p.isHuman ? "вы" : STRATEGY_LABELS[p.archetype]} · сделок {p.tradeCount}
                         </div>
                       </div>
                       <div className="text-right whitespace-nowrap">
