@@ -311,6 +311,7 @@ class Market {
       invested: 0, basis: 0,
       realizedPnL: 0, tradeCount: 0,
       stopLoss: null, takeProfit: null,
+      limits: [],
       liquidatedAt: null,
       npc: null,
     }));
@@ -1354,10 +1355,14 @@ function validateCommand(m, i, cmd) {
     }
     case "LIMIT": {
       const n = cmd.notional;
+      const side = String(cmd.side || "").toLowerCase();
       if (!Number.isFinite(n) || n <= 0) return { ok: false, reason: "неверный объём" };
-      if (!Number.isFinite(cmd.limitPrice)) return { ok: false, reason: "неверная цена" };
+      if (!Number.isFinite(cmd.limitPrice) || cmd.limitPrice <= 0)
+        return { ok: false, reason: "неверная цена" };
+      if (!['buy', 'sell'].includes(side)) return { ok: false, reason: "неверная сторона" };
       if (n > m.buyingPower(i) + 1e-9) return { ok: false, reason: "недостаточно средств" };
-      if ((pl.limits || []).length >= 10) return { ok: false, reason: "слишком много заявок" };
+      if ((pl.limits || []).filter((l) => !l.filled).length >= 10)
+        return { ok: false, reason: "слишком много заявок" };
       return { ok: true };
     }
     case "CANCEL_LIMIT": return { ok: true };
@@ -1394,14 +1399,20 @@ function pendingIntents(m) {
           ((long && P >= pl.takeProfit) || (!long && P <= pl.takeProfit)))
         out.push({ i: pl.id, du: -pl.u, reason: "take" });
     }
-    for (const lo of pl.limits || []) {
-      if (lo.filled) continue;
-      const hit = lo.side === "BUY" ? P <= lo.limitPrice : P >= lo.limitPrice;
-      if (hit) {
-        lo.filled = true;
-        const units = m.curve.unitsFor(lo.notional, P);
-        out.push({ i: pl.id, du: (lo.side === "BUY" ? 1 : -1) * units, reason: "limit" });
+    if (pl.limits && pl.limits.length) {
+      const keep = [];
+      for (const lo of pl.limits) {
+        if (lo.filled) continue;
+        const side = String(lo.side || "").toLowerCase();
+        const hit = side === "buy" ? P <= lo.limitPrice : P >= lo.limitPrice;
+        if (hit) {
+          const units = m.curve.unitsFor(lo.notional, P);
+          out.push({ i: pl.id, du: (side === "buy" ? 1 : -1) * units, reason: "limit" });
+        } else {
+          keep.push(lo);
+        }
       }
+      pl.limits = keep;
     }
   }
   return out;
@@ -1433,7 +1444,7 @@ function projectPlayer(m, pl, { viewer, devMode }) {
     },
   };
   if (viewer) { out.stopLoss = pl.stopLoss; out.takeProfit = pl.takeProfit;
-    out.limits = pl.limits || []; }
+    out.limits = (pl.limits || []).filter((l) => !l.filled); }
   if (devMode && pl.npc) out.debug = { type: pl.npc.type, lag: pl.npc.lag,
     size: pl.npc.size, act: pl.npc.act };
   return out;
@@ -1549,7 +1560,11 @@ class RoomV4 {
     if (!v.ok) return v;
     if (cmd.type === "PROTECT") {
       const pl = this.market.players[playerId];
-      if (cmd.clear) { pl.stopLoss = null; pl.takeProfit = null; }
+      if (cmd.clear === "sl") pl.stopLoss = null;
+      else if (cmd.clear === "tp") pl.takeProfit = null;
+      else if (cmd.clear === true || cmd.clear === "all") {
+        pl.stopLoss = null; pl.takeProfit = null;
+      }
       if (Number.isFinite(cmd.stopLoss)) pl.stopLoss = cmd.stopLoss;
       if (Number.isFinite(cmd.takeProfit)) pl.takeProfit = cmd.takeProfit;
       return { ok: true };
@@ -1557,8 +1572,9 @@ class RoomV4 {
     if (cmd.type === "LIMIT") {
       const pl = this.market.players[playerId];
       pl.limits = pl.limits || [];
+      const side = String(cmd.side).toLowerCase();
       pl.limits.push({ id: `L${pl.limits.length}-${this.market.tick}`,
-        side: cmd.side, notional: cmd.notional, limitPrice: cmd.limitPrice, filled: false });
+        side, notional: cmd.notional, limitPrice: cmd.limitPrice, filled: false });
       return { ok: true };
     }
     if (cmd.type === "CANCEL_LIMIT") {
@@ -1874,7 +1890,9 @@ class LegacyRoom {
     let buy = 0, sell = 0;
     if (result && result.executed) {
       for (const e of result.executed) {
-        const notional = Math.abs(e.du) * e.price;
+        // В MODEL-S du уже выражен в деньгах. Умножение на цену завышало
+        // объём и buy/sell pressure примерно в 100 раз.
+        const notional = Math.abs(e.du);
         if (e.du > 0) buy += notional; else sell += notional;
       }
       this._totalTrades += result.executed.length;
@@ -2048,7 +2066,9 @@ class LegacyRoom {
       totalEquity, totalCash, longExposure, shortExposure, longPlayers, shortPlayers,
       flatPlayers: participants.length - directional,
       activePositions: directional,
-      marketCap: this._room.market.mark * participants.length,
+      // В MODEL-S нет фиксированного количества токенов; корректный денежный
+      // масштаб комнаты — суммарное equity участников.
+      marketCap: totalEquity,
       longShare: directional === 0 ? 0 : longPlayers / directional,
       shortShare: directional === 0 ? 0 : shortPlayers / directional,
     };
@@ -3723,11 +3743,12 @@ function ProfileScreen({ profile, account, onClose, onSettings }) {
   const grossLoss = list.filter((x) => x.pnl < 0).reduce((a, x) => a + x.pnl, 0);
   const avgTime = n ? sum((x) => x.ticks) * CONFIG.market.tickMs / n : 0;
 
-  // Распределение мест по пятёркам процентилей: 1-20, 21-40, ...
+  // Распределение по процентилям. Размер комнаты теперь выбирается игроком,
+  // поэтому абсолютное место (например 40-е) нельзя сравнивать между 100 и 500.
   const buckets = [0, 0, 0, 0, 0];
-  const T = CONFIG.market.totalPlayers;
   list.forEach((x) => {
-    const b = Math.min(4, Math.floor(((x.rank - 1) / T) * 5));
+    const totalPlayers = Math.max(1, x.totalPlayers || CONFIG.market.totalPlayers);
+    const b = Math.min(4, Math.max(0, Math.floor(((x.rank - 1) / totalPlayers) * 5)));
     buckets[b]++;
   });
   const maxB = Math.max(1, ...buckets);
@@ -3817,7 +3838,7 @@ function ProfileScreen({ profile, account, onClose, onSettings }) {
               {buckets.map((b, i) => (
                 <div key={i} className="flex items-center gap-3 py-1.5">
                   <span className="text-[10px] font-mono w-[52px] shrink-0" style={{ color: FAINT }}>
-                    {i * (T / 5) + 1}–{(i + 1) * (T / 5)}
+                    {i * 20 + 1}–{(i + 1) * 20}%
                   </span>
                   <div className="flex-1 h-1.5 rounded-full overflow-hidden"
                     style={{ backgroundColor: HAIR }}>
@@ -3843,7 +3864,7 @@ function ProfileScreen({ profile, account, onClose, onSettings }) {
                       {fmt(x.capital, 0)} → {fmt(x.equity)}
                     </div>
                     <div className="text-[11px] mt-1 truncate" style={{ color: FAINT }}>
-                      {clock(x.ticks * CONFIG.market.tickMs)} · {x.trades} сделок · место {x.rank} из {T}
+                      {clock(x.ticks * CONFIG.market.tickMs)} · {x.trades} сделок · место {x.rank} из {x.totalPlayers || CONFIG.market.totalPlayers}
                     </div>
                   </div>
                   <span className="text-[14px] font-mono shrink-0"
@@ -4392,7 +4413,7 @@ function MarketsTab({ onPlay }) {
         <div className="my-3 rounded-xl overflow-hidden" style={{ backgroundColor: "#08080A" }}>
           <ModeArt kind="offline" />
         </div>
-        {row("Участников в комнате", m.totalPlayers)}
+        {row("Участников в комнате", m.playerOptions.join(" / "))}
         {row("Взнос", m.capitalOptions.map((c) => fmt(c, 0)).join(" · "))}
         {row("Тик", `${m.tickMs} мс`)}
         <button onClick={() => onPlay(false)}
@@ -4920,7 +4941,7 @@ function Lobby({ profile, account, onNew, onReset, onExit, onSignOut, onTopUp, o
                           {fmt(x.capital, 0)} → {fmt(x.equity)}
                         </div>
                         <div className="text-[11px] mt-1 truncate" style={{ color: FAINT }}>
-                          {clock(x.ticks * CONFIG.market.tickMs)} в рынке · место {x.rank} из {CONFIG.market.totalPlayers}
+                          {clock(x.ticks * CONFIG.market.tickMs)} в рынке · место {x.rank} из {x.totalPlayers || CONFIG.market.totalPlayers}
                         </div>
                       </div>
                       <div className="flex items-center gap-1.5 shrink-0">
@@ -5168,7 +5189,7 @@ function SessionResult({ result, onDone }) {
         <div className="mt-10">
           <Line left="Взнос" right={fmt(result.capital)} />
           <Line left="Итоговый капитал" right={fmt(result.equity)} />
-          <Line left="Место в рейтинге" right={`${result.rank} из ${CONFIG.market.totalPlayers}`} />
+          <Line left="Место в рейтинге" right={`${result.rank} из ${result.totalPlayers || CONFIG.market.totalPlayers}`} />
           <Line left="Сделок" right={String(result.trades)} />
           <Line left="Время в рынке" right={clock(result.ticks * CONFIG.market.tickMs)} />
           <Line left="Цена на выходе" right={fmt(result.price)} />
@@ -5229,9 +5250,8 @@ function PracticeApp({ onExit }) {
   const [pending, setPending] = useState(null);   // взнос и режим, пока идёт подбор
   const [leverage, setLeverage] = useState(1);
   const [pendingEyes, setPendingEyes] = useState(false);
-  const [deadline, setDeadline] = useState(null);   // конец сессии, мс epoch
+  const [sessionDurationTicks, setSessionDurationTicks] = useState(null);
   const [left, setLeft] = useState(0);
-  const [minutes, setMinutes] = useState(CONFIG.market.durationOptions[1]);
   const engineRef = useRef(null);
 
   const [snapshot, setSnapshot] = useState(null);
@@ -5253,8 +5273,6 @@ function PracticeApp({ onExit }) {
   const [eyesFilterName, setEyesFilterName] = useState("ВСЁ");
   const [eyesView, setEyesView] = useState("LIVE");
 
-  const speedRef = useRef(1);
-  speedRef.current = speed;
   const toastTimer = useRef(null);
 
   const [boot, setBoot] = useState(0);
@@ -5286,27 +5304,23 @@ function PracticeApp({ onExit }) {
   useEffect(() => () => clearTimeout(toastTimer.current), []);
 
   useEffect(() => {
-    if (screen !== "game" || !session) return undefined;
+    if (screen !== "game" || !session || !sessionDurationTicks) return undefined;
     const transport = engineRef.current;
     if (!transport) return undefined;
-    transport.start((next) => setSnapshot(next));
+    transport.start((next) => {
+      setSnapshot(next);
+      // Таймер идёт по времени СИМУЛЯЦИИ, а не по Date.now(). Поэтому 2x/5x/10x
+      // ускоряют и рынок, и таймер одинаково; раньше боты доходили до конца
+      // сессии раньше таймера и рынок мог оставаться пустым несколько минут.
+      const activeTicks = Math.max(0, next.tick - CONFIG.market.warmupTicks);
+      const remainingTicks = Math.max(0, sessionDurationTicks - activeTicks);
+      setLeft(remainingTicks * CONFIG.market.tickMs);
+      if (remainingTicks <= 0) finishSession(false);
+    });
     return () => transport.stop();
-  }, [screen, session]);
+  }, [screen, session, sessionDurationTicks]);
 
   useEffect(() => { engineRef.current?.setSpeed(speed); }, [speed]);
-
-  // Обратный отсчёт. По истечении срока сессия закрывается сама, без штрафа.
-  useEffect(() => {
-    if (!deadline) { setLeft(0); return; }
-    const tick = () => {
-      const ms = deadline - Date.now();
-      setLeft(Math.max(0, ms));
-      if (ms <= 0) finishSession(false);
-    };
-    tick();
-    const id = setInterval(tick, 250);
-    return () => clearInterval(id);
-  }, [deadline]);
 
   const persist = (next) => { setProfile(next); saveProfile(next); };
 
@@ -5320,22 +5334,22 @@ function PracticeApp({ onExit }) {
   const startSession = ({ capital, leverage, minutes, eyes, players }) => {
     // Приложение больше не создаёт движок напрямую — только транспорт.
     // При переезде на сервер здесь меняется одна строка на RemoteTransport.
+    const durationTicks = Math.round(minutes * 60000 / CONFIG.market.tickMs);
     engineRef.current = new LocalTransport({
       startingCapital: capital, leverage, eyes,
       playerCount: players || CONFIG.market.playerOptions[0],
       // Боты видят тот же таймер, что и игрок: старт, середина и концовка
       // сессии влияют на их поведение.
-      durationTicks: Math.round(minutes * 60000 / CONFIG.market.tickMs),
+      durationTicks,
     });
     setSize(String(Math.round(capital * 0.3)));
     setPaused(false);
     setTab("Рынок");
     setSession(capital);
     setLeverage(leverage);
-    // Таймер сессии стартует после разогрева, иначе десять секунд ожидания
-    // съедали бы оплаченное время.
-    setDeadline(Date.now() + CONFIG.market.warmupTicks * CONFIG.market.tickMs
-      + minutes * 60000);
+    // Таймер сессии стартует после разогрева и считается в тиках движка.
+    setSessionDurationTicks(durationTicks);
+    setLeft(durationTicks * CONFIG.market.tickMs);
     setScreen("game");
     persist({ ...profile, wallet: profile.wallet - capital });
     setPending(null);
@@ -5362,8 +5376,11 @@ function PracticeApp({ onExit }) {
       equity: snap.you.equity,
       pnl: snap.you.equity - session,
       rank: snap.rank,
+      totalPlayers: snap.totalPlayers,
       trades: snap.you.tradeCount,
-      ticks: snap.tick,
+      // Время сессии начинается после разогрева; раньше в статистику
+      // ошибочно попадали лишние 10 секунд warmup.
+      ticks: Math.max(0, snap.tick - CONFIG.market.warmupTicks),
       price: snap.price,
       at: Date.now(),        // отметка времени для кривой "дневная динамика"
       leverage,
@@ -5387,7 +5404,8 @@ function PracticeApp({ onExit }) {
     engineRef.current = null;
     setSnapshot(null);
     setSession(null);
-    setDeadline(null);
+    setSessionDurationTicks(null);
+    setLeft(0);
     setShowSettings(false);
     setResult(record);
     setScreen("result");
@@ -5488,12 +5506,18 @@ function PracticeApp({ onExit }) {
   const sellHint = pos && pos.side === "long" ? "закроет Long" : "открыть / увеличить Short";
 
   const doBuy = async () => {
-    const res = await send({ type: "TRADE", action: "BUY", notional, reason: "ручная покупка" });
-    if (res.ok) say(pos && pos.side === "short" ? "закрываем Short" : `покупка ${fmt(notional, 0)}`, LONG);
+    const closingShort = pos && pos.side === "short";
+    const res = closingShort
+      ? await send({ type: "TRADE", action: "CLOSE", fraction: 1, reason: "закрытие Short кнопкой Long" })
+      : await send({ type: "TRADE", action: "BUY", notional, reason: "ручная покупка" });
+    if (res.ok) say(closingShort ? "закрываем Short" : `покупка ${fmt(notional, 0)}`, LONG);
   };
   const doSell = async () => {
-    const res = await send({ type: "TRADE", action: "SELL", notional, reason: "ручная продажа" });
-    if (res.ok) say(pos && pos.side === "long" ? "закрываем Long" : `продажа ${fmt(notional, 0)}`, SHORT);
+    const closingLong = pos && pos.side === "long";
+    const res = closingLong
+      ? await send({ type: "TRADE", action: "CLOSE", fraction: 1, reason: "закрытие Long кнопкой Short" })
+      : await send({ type: "TRADE", action: "SELL", notional, reason: "ручная продажа" });
+    if (res.ok) say(closingLong ? "закрываем Long" : `продажа ${fmt(notional, 0)}`, SHORT);
   };
   const doClose = async (fraction, label) => {
     const res = await send({ type: "TRADE", action: "CLOSE", fraction, reason: "ручное закрытие" });
@@ -5552,7 +5576,7 @@ function PracticeApp({ onExit }) {
             )}
           </span>
           <div className="flex items-center gap-4">
-            {deadline && (
+            {sessionDurationTicks && (
               <span className="text-[12px] font-mono tabular-nums"
                 style={{ color: left < 30000 ? SHORT : left < 60000 ? TEXT : DIM }}>
                 {clock(left)}
@@ -5677,7 +5701,7 @@ function PracticeApp({ onExit }) {
                 </div>
                 <div className="text-right">
                   <div className="text-[11px] font-mono" style={{ color: FAINT }}>
-                    {stats.activePositions} / {CONFIG.market.totalPlayers} в рынке
+                    {stats.activePositions} / {snap.totalPlayers} в рынке
                   </div>
                 </div>
               </div>
