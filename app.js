@@ -2507,7 +2507,7 @@ function Chart({ state, timeframe, mode, entryPrice, stopLoss, takeProfit,
           strokeDasharray={dash} opacity={strong ? 1 : 0.75} />
         <rect x={2} y={toY(value) - 13} width={label.length * 5.6 + 8} height={12} rx={2}
           fill={BG} opacity={0.75} />
-        <text x={6} y={toY(value) - 4} fill={color} fontSize={9} fontFamily="monospace">
+        <text x={6} y={toY(value) - 4} fill={color} fontSize={9} fontFamily="DotumDigits, Neogurotesuku, monospace">
           {label}
         </text>
         {strong && (
@@ -2515,7 +2515,7 @@ function Chart({ state, timeframe, mode, entryPrice, stopLoss, takeProfit,
             <rect x={plotW + 1} y={toY(value) - 8} width={AXIS_W - 2} height={16} rx={3}
               fill={BG} stroke={color} strokeWidth={1} />
             <text x={plotW + AXIS_W / 2} y={toY(value) + 4} textAnchor="middle"
-              fill={color} fontSize={10} fontFamily="monospace">
+              fill={color} fontSize={10} fontFamily="DotumDigits, Neogurotesuku, monospace">
               {value.toFixed(2)}
             </text>
           </>
@@ -2545,7 +2545,7 @@ function Chart({ state, timeframe, mode, entryPrice, stopLoss, takeProfit,
           <g key={p}>
             <line x1={0} x2={plotW} y1={toY(p)} y2={toY(p)} stroke={HAIR} strokeWidth={1} />
             <text x={plotW + 6} y={toY(p) + 3.5} fill={FAINT} fontSize={10}
-              fontFamily="monospace">{p.toFixed(digits)}</text>
+              fontFamily="DotumDigits, Neogurotesuku, monospace">{p.toFixed(digits)}</text>
           </g>
         ))}
 
@@ -2582,7 +2582,7 @@ function Chart({ state, timeframe, mode, entryPrice, stopLoss, takeProfit,
                   strokeWidth={0.8} opacity={0.5} strokeDasharray={thin ? "2 4" : ""} />
                 <line x1={0} x2={plotW} y1={c.y2} y2={c.y2} stroke={color}
                   strokeWidth={0.8} opacity={0.5} strokeDasharray={thin ? "2 4" : ""} />
-                <text x={5} y={c.y1 + h / 2 + 3} fontSize={9} fontFamily="monospace"
+                <text x={5} y={c.y1 + h / 2 + 3} fontSize={9} fontFamily="DotumDigits, Neogurotesuku, monospace"
                   fill={color} opacity={0.95}>
                   {c.type} {c.side} · {fmt(c.volume, 0)} · {c.participants}
                 </text>
@@ -2659,7 +2659,7 @@ function Chart({ state, timeframe, mode, entryPrice, stopLoss, takeProfit,
         <rect x={plotW + 1} y={priceY - 9} width={AXIS_W - 2} height={18} rx={3}
           fill={up ? LONG : SHORT} />
         <text x={plotW + AXIS_W / 2} y={priceY + 4} textAnchor="middle" fill={BG}
-          fontSize={11} fontFamily="monospace" fontWeight="700">
+          fontSize={11} fontFamily="DotumDigits, Neogurotesuku, monospace" fontWeight="700">
           {state.price.toFixed(2)}
         </text>
       </svg>
@@ -3666,14 +3666,14 @@ function EquityCurve({ sessions, rangeMs }) {
           <line x1={0} x2={W - PADR} y1={y(v)} y2={y(v)}
             stroke={HAIR} strokeWidth={0.7} strokeDasharray="2 4" />
           <text x={W - PADR + 7} y={y(v) + 3.2} fill={FAINT} fontSize={8.5}
-            fontFamily="monospace">{fmtSigned(v, 0)}</text>
+            fontFamily="DotumDigits, Neogurotesuku, monospace">{fmtSigned(v, 0)}</text>
         </g>
       ))}
 
       {/* нулевая линия — опора для взгляда */}
       <line x1={0} x2={W - PADR} y1={zeroY} y2={zeroY} stroke={DIM} strokeWidth={0.9} />
       <text x={W - PADR + 7} y={zeroY + 3.2} fill={DIM} fontSize={8.5}
-        fontFamily="monospace">$0</text>
+        fontFamily="DotumDigits, Neogurotesuku, monospace">$0</text>
 
       <g className="tx-fade">
         <path d={area} fill={`url(#${uid}g)`} clipPath={`url(#${uid}up)`} />
@@ -3693,8 +3693,8 @@ function EquityCurve({ sessions, rangeMs }) {
       <circle cx={x(t1)} cy={y(acc)} r={5.5} fill={up ? ACCENT : SHORT} opacity={0.16} />
       <circle cx={x(t1)} cy={y(acc)} r={2.8} fill={up ? ACCENT : SHORT} />
 
-      <text x={0} y={H - 4} fill={FAINT} fontSize={8.5} fontFamily="monospace">{hhmm(t0)}</text>
-      <text x={x(t1)} y={H - 4} fill={FAINT} fontSize={8.5} fontFamily="monospace"
+      <text x={0} y={H - 4} fill={FAINT} fontSize={8.5} fontFamily="DotumDigits, Neogurotesuku, monospace">{hhmm(t0)}</text>
+      <text x={x(t1)} y={H - 4} fill={FAINT} fontSize={8.5} fontFamily="DotumDigits, Neogurotesuku, monospace"
         textAnchor="end">{hhmm(t1)}</text>
     </svg>
   );
