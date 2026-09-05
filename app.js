@@ -121,7 +121,6 @@ const CONFIG = {
   LEV_BORROW_RATE: 5e-6,
 
   NPC_ORDER_FRACTION: 0.45,        // доля ботов с настоящими стоп/тейк заявками
-  NPC_ORDER_FRACTION_EYES: 0.9,    // в режиме EYES смотреть должно быть на что
 
   // --- «торговать, чтобы заработать», а не ради оборота ---
   // Ожидаемое движение должно перекрывать стоимость входа и выхода хотя бы
@@ -274,11 +273,9 @@ class Market {
     this.npcLeverage = 1;
     this.liquidations = 0;
     this.badDebt = 0;
-    this.eyesMode = eyes;
     this.totalTicks = null;
     this.phase = null;
     this.warmupTicks = 0;
-    this.eyesClusters = null;
     this.startingCapital = startingCapital;
     this.C = playerCount * startingCapital;
     this.seed = seed;
@@ -422,33 +419,47 @@ class Market {
    * просто за факт использования максимального плеча. Плата за заём
    * ровно это и компенсирует, как ставка финансирования на бирже.
    */
+  /** Плечо конкретного участника. NPC всегда торгуют без займа. */
+  playerLeverage(i) {
+    const pl = this.players[i];
+    if (!pl) return 1;
+    return pl.npc ? this.npcLeverage : this.leverage;
+  }
+
   accrueBorrowCost() {
     if (this.leverage <= 1 || CONFIG.LEV_BORROW_RATE <= 0) return;
     let owed = 0, free = 0;
+    /* Заём разрешён только реальным участникам. NPC работают с x1, поэтому
+       пассивный игрок больше не получает "процент" от случайных долгов ботов. */
     for (const p of this.players) {
-      if (p.cash < 0) owed += -p.cash;
-      else free += p.cash;
+      const lev = this.playerLeverage(p.id);
+      if (lev > 1 && p.cash < 0) owed += -p.cash;
+      else if (p.cash > 0) free += p.cash;
     }
     if (owed <= 0 || free <= 0) return;
     const fee = Math.min(owed * CONFIG.LEV_BORROW_RATE, free);
-    for (const p of this.players) if (p.cash < 0) p.cash -= (-p.cash / owed) * fee;
+    for (const p of this.players) {
+      if (this.playerLeverage(p.id) > 1 && p.cash < 0)
+        p.cash -= (-p.cash / owed) * fee;
+    }
     for (const p of this.players) if (p.cash > 0) p.cash += (p.cash / free) * fee;
   }
 
   /** Сколько ещё можно поставить сверх уже поставленного. */
   buyingPower(i) {
     const pl = this.players[i];
-    return Math.max(0, this.leverage * this.equity(i) - Math.abs(pl.u));
+    const lev = this.playerLeverage(i);
+    return Math.max(0, lev * this.equity(i) - Math.abs(pl.u));
   }
   maxUnitsSolo(i) { return this.buyingPower(i); }
 
   /**
    * Уровень маржи = эквити / размер позиции. При входе на всю
    * покупательную способность равен 1/L, то есть 10% при плече x10.
-   * null — позиции нет или режим безрычажный.
+   * null — позиции нет или участник торгует без плеча.
    */
   marginLevel(i) {
-    if (this.leverage <= 1) return null;
+    if (this.playerLeverage(i) <= 1) return null;
     const pl = this.players[i];
     if (!pl || pl.u === 0) return null;
     return this.equity(i) / Math.abs(pl.u);
@@ -461,7 +472,7 @@ class Market {
    * Формула считает худший случай — полное совпадение сторон (доля 1).
    */
   liquidationEstimate(i) {
-    if (this.leverage <= 1) return null;
+    if (this.playerLeverage(i) <= 1) return null;
     const pl = this.players[i];
     if (!pl || pl.u === 0 || pl.basis <= 0) return null;
     const borrowed = -Math.min(0, pl.cash);
@@ -485,13 +496,10 @@ class Market {
     if (this.leverage <= 1) return [];
     const out = [];
     for (const pl of this.players) {
-      if (pl.u === 0) continue;
+      if (pl.u === 0 || this.playerLeverage(pl.id) <= 1) continue;
       const lvl = this.equity(pl.id) / Math.abs(pl.u);
-      if (lvl < this.maintenance) {
-        pl.liquidatedAt = this.tick;
-        this.liquidations++;
+      if (lvl < this.maintenance)
         out.push({ i: pl.id, du: -pl.u, reason: "liquidation" });
-      }
     }
     return out;
   }
@@ -505,15 +513,32 @@ class Market {
    * потом одна переоценка. Проверено: перестановка даёт расхождение 0.
    */
   clear(orders) {
-    const PRIORITY = { liquidation: 3, stop: 2, take: 1 };
+    /* Защитные действия НЕ суммируются с обычными. Если на одном тике
+       сработал margin-call/stop/take/leave, он полностью подавляет рыночные,
+       лимитные и NPC-намерения этого же участника. Иначе CLOSE мог случайно
+       превратиться в разворот позиции. */
+    const PRIORITY = { leave: 5, liquidation: 4, stop: 3, take: 3 };
     const merged = new Map();
     for (const o of orders) {
       if (!Number.isFinite(o.du) || o.du === 0) continue;
-      const cur = merged.get(o.i);
       const reason = o.reason || null;
-      if (!cur) { merged.set(o.i, { i: o.i, du: o.du, reason }); continue; }
+      const prio = PRIORITY[reason] || 0;
+      const source = { du: o.du, reason, orderId: o.orderId || null };
+      const cur = merged.get(o.i);
+      if (!cur) {
+        merged.set(o.i, { i: o.i, du: o.du, reason, priority: prio, sources: [source] });
+        continue;
+      }
+      if (prio > cur.priority) {
+        cur.du = o.du; cur.reason = reason; cur.priority = prio; cur.sources = [source];
+        continue;
+      }
+      if (prio < cur.priority) continue;
+      /* Для защитного приоритета достаточно одного полного закрытия.
+         Для обычных заявок сохраняем прежнюю симметрию: они неттятся. */
+      if (prio > 0) continue;
       cur.du += o.du;
-      if ((PRIORITY[reason] || 0) > (PRIORITY[cur.reason] || 0)) cur.reason = reason;
+      cur.sources.push(source);
     }
     const work = [...merged.values()].filter((o) => Math.abs(o.du) > 1e-12);
     if (!work.length) { this.tick++; return { price: this.P, executed: [], iters: 0 }; }
@@ -535,7 +560,7 @@ class Market {
          зависит. Заявки на УМЕНЬШЕНИЕ позиции не режутся никогда:
          иначе маржин-колл не смог бы закрыть позицию, вышедшую за
          потолок из-за переоценки. */
-      const budget = this.leverage * (pl.cash + Math.abs(before));
+      const budget = this.playerLeverage(pl.id) * (pl.cash + Math.abs(before));
       if (Math.abs(after) > Math.max(budget, Math.abs(before)))
         after = Math.sign(after) * Math.max(budget, Math.abs(before));
       o.after = after;
@@ -613,7 +638,23 @@ class Market {
       }
       pl.u = after;
       pl.tradeCount++;
-      executed.push({ i: o.i, du: after - before, price: Pn, reason: o.reason });
+      if (o.reason === "liquidation") {
+        pl.liquidatedAt = this.tick;
+        this.liquidations++;
+        pl.limits = [];
+      } else if (o.reason === "leave") {
+        pl.limits = [];
+      }
+      const actualDu = after - before;
+      /* Источники нужны для корректного partial fill лимиток. Если общий
+         du был обрезан по покупательной способности, каждый источник
+         получает ту же долю исполнения; остаток лимитки остаётся активным. */
+      const ratio = Math.abs(o.du) > 1e-12 ? actualDu / o.du : 0;
+      const fills = (o.sources || []).map((src) => ({
+        reason: src.reason, orderId: src.orderId,
+        du: src.du * ratio,
+      }));
+      executed.push({ i: o.i, du: actualDu, price: Pn, reason: o.reason, fills });
     }
     this.tick++;
     return { price: Pn, executed, iters: 0 };
@@ -649,11 +690,10 @@ function checkInvariants(m, ctx = {}) {
   if (price < m.curve.PMIN - TN || price > m.curve.PMAX + TN)
     errs.push(`price вне [${m.curve.PMIN}, ${m.curve.PMAX}]: ${price}`);
 
-  // При плече кэш уходит в минус (это заём), а эквити может кратковременно
-  // стать отрицательным до срабатывания маржин-колла. Тождество Σequity = C
-  // от этого не страдает и проверяется выше, поэтому здесь порог мягче.
-  const lev = m.leverage > 1;
+  // При плече кэш уходит в минус только у реального участника. NPC всегда
+  // x1, поэтому отрицательный cash у бота — уже ошибка движка.
   for (const p of m.players) {
+    const lev = m.playerLeverage(p.id) > 1;
     if (!lev && p.cash < -TN) errs.push(`cash < 0 у #${p.id}: ${p.cash}`);
     if (!lev && m.equity(p.id) < -TN) errs.push(`equity < 0 у #${p.id}: ${m.equity(p.id)}`);
     if (lev && m.equity(p.id) < -m.startingCapital * 4)
@@ -811,7 +851,7 @@ function attachNPCs(m, startIdx, count, seed, eyes = false) {
       // Часть ботов выставляет НАСТОЯЩИЕ заявки стоп/тейк, а не проверяет
       // пороги у себя внутри. Их срабатывание идёт через pendingIntents в
       // общем клиринге, поэтому массовый вынос стопов виден как каскад.
-      usesOrders: r() < (eyes ? CONFIG.NPC_ORDER_FRACTION_EYES : CONFIG.NPC_ORDER_FRACTION),
+      usesOrders: r() < CONFIG.NPC_ORDER_FRACTION,
       // Терпение: сколько тиков бот выжидает после выхода. После убытка
       // пауза длиннее — как у человека, который «отходит от сделки».
       patience: 6 + Math.floor(r() * 40),
@@ -865,62 +905,8 @@ function leaderSide(m) {
   return best ? Math.sign(best.u) : 0;
 }
 
-/** Центр ближайшего крупного кластера EYES. null, если смотреть не на что. */
-function nearestCluster(m, P) {
-  const list = m.eyesClusters;
-  if (!list || !list.length) return null;
-  let best = null, bestScore = -Infinity;
-  for (const c of list) {
-    const mid = (c.min + c.max) / 2;
-    const dist = Math.abs(mid - P) / P;
-    if (dist < 1e-4 || dist > 0.04) continue;
-    const score = c.volume / (1 + dist * 400);
-    if (score > bestScore) { bestScore = score; best = mid; }
-  }
-  return best;
-}
-
-/**
- * ОТКЛЮЧЕНО. Раньше во время разогрева боты копили лимитные заявки, и в
- * первом же тике после открытия все они срабатывали одним клирингом: на
- * графике это давало одну гигантскую свечу на весь экран, из-за которой
- * прыгала вертикальная шкала и рынок выглядел сломанным.
- * Теперь до открытия не происходит вообще ничего: цена стоит, заявок нет,
- * и в момент старта игрок и все боты начинают торговать одновременно.
- * Функция оставлена пустой, чтобы не менять вызов в RoomV4.
- */
-function npcWarmupOrders() { return; }
-function npcWarmupOrdersDisabled(m) {
-  const P = m.mark;
-  for (const pl of m.players) {
-    const n = pl.npc;
-    if (!n) continue;
-    const r = n.rng;
-    // За все 100 тиков разогрева бот в среднем оставляет одну-две заявки.
-    if (r() > 0.02 * n.act * 10) continue;
-    pl.limits = pl.limits || [];
-    if (pl.limits.filter((l) => !l.filled).length >= 2) continue;
-
-    const dir = n.spec.bias === "fade" ? (r() < 0.5 ? 1 : -1)
-      : n.spec.bias === "trend" ? (r() < 0.55 ? 1 : -1)
-      : (r() < 0.5 ? 1 : -1);
-    /* Часть заявок агрессивные: они выставлены по ту сторону цены и потому
-       исполняются в первом же клиринге после открытия — это и есть стартовый
-       аукцион. Остальные лежат в стакане и подбираются, когда цена до них
-       доходит. Чем активнее архетип, тем ближе к цене он готов встать. */
-    const aggressive = r() < 0.3;
-    const spread = (0.001 + r() * 0.02) * (1.4 - n.act);
-    const price = aggressive
-      ? (dir > 0 ? P * (1 + spread) : P * (1 - spread))
-      : (dir > 0 ? P * (1 - spread) : P * (1 + spread));
-    const budget = Math.max(0, pl.cash) * n.size * 0.6 * m.npcLeverage;
-    if (budget < m.startingCapital * 0.01) continue;
-    pl.limits.push({
-      side: dir > 0 ? "BUY" : "SELL",
-      limitPrice: price, notional: budget, filled: false,
-    });
-  }
-}
+/** Во время предторгового отсчёта никаких заявок не создаётся.
+ * Рынок полностью закрыт до момента открытия. */
 
 /** Экстремумы окна: нужны пробойщикам. */
 function windowRange(history, look) {
@@ -946,32 +932,32 @@ function windowRange(history, look) {
  *    выигрывающая сторона наращивает размер, и движения получают инерцию;
  *  - появились пробойщики и стадо, которые усиливают выход из коридора.
  */
-function decideRaw(m, i, history) {
+function syncNPCState(m, i) {
   const pl = m.players[i], n = pl.npc;
-  if (!n) return 0;
+  if (!n) return;
   if (n.startEquity === null) n.startEquity = m.equity(i);
-  /* Сброс счётчика удержания — ТОЛЬКО по собственной сделке бота.
-     Раньше сравнивался pl.u, но в модели S ставка переоценивается КАЖДЫЙ
-     тик, поэтому условие срабатывало всегда: n.since обнулялся ежетиково,
-     а выход по времени (n.hold) и выход «движение выдохлось» не
-     срабатывали ни разу. basis меняется только при сделке. */
+
+  /* Синхронизация состояния выполняется один раз за тик ДО торгового
+     решения. Это bookkeeping, а не сделка: он не должен откатываться,
+     даже если minGap запретит очередное действие. */
   const basisChanged = Math.abs(pl.basis - (n.lastBasis ?? 0)) > 1e-9;
   if (basisChanged || (pl.u === 0) !== (n.lastU === 0)
       || Math.sign(pl.u) !== Math.sign(n.lastU)) {
-    // Позиция могла закрыться НЕ решением бота: сработал его же стоп или
-    // тейк через общий клиринг, либо пришёл маржин-колл. Раньше в этом
-    // случае close() не вызывался, итог сделки не записывался, entryEquity
-    // оставался от прошлого входа, и следующая запись считала прибыль от
-    // устаревшей точки. Из-за этого серия убытков накручивалась до 55 при
-    // 48 прибыльных ботах из 99, а уверенность стабильно проседала до 0.62.
     if (n.lastU !== 0 && pl.u === 0 && n.entryEquity !== null) {
       const eq = m.equity(i);
       close(n, eq > n.entryEquity, eq);
     }
     n.lastU = pl.u; n.lastBasis = pl.basis; n.since = 0; n.peak = 0;
-  } else { n.lastU = pl.u; n.lastBasis = pl.basis; }
+  } else {
+    n.lastU = pl.u; n.lastBasis = pl.basis;
+  }
   n.since++;
   if (n.cooldown > 0) n.cooldown--;
+}
+
+function decideRaw(m, i, history) {
+  const pl = m.players[i], n = pl.npc;
+  if (!n) return 0;
 
   const r = n.rng;
   const P = m.mark;
@@ -1093,16 +1079,15 @@ function decideRaw(m, i, history) {
   } else if (n.spec.bias === "herd") {
     dir = Math.sign(m.crowd || 0); strength = Math.abs(m.crowd || 0) * 0.01;
   } else if (n.spec.bias === "hunt") {
-    const target = m.eyesMode ? nearestCluster(m, P) : null;
-    if (target) { dir = target > P ? 1 : -1; strength = Math.abs(target - P) / P; }
-    else {
-      const { hi, lo } = windowRange(history, n.look);
-      if (!Number.isFinite(hi) || hi <= lo) return 0;
-      const pos = (P - lo) / (hi - lo);
-      if (pos > 0.78) { dir = 1; strength = (hi - P) / P + 0.001; }
-      else if (pos < 0.22) { dir = -1; strength = (P - lo) / P + 0.001; }
-      else return 0;
-    }
+    /* EYES — только интерфейсный слой. Охотник использует те же публичные
+       признаки цены и в обычном, и в EYES-режиме, поэтому один seed
+       порождает один и тот же рынок. */
+    const { hi, lo } = windowRange(history, n.look);
+    if (!Number.isFinite(hi) || hi <= lo) return 0;
+    const pos = (P - lo) / (hi - lo);
+    if (pos > 0.78) { dir = 1; strength = (hi - P) / P + 0.001; }
+    else if (pos < 0.22) { dir = -1; strength = (P - lo) / P + 0.001; }
+    else return 0;
   } else if (n.spec.bias === "trap") {
     const { hi, lo } = windowRange(history, n.look);
     if (Number.isFinite(hi) && P > hi) { dir = -1; strength = (P - hi) / P; }
@@ -1274,10 +1259,29 @@ function decideRaw(m, i, history) {
 function decide(m, i, history) {
   const pl = m.players[i], n = pl.npc;
   if (!n) return 0;
+
+  syncNPCState(m, i);
   const gap = m.tick - (n.lastTrade ?? -1e9);
+
+  /* decideRaw содержит часть "намеренных" мутаций: close(), новый SL/TP,
+     расширение тейка, cooldown после отказа и т.п. Если обычное решение
+     запрещено minGap, эти изменения тоже не должны происходить.
+     Снимок берётся ПОСЛЕ syncNPCState, поэтому реальное внешнее закрытие
+     (stop/take) и течение cooldown не откатываются. */
+  const snap = {};
+  for (const k of Object.keys(n)) if (k !== "rng" && k !== "spec") snap[k] = n[k];
+  const prevSL = pl.stopLoss, prevTP = pl.takeProfit;
+
   const du = decideRaw(m, i, history);
   if (du === 0) return 0;
-  if (gap < n.minGap && !n.urgent) return 0;
+  if (gap < n.minGap && !n.urgent) {
+    for (const k of Object.keys(n)) {
+      if (k !== "rng" && k !== "spec" && !(k in snap)) delete n[k];
+    }
+    for (const [k, v] of Object.entries(snap)) n[k] = v;
+    pl.stopLoss = prevSL; pl.takeProfit = prevTP;
+    return 0;
+  }
   n.urgent = false;
   n.lastTrade = m.tick;
   return du;
@@ -1331,6 +1335,37 @@ function npcIntents(m, history, fromIdx) {
  * Никакой ордер не исполняется здесь — только в Market.clear(), по единой цене.
  * Поэтому массовое срабатывание стопов не даёт преимущества по порядку.
  */
+function limitReserveNeed(pl, extra = null) {
+  const limits = [...(pl.limits || []).filter((l) => !l.filled)];
+  if (extra) limits.push(extra);
+  let buy = 0, sell = 0;
+  for (const l of limits) {
+    const side = String(l.side || "").toLowerCase();
+    const n = Math.max(0, Number(l.notional) || 0);
+    if (side === "buy") buy += n;
+    else if (side === "sell") sell += n;
+  }
+  const base = Math.abs(pl.u);
+  const needBuy = Math.max(0, Math.abs(pl.u + buy) - base);
+  const needSell = Math.max(0, Math.abs(pl.u - sell) - base);
+  /* Берём худший сценарий по каждой стороне отдельно: противоположные
+     лимитки не считаются взаимным обеспечением, потому что могут сработать
+     в разные моменты. */
+  return needBuy + needSell;
+}
+
+function availableBuyingPower(m, i) {
+  const pl = m.players[i];
+  if (!pl) return 0;
+  return Math.max(0, m.buyingPower(i) - limitReserveNeed(pl));
+}
+
+function exposureNeed(pl, action, notional) {
+  const dir = action === "BUY" ? 1 : -1;
+  const after = pl.u + dir * notional;
+  return Math.max(0, Math.abs(after) - Math.abs(pl.u));
+}
+
 function validateCommand(m, i, cmd) {
   const pl = m.players[i];
   if (!pl) return { ok: false, reason: "нет такого участника" };
@@ -1346,7 +1381,9 @@ function validateCommand(m, i, cmd) {
       }
       const n = cmd.notional;
       if (!Number.isFinite(n) || n <= 0) return { ok: false, reason: "неверный объём" };
-      if (n > m.buyingPower(i) + 1e-9) return { ok: false, reason: "недостаточно средств" };
+      const need = exposureNeed(pl, cmd.action, n);
+      if (need > availableBuyingPower(m, i) + 1e-9)
+        return { ok: false, reason: "средства зарезервированы под лимитные заявки" };
       return { ok: true };
     }
     case "PROTECT": {
@@ -1360,12 +1397,28 @@ function validateCommand(m, i, cmd) {
       if (!Number.isFinite(cmd.limitPrice) || cmd.limitPrice <= 0)
         return { ok: false, reason: "неверная цена" };
       if (!['buy', 'sell'].includes(side)) return { ok: false, reason: "неверная сторона" };
-      if (n > m.buyingPower(i) + 1e-9) return { ok: false, reason: "недостаточно средств" };
       if ((pl.limits || []).filter((l) => !l.filled).length >= 10)
         return { ok: false, reason: "слишком много заявок" };
+      /* Пересекающиеся собственные buy/sell могут сработать одновременно
+         и взаимно обнулиться до клиринга. На реальной бирже это self-cross,
+         поэтому не разрешаем такую пару. */
+      for (const l of (pl.limits || []).filter((x) => !x.filled)) {
+        const ls = String(l.side || "").toLowerCase();
+        if (side === "buy" && ls === "sell" && cmd.limitPrice >= l.limitPrice)
+          return { ok: false, reason: "лимитные заявки пересекаются" };
+        if (side === "sell" && ls === "buy" && cmd.limitPrice <= l.limitPrice)
+          return { ok: false, reason: "лимитные заявки пересекаются" };
+      }
+      const candidate = { side, notional: n, limitPrice: cmd.limitPrice, filled: false };
+      if (limitReserveNeed(pl, candidate) > m.buyingPower(i) + 1e-9)
+        return { ok: false, reason: "недостаточно свободных средств под все лимитки" };
       return { ok: true };
     }
-    case "CANCEL_LIMIT": return { ok: true };
+    case "CANCEL_LIMIT": {
+      if (!(pl.limits || []).some((l) => l.id === cmd.orderId))
+        return { ok: false, reason: "заявка уже снята или не существует" };
+      return { ok: true };
+    }
     default: return { ok: false, reason: "неизвестная команда" };
   }
 }
@@ -1400,22 +1453,44 @@ function pendingIntents(m) {
         out.push({ i: pl.id, du: -pl.u, reason: "take" });
     }
     if (pl.limits && pl.limits.length) {
-      const keep = [];
       for (const lo of pl.limits) {
-        if (lo.filled) continue;
+        if (lo.filled || lo.notional <= 1e-9) continue;
         const side = String(lo.side || "").toLowerCase();
         const hit = side === "buy" ? P <= lo.limitPrice : P >= lo.limitPrice;
-        if (hit) {
-          const units = m.curve.unitsFor(lo.notional, P);
-          out.push({ i: pl.id, du: (side === "buy" ? 1 : -1) * units, reason: "limit" });
-        } else {
-          keep.push(lo);
-        }
+        if (!hit) continue;
+        const units = m.curve.unitsFor(lo.notional, P);
+        out.push({
+          i: pl.id,
+          du: (side === "buy" ? 1 : -1) * units,
+          reason: "limit",
+          orderId: lo.id,
+        });
       }
-      pl.limits = keep;
     }
   }
   return out;
+}
+
+function reconcileLimitFills(m, executed) {
+  const filled = new Map();
+  for (const e of executed || []) {
+    for (const f of e.fills || []) {
+      if (f.reason !== "limit" || !f.orderId) continue;
+      filled.set(f.orderId, (filled.get(f.orderId) || 0) + Math.abs(f.du));
+    }
+  }
+  if (!filled.size) return;
+  for (const pl of m.players) {
+    if (!pl.limits || !pl.limits.length) continue;
+    const keep = [];
+    for (const lo of pl.limits) {
+      const done = filled.get(lo.id) || 0;
+      if (done <= 1e-9) { keep.push(lo); continue; }
+      const left = Math.max(0, lo.notional - done);
+      if (left > 1e-6) keep.push({ ...lo, notional: left });
+    }
+    pl.limits = keep;
+  }
 }
 
 // ---- snapshot.js ----
@@ -1495,8 +1570,11 @@ class RoomV4 {
     this.market.warmupTicks = warmupTicks;
     this.history = [this.market.mark];
     this.pendingCommands = [];
+    this._limitSeq = 0;
     this.humanSlots = new Set();
     this.halted = null;
+    this._inPreroll = false;
+    this.liveSteps = 0;
     const npcs = npcCount === null ? playerCount : npcCount;
     if (npcs > 0) attachNPCs(this.market, playerCount - npcs, npcs, seed, eyes);
     /* ПРЕДВАРИТЕЛЬНЫЙ ПРОГОН. Без него сессия начиналась бы ровно в скрытом
@@ -1507,9 +1585,17 @@ class RoomV4 {
     const pre = prerollTicks === null ? CONFIG.PREROLL_TICKS : prerollTicks;
     if (npcs > 0 && pre > 0) {
       const savedWarmup = this.market.warmupTicks;
+      const savedTotalTicks = this.market.totalTicks;
+      /* Preroll существует ДО сессии, поэтому боты не должны видеть ни её
+         длительность, ни endgame/flush. Один seed теперь даёт одинаковый
+         старт независимо от выбранных 1/5/10/30 минут. */
       this.market.warmupTicks = 0;
+      this.market.totalTicks = null;
+      this._inPreroll = true;
       for (let t = 0; t < pre && !this.halted; t++) this.step();
+      this._inPreroll = false;
       this.market.warmupTicks = savedWarmup;
+      this.market.totalTicks = savedTotalTicks;
       /* Счётчик тиков сбрасывается — значит надо сдвинуть и всё, что на него
          завязано. Без этого поле lastTrade у ботов оставалось равным ~400,
          а m.tick снова становился нулём: разница выходила отрицательной,
@@ -1530,31 +1616,84 @@ class RoomV4 {
       /* На графике остаётся только хвост прогона. Показывать его целиком
          нельзя: первая точка истории — это и есть скрытый центр. */
       this.history = this.history.slice(-CONFIG.PREROLL_KEEP);
+      this.liveSteps = 0;
     }
   }
 
-  /** Человек занимает слот бота: позиция бота закрывается в ближайшем клиринге. */
+  /** Подготовить чистый человеческий слот, не создавая/уничтожая деньги. */
+  _normalizeHumanSlot(slot, name) {
+    const m = this.market;
+    const oldEquity = m.equity(slot.id);
+    const target = m.startingCapital;
+    const correction = oldEquity - target; // столько надо вернуть остальным
+
+    const others = m.players.filter((p) => p.id !== slot.id && !p.isHuman);
+    if (correction > 1e-9 && others.length) {
+      const share = correction / others.length;
+      for (const p of others) p.cash += share;
+    } else if (correction < -1e-9) {
+      let need = -correction;
+      let donors = others.filter((p) => p.cash > 1e-9);
+      while (need > 1e-9 && donors.length) {
+        const free = donors.reduce((a, p) => a + Math.max(0, p.cash), 0);
+        if (free <= 1e-9) break;
+        const takeNow = Math.min(need, free);
+        for (const p of donors) {
+          const take = takeNow * (Math.max(0, p.cash) / free);
+          p.cash -= take;
+        }
+        need -= takeNow;
+        donors = donors.filter((p) => p.cash > 1e-9);
+      }
+      if (need > 1e-6) return false;
+    }
+
+    slot.cash = target;
+    slot.u = 0;
+    slot.entryPrice = null;
+    slot.invested = 0;
+    slot.basis = 0;
+    slot.realizedPnL = 0;
+    slot.tradeCount = 0;
+    slot.stopLoss = null;
+    slot.takeProfit = null;
+    slot.liquidatedAt = null;
+    slot.limits = [];
+    slot.npc = null;
+    slot.isHuman = true;
+    slot.name = name;
+    return true;
+  }
+
+  /** Люди входят только до открытия и всегда получают чистый стартовый счёт. */
   join(name) {
     const m = this.market;
-    /* Сначала берём слот, за которым вообще нет бота: он не участвовал в
-       предварительном прогоне, поэтому у человека ровно стартовые деньги. */
+    if (this.liveSteps > 0 && m.tick >= m.warmupTicks) return null;
+
     const slot = m.players.find((p) => !p.npc && !p.isHuman)
       || m.players.find((p) => p.npc && !p.isHuman);
     if (!slot) return null;
-    if (slot.u !== 0) this.pendingCommands.push({ i: slot.id, cmd: { type: "TRADE", action: "CLOSE" } });
-    slot.npc = null; slot.isHuman = true; slot.name = name;
+    if (!this._normalizeHumanSlot(slot, name)) return null;
+
     this.humanSlots.add(slot.id);
+    let L = 0, S = 0;
+    for (const p of m.players) { if (p.u > 0) L++; else if (p.u < 0) S++; }
+    m.crowd = L + S > 0 ? (L - S) / (L + S) : 0;
+    const sides = m.sidesBasis();
+    m.crowdMoney = sides.L + sides.S > 0
+      ? (sides.L - sides.S) / (sides.L + sides.S) : 0;
+    const inv = checkInvariants(m, { join: slot.id });
+    if (!inv.ok) { this.halted = inv.report; return null; }
     return slot.id;
   }
 
   send(playerId, cmd) {
-    /* До открытия рынок стоит: клиринга нет, цена не движется. Принимаются
-       только лимитные заявки — и от участника, и от ботов. В момент открытия
-       все они попадают в первый общий клиринг. Рыночные заявки до открытия
-       невозможны: исполнять их не по чему. */
+    /* До открытия рынок полностью закрыт: нельзя ни торговать по рынку,
+       ни заранее ставить лимитные заявки. Это правило проверяется в движке,
+       а не только в интерфейсе, поэтому одинаково для любого клиента. */
     const m = this.market;
-    if (m.tick < m.warmupTicks && cmd.type === "TRADE") {
-      return { ok: false, reason: "рынок ещё не открыт, доступны только лимитные заявки" };
+    if (m.tick < m.warmupTicks && (cmd?.type === "TRADE" || cmd?.type === "LIMIT")) {
+      return { ok: false, reason: "рынок ещё не открыт" };
     }
     const v = validateCommand(this.market, playerId, cmd);
     if (!v.ok) return v;
@@ -1573,7 +1712,7 @@ class RoomV4 {
       const pl = this.market.players[playerId];
       pl.limits = pl.limits || [];
       const side = String(cmd.side).toLowerCase();
-      pl.limits.push({ id: `L${pl.limits.length}-${this.market.tick}`,
+      pl.limits.push({ id: `L${playerId}-${this.market.tick}-${this._limitSeq++}`,
         side, notional: cmd.notional, limitPrice: cmd.limitPrice, filled: false });
       return { ok: true };
     }
@@ -1586,9 +1725,10 @@ class RoomV4 {
     return { ok: true };
   }
 
-  step() {
+  step(extraIntents = []) {
     if (this.halted) return this.halted;
     const m = this.market;
+    if (!this._inPreroll) this.liveSteps++;
     // Фаза сессии обновляется до решений ботов: они смотрят на неё так же,
     // как на цену.
     // Разогрев не входит в сессию: фаза начинает считаться после открытия.
@@ -1596,12 +1736,9 @@ class RoomV4 {
       ? clamp((m.tick - m.warmupTicks) / m.totalTicks, 0, 1) : null;
 
     /* ------------------------- ПРЕДТОРГОВЫЙ ПЕРИОД ----------------------
-       Клиринга нет, Q не меняется, цена стоит. Боты и игрок только
-       выставляют лимитные заявки — тот же механизм pl.limits. В первый тик
-       после открытия все пересёкшиеся заявки уходят в один общий клиринг:
-       получается стартовый аукцион. */
+       Клиринга нет, Q не меняется, цена стоит. Никакие заявки — ни рыночные,
+       ни лимитные — до открытия не принимаются и не создаются. */
     if (m.tick < m.warmupTicks) {
-      npcWarmupOrders(m);
       this.pendingCommands = [];
       m.tick++;
       this.history.push(m.mark);
@@ -1614,6 +1751,7 @@ class RoomV4 {
     // Маржин-колл идёт ПЕРВЫМ и в том же клиринге, что и всё остальное:
     // единая цена тика не даёт ликвидируемым проскочить раньше других.
     intents.push(...m.marginCalls());
+    if (extraIntents && extraIntents.length) intents.push(...extraIntents);
     intents.push(...pendingIntents(m));
     intents.push(...npcIntents(m, this.history, 0));
     for (const { i, cmd } of this.pendingCommands) {
@@ -1623,6 +1761,7 @@ class RoomV4 {
     this.pendingCommands = [];
 
     const result = m.clear(intents);
+    reconcileLimitFills(m, result.executed);
     // Перекос толпы: доля участников в лонге минус доля в шорте.
     // Считается один раз за тик и раздаётся всем — стадные боты смотрят
     // именно на него, а не на цену.
@@ -1645,11 +1784,13 @@ class RoomV4 {
   advance(n) { for (let k = 0; k < n && !this.halted; k++) this.step(); return this; }
   snapshot(viewerId, opts) { return createSnapshot(this.market, viewerId, opts); }
 
-  /** Закрыть позицию и выйти из комнаты со штрафом. */
+  /** Закрыть позицию и выйти из комнаты со штрафом.
+      Закрытие проходит полноценным тиком комнаты: tick, history, NPC,
+      лимитки и инварианты остаются синхронными. */
   leave(playerId, penaltyFraction) {
     const m = this.market;
     if (m.players[playerId].u !== 0) {
-      m.clear([{ i: playerId, du: -m.players[playerId].u, reason: "leave" }]);
+      this.step([{ i: playerId, du: -m.players[playerId].u, reason: "leave" }]);
     }
     return m.applyExitPenalty(playerId, penaltyFraction);
   }
@@ -1839,9 +1980,9 @@ class LegacyRoom {
        тогда фаза не считается и поведение прежнее. */
     this.totalTicks = null;
     this.phase = null;      // 0 в начале, 1 в конце
-    /* Разогрев: первые тики рынок живёт, но заявки участника не принимаются.
-       За это время боты успевают расставить позиции и на графике появляется
-       история, так что игрок входит не в пустоту. */
+    /* Разогрев — только закрытый обратный отсчёт перед стартом.
+       Цена и позиции в эти тики не меняются; история рынка уже сформирована
+       отдельным preroll до появления игрока. */
     this.warmupTicks = 0;
     this.eyes = eyes ? new EyesLayer() : null;
     this._room = new RoomV4({ playerCount: count, startingCapital, seed,
@@ -1884,8 +2025,6 @@ class LegacyRoom {
     if (this.eyes) {
       const m = this._room.market;
       this.eyes.update(m, result && result.executed, m.tick * CONFIG.market.tickMs);
-      // Боты в режиме EYES видят те же обезличенные кластеры, что и игрок.
-      m.eyesClusters = this.eyes.live;
     }
     let buy = 0, sell = 0;
     if (result && result.executed) {
@@ -1940,7 +2079,7 @@ class LegacyRoom {
         ...this._legacyPlayer(base.you),
         marginLevel: this._room.market.marginLevel(viewerId),
         liquidationPrice: this._room.market.liquidationEstimate(viewerId),
-        buyingPower: this._room.market.buyingPower(viewerId),
+        buyingPower: availableBuyingPower(this._room.market, viewerId),
         wasLiquidated: this._room.market.players[viewerId].liquidatedAt !== null,
       } : null,
       buyPressure: this._buyPressure,
@@ -5343,6 +5482,8 @@ function PracticeApp({ onExit }) {
       durationTicks,
     });
     setSize(String(Math.round(capital * 0.3)));
+    setSheet(null);
+    setLimitPrice("");
     setPaused(false);
     setTab("Рынок");
     setSession(capital);
@@ -5635,8 +5776,8 @@ function PracticeApp({ onExit }) {
 
           {tab === "Рынок" && (
             <div className="flex flex-col h-full relative overflow-hidden">
-              {!snap.tradingOpen && sheet !== "limit" && (
-                <div className="absolute inset-0 z-20 flex flex-col items-center justify-center
+              {!snap.tradingOpen && (
+                <div className="absolute inset-0 z-30 flex flex-col items-center justify-center
                   backdrop-blur-[2px] tx-fade"
                   style={{ backgroundColor: "rgba(0,0,0,0.62)" }}>
                   <div className="text-[10px] tracking-[0.35em]" style={{ color: FAINT }}>
@@ -5655,14 +5796,8 @@ function PracticeApp({ onExit }) {
                   </div>
                   <div className="text-[12px] mt-5 text-center max-w-[260px] leading-snug"
                     style={{ color: DIM }}>
-                    Цена стоит, сделок нет. Участники расставляют лимитные
-                    заявки — можно выставить свою, она сработает при открытии.
+                    До открытия цена стоит и торговля полностью недоступна.
                   </div>
-                  <button onClick={() => setSheet(sheet === "limit" ? null : "limit")}
-                    className="mt-4 px-4 py-2.5 rounded-xl text-[11px] tracking-[0.15em] font-bold tap"
-                    style={btnSoft(true)}>
-                    ВЫСТАВИТЬ ЛИМИТКУ
-                  </button>
                 </div>
               )}
               {leverage > 1 && !pos && (
@@ -6071,7 +6206,7 @@ function PracticeApp({ onExit }) {
         {/* ---------------------------- панель торговли ---------------------- */}
         {tab === "Рынок" && (
           <div className="px-4 pt-3 pb-3 border-t" style={{ borderColor: HAIR, backgroundColor: BG }}>
-            {sheet && (
+            {sheet && snap.tradingOpen && (
               <>
                 <div className="fixed inset-0 z-10" style={{ backgroundColor: "rgba(0,0,0,0.75)" }}
                   onClick={() => setSheet(null)} />
@@ -6155,10 +6290,10 @@ function PracticeApp({ onExit }) {
                 style={btnSoft(sheet === "risk")}>
                 SL/TP
               </button>
-              <button onClick={() => setSheet(sheet === "limit" ? null : "limit")}
-                className="px-2.5 py-2.5 rounded-lg text-[11px] font-semibold tap"
-                style={sheet === "limit" || !snap.tradingOpen
-                  ? btnSoft(true) : btnSoft(false)}>
+              <button disabled={!snap.tradingOpen}
+                onClick={() => snap.tradingOpen && setSheet(sheet === "limit" ? null : "limit")}
+                className="px-2.5 py-2.5 rounded-lg text-[11px] font-semibold tap disabled:opacity-25"
+                style={sheet === "limit" ? btnSoft(true) : btnSoft(false)}>
                 лимит{myLimits.length ? ` ${myLimits.length}` : ""}
               </button>
             </div>
