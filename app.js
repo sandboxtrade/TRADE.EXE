@@ -3264,39 +3264,43 @@ function Boot({ done }) {
   const total = BOOT_STEPS.length;
   const progress = clamp(done / total, 0, 1);
   const current = Math.min(Math.max(done, 0), total - 1);
+  const ACCENT = "#D9DCE6";
+  const ACCENT_SOFT = "#8B91A5";
+  const ACCENT_FAINT = "rgba(217,220,230,.14)";
+  const TRACK = "rgba(255,255,255,.07)";
 
   return (
     <div className="w-full overflow-hidden flex flex-col items-center justify-center px-8 tx-fade relative"
       style={{ height: "100dvh", backgroundColor: BG }}>
 
       <div className="absolute inset-0 pointer-events-none">
-        <div className="absolute left-1/2 top-[18%] -translate-x-1/2 w-[280px] h-[280px] rounded-full tx-breathe"
-          style={{ background: "radial-gradient(circle, rgba(59,228,128,.14) 0%, rgba(59,228,128,.05) 34%, rgba(0,0,0,0) 72%)" }} />
-        <div className="absolute left-1/2 top-[18%] -translate-x-1/2 w-[340px] h-[340px] rounded-full tx-spin"
-          style={{ border: `1px solid ${HAIR}`, opacity: .38 }} />
-        <div className="absolute left-1/2 top-[18%] -translate-x-1/2 w-[236px] h-[236px] rounded-full tx-spin"
-          style={{ border: `1px solid rgba(59,228,128,.22)`, animationDirection: "reverse", animationDuration: "14s" }} />
-        <div className="absolute inset-x-0 top-[32%] h-px" style={{ backgroundColor: HAIR, opacity: .35 }} />
-        <div className="absolute inset-x-0 bottom-[24%] h-px" style={{ backgroundColor: HAIR, opacity: .26 }} />
+        <div className="absolute left-1/2 top-[18%] -translate-x-1/2 w-[300px] h-[300px] rounded-full tx-breathe"
+          style={{ background: "radial-gradient(circle, rgba(160,170,192,.08) 0%, rgba(160,170,192,.03) 38%, rgba(0,0,0,0) 74%)" }} />
+        <div className="absolute left-1/2 top-[18%] -translate-x-1/2 w-[348px] h-[348px] rounded-full tx-spin"
+          style={{ border: "1px solid rgba(255,255,255,.05)", opacity: .5 }} />
+        <div className="absolute left-1/2 top-[18%] -translate-x-1/2 w-[238px] h-[238px] rounded-full tx-spin"
+          style={{ border: "1px solid rgba(160,170,192,.12)", animationDirection: "reverse", animationDuration: "14s" }} />
+        <div className="absolute inset-x-0 top-[32%] h-px" style={{ backgroundColor: HAIR, opacity: .22 }} />
+        <div className="absolute inset-x-0 bottom-[24%] h-px" style={{ backgroundColor: HAIR, opacity: .16 }} />
       </div>
 
       <div className="relative z-10 w-full max-w-[330px] rounded-[28px] px-6 py-7 tx-pop"
         style={{
-          background: "linear-gradient(180deg, rgba(20,21,25,.92) 0%, rgba(8,9,12,.96) 100%)",
-          border: `1px solid ${HAIR}`,
-          boxShadow: "0 24px 80px rgba(0,0,0,.48)",
+          background: "linear-gradient(180deg, rgba(16,17,22,.96) 0%, rgba(6,7,10,.98) 100%)",
+          border: `1px solid rgba(255,255,255,.09)`,
+          boxShadow: "0 24px 80px rgba(0,0,0,.5)",
         }}>
 
         <div className="flex items-center justify-between text-[10px] tracking-[0.34em]" style={{ color: FAINT }}>
           <span>TRADE.EXE</span>
-          <span>{String(Math.round(progress * 100)).padStart(2, "0")}%</span>
+          <span style={{ color: ACCENT_SOFT }}>{String(Math.round(progress * 100)).padStart(2, "0")}%</span>
         </div>
 
         <div className="relative mt-5 mx-auto w-[148px] h-[148px]">
           <svg width="148" height="148" viewBox="0 0 148 148" className="absolute inset-0">
-            <circle cx="74" cy="74" r="68" fill="none" stroke={HAIR} strokeWidth="1.2" />
-            <circle cx="74" cy="74" r="56" fill="none" stroke="rgba(255,255,255,.05)" strokeWidth="12" />
-            <circle cx="74" cy="74" r="56" fill="none" stroke={LONG} strokeWidth="12"
+            <circle cx="74" cy="74" r="68" fill="none" stroke="rgba(255,255,255,.06)" strokeWidth="1.2" />
+            <circle cx="74" cy="74" r="56" fill="none" stroke={TRACK} strokeWidth="12" />
+            <circle cx="74" cy="74" r="56" fill="none" stroke={ACCENT} strokeWidth="12"
               strokeLinecap="round" strokeDasharray={2 * Math.PI * 56}
               strokeDashoffset={2 * Math.PI * 56 * (1 - progress)}
               transform="rotate(-90 74 74)"
@@ -3306,7 +3310,7 @@ function Boot({ done }) {
               const active = done > i;
               return (
                 <circle key={i} cx={74 + Math.cos(a) * 68} cy={74 + Math.sin(a) * 68} r="2.8"
-                  fill={active ? LONG : HAIR}
+                  fill={active ? ACCENT : "rgba(255,255,255,.08)"}
                   style={{ transition: "fill var(--tx-mid) var(--tx-ease)" }} />
               );
             })}
@@ -3314,36 +3318,39 @@ function Boot({ done }) {
 
           <div className="absolute inset-[22px] rounded-full flex items-center justify-center tx-logo-live"
             style={{
-              background: "radial-gradient(circle at 50% 38%, rgba(23,25,31,1) 0%, rgba(7,8,11,1) 72%)",
-              border: `1px solid ${HAIR}`
+              background: "radial-gradient(circle at 50% 38%, rgba(18,20,27,1) 0%, rgba(6,7,10,1) 72%)",
+              border: "1px solid rgba(255,255,255,.08)",
+              boxShadow: "inset 0 0 0 1px rgba(255,255,255,.03)",
             }}>
             <Logo size={70} live />
           </div>
         </div>
 
         <div className="text-center mt-5">
-          <div className="text-[25px] tracking-tight">trade.exe</div>
-          <div className="text-[11px] tracking-[0.28em] mt-2" style={{ color: DIM }}>
+          <div className="text-[25px] tracking-tight" style={{ color: TEXT }}>trade.exe</div>
+          <div className="text-[11px] tracking-[0.28em] mt-2" style={{ color: ACCENT_SOFT }}>
             ЗАГРУЗКА ТОРГОВОЙ СРЕДЫ
           </div>
-          <div className="text-[12px] mt-3 leading-relaxed" style={{ color: FAINT }}>
-            Инициализируем профиль, движок рынка и визуальный интерфейс,
-            чтобы первая сессия запускалась плавно, без рывков.
+          <div className="text-[12px] mt-3 leading-relaxed" style={{ color: DIM }}>
+            Инициализируем профиль, движок рынка и
+            визуальный интерфейс, чтобы первая сессия
+            запускалась плавно, без рывков.
           </div>
         </div>
 
-        <div className="mt-6 rounded-full p-1" style={{ backgroundColor: SURFACE, border: `1px solid ${HAIR}` }}>
-          <div className="h-1.5 rounded-full overflow-hidden" style={{ backgroundColor: HAIR }}>
+        <div className="mt-6 rounded-full p-1"
+          style={{ backgroundColor: "rgba(255,255,255,.03)", border: "1px solid rgba(255,255,255,.08)" }}>
+          <div className="h-1.5 rounded-full overflow-hidden" style={{ backgroundColor: TRACK }}>
             <div style={{
               width: `${progress * 100}%`,
               height: "100%",
-              background: "linear-gradient(90deg, rgba(59,228,128,.8) 0%, rgba(168,255,213,1) 100%)",
+              background: "linear-gradient(90deg, rgba(217,220,230,.82) 0%, rgba(139,145,165,.95) 100%)",
               transition: "width 320ms var(--tx-ease)",
             }} />
           </div>
         </div>
 
-        <div className="text-[11px] mt-3" style={{ color: done >= total ? LONG : DIM }}>
+        <div className="text-[11px] mt-3" style={{ color: done >= total ? TEXT : ACCENT_SOFT }}>
           {done >= total ? "среда готова" : BOOT_STEPS[current]?.label}
         </div>
 
@@ -3358,20 +3365,21 @@ function Boot({ done }) {
                 </span>
                 <span className="w-3.5 h-3.5 rounded-full flex items-center justify-center shrink-0"
                   style={{
-                    border: `1px solid ${state === "done" ? LONG : state === "run" ? TEXT : FAINT}`,
-                    backgroundColor: state === "done" ? LONG : "transparent",
+                    border: `1px solid ${state === "done" ? ACCENT : state === "run" ? TEXT : FAINT}`,
+                    backgroundColor: state === "done" ? ACCENT_FAINT : "transparent",
                     transition: "background-color var(--tx-mid) var(--tx-ease), border-color var(--tx-mid) var(--tx-ease)",
                   }}>
-                  {state === "done" && <Icon name="check" size={9} color={BG} />}
+                  {state === "done" && <Icon name="check" size={9} color={ACCENT} />}
                   {state === "run" && (
-                    <span className="w-1.5 h-1.5 rounded-full tx-pulse-dot" style={{ backgroundColor: LONG }} />
+                    <span className="w-1.5 h-1.5 rounded-full tx-pulse-dot" style={{ backgroundColor: ACCENT }} />
                   )}
                 </span>
                 <span className="text-[12px] flex-1"
                   style={{ color: state === "done" ? TEXT : state === "run" ? TEXT : FAINT }}>
                   {s.label}
                 </span>
-                <span className="text-[10px] tracking-[0.18em]" style={{ color: state === "done" ? LONG : FAINT }}>
+                <span className="text-[10px] tracking-[0.18em]"
+                  style={{ color: state === "done" ? ACCENT_SOFT : state === "run" ? ACCENT_SOFT : FAINT }}>
                   {state === "done" ? "OK" : state === "run" ? "RUN" : "···"}
                 </span>
               </div>
