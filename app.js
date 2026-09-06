@@ -2415,7 +2415,21 @@ function Chart({ state, timeframe, mode, entryPrice, stopLoss, takeProfit,
   const [drag, setDrag] = useState(null);   // {kind, price} во время перетаскивания
   const dragRef = useRef(null);
   dragRef.current = drag;
+  const zoomRaf = useRef(0);
+  const zoomQueued = useRef(1);
+  const queueYZoom = (next) => {
+    zoomQueued.current = clamp(next, Y_MIN, Y_MAX);
+    if (zoomRaf.current) return;
+    zoomRaf.current = requestAnimationFrame(() => {
+      zoomRaf.current = 0;
+      setYZoom((prev) => Math.abs(prev - zoomQueued.current) < 0.0001 ? prev : zoomQueued.current);
+    });
+  };
   const auto = offset === 0 && Math.abs(yZoom - 1) < 0.02 && Math.abs(barW - BAR_DEFAULT) < 0.1;
+
+  useEffect(() => () => {
+    if (zoomRaf.current) cancelAnimationFrame(zoomRaf.current);
+  }, []);
 
   // --- жесты ---
   useEffect(() => {
@@ -2493,7 +2507,7 @@ function Chart({ state, timeframe, mode, entryPrice, stopLoss, takeProfit,
         // Отдельная подстройка только по цене — потягиванием за шкалу справа.
         const k = Math.max(12, Math.hypot(s.x, s.y)) / two.d;
         setBarW(clamp(two.barW * k, BAR_MIN, BAR_MAX));
-        setYZoom(clamp(two.yZoom * k, Y_MIN, Y_MAX));
+        queueYZoom(two.yZoom * k);
         return;
       }
       if (e.touches.length === 1 && grab) {
@@ -2525,7 +2539,7 @@ function Chart({ state, timeframe, mode, entryPrice, stopLoss, takeProfit,
       e.preventDefault();
       const k = e.deltaY > 0 ? 0.9 : 1.11;
       setBarW((w) => clamp(w * k, BAR_MIN, BAR_MAX));
-      setYZoom((z) => clamp(z * k, Y_MIN, Y_MAX));
+      queueYZoom(view.current.yZoom * k);
     };
 
     el.addEventListener("touchstart", start, { passive: true });
@@ -2557,7 +2571,7 @@ function Chart({ state, timeframe, mode, entryPrice, stopLoss, takeProfit,
       e.preventDefault();
       // Тянем вниз — шкала растягивается, вверх — сжимается.
       const dy = e.touches[0].clientY - grab.y;
-      setYZoom(clamp(grab.z * Math.pow(2, dy / 160), Y_MIN, Y_MAX));
+      queueYZoom(grab.z * Math.pow(2, dy / 160));
     };
     const end = () => { grab = null; };
     el.addEventListener("touchstart", start, { passive: true });
@@ -2624,8 +2638,8 @@ function Chart({ state, timeframe, mode, entryPrice, stopLoss, takeProfit,
   const tMin = mid - half, tMax = mid + half;
 
   const prev = scale.current;
-  const jump = !prev || prev.tf !== timeframe || prev.z !== yZoom || prev.off !== offset;
-  const EASE = 0.18;
+  const jump = !prev || prev.tf !== timeframe || prev.off !== offset || Math.abs((prev?.z ?? yZoom) - yZoom) > 0.025;
+  const EASE = 0.2;
   const min = jump ? tMin : prev.min + (tMin - prev.min) * EASE;
   const max = jump ? tMax : prev.max + (tMax - prev.max) * EASE;
   scale.current = { min, max, tf: timeframe, z: yZoom, off: offset };
@@ -2666,7 +2680,7 @@ function Chart({ state, timeframe, mode, entryPrice, stopLoss, takeProfit,
           strokeDasharray={dash} opacity={strong ? 1 : 0.75} />
         <rect x={2} y={toY(value) - 13} width={label.length * 5.6 + 8} height={12} rx={2}
           fill={BG} opacity={0.75} />
-        <text x={6} y={toY(value) - 4} fill={color} fontSize={9} fontFamily="DotumDigits, Neogurotesuku, monospace">
+        <text x={6} y={toY(value) - 4} fill={color} fontSize={9} fontFamily="SamsonDigits, Neogurotesuku, monospace">
           {label}
         </text>
         {strong && (
@@ -2674,7 +2688,7 @@ function Chart({ state, timeframe, mode, entryPrice, stopLoss, takeProfit,
             <rect x={plotW + 1} y={toY(value) - 8} width={AXIS_W - 2} height={16} rx={3}
               fill={BG} stroke={color} strokeWidth={1} />
             <text x={plotW + AXIS_W / 2} y={toY(value) + 4} textAnchor="middle"
-              fill={color} fontSize={10} fontFamily="DotumDigits, Neogurotesuku, monospace">
+              fill={color} fontSize={10} fontFamily="SamsonDigits, Neogurotesuku, monospace">
               {value.toFixed(2)}
             </text>
           </>
@@ -2704,7 +2718,7 @@ function Chart({ state, timeframe, mode, entryPrice, stopLoss, takeProfit,
           <g key={p}>
             <line x1={0} x2={plotW} y1={toY(p)} y2={toY(p)} stroke={HAIR} strokeWidth={1} />
             <text x={plotW + 6} y={toY(p) + 3.5} fill={FAINT} fontSize={10}
-              fontFamily="DotumDigits, Neogurotesuku, monospace">{p.toFixed(digits)}</text>
+              fontFamily="SamsonDigits, Neogurotesuku, monospace">{p.toFixed(digits)}</text>
           </g>
         ))}
 
@@ -2741,7 +2755,7 @@ function Chart({ state, timeframe, mode, entryPrice, stopLoss, takeProfit,
                   strokeWidth={0.8} opacity={0.5} strokeDasharray={thin ? "2 4" : ""} />
                 <line x1={0} x2={plotW} y1={c.y2} y2={c.y2} stroke={color}
                   strokeWidth={0.8} opacity={0.5} strokeDasharray={thin ? "2 4" : ""} />
-                <text x={5} y={c.y1 + h / 2 + 3} fontSize={9} fontFamily="DotumDigits, Neogurotesuku, monospace"
+                <text x={5} y={c.y1 + h / 2 + 3} fontSize={9} fontFamily="SamsonDigits, Neogurotesuku, monospace"
                   fill={color} opacity={0.95}>
                   {c.type} {c.side} · {fmt(c.volume, 0)} · {c.participants}
                 </text>
@@ -2818,7 +2832,7 @@ function Chart({ state, timeframe, mode, entryPrice, stopLoss, takeProfit,
         <rect x={plotW + 1} y={priceY - 9} width={AXIS_W - 2} height={18} rx={3}
           fill={up ? LONG : SHORT} />
         <text x={plotW + AXIS_W / 2} y={priceY + 4} textAnchor="middle" fill={BG}
-          fontSize={11} fontFamily="DotumDigits, Neogurotesuku, monospace" fontWeight="700">
+          fontSize={11} fontFamily="SamsonDigits, Neogurotesuku, monospace" fontWeight="700">
           {state.price.toFixed(2)}
         </text>
       </svg>
@@ -3243,63 +3257,127 @@ const BOOT_STEPS = [
   { key: "auth", label: "проверка аккаунта" },
   { key: "profile", label: "загрузка профиля" },
   { key: "engine", label: "прогрев движка" },
-  { key: "ready", label: "готово" },
+  { key: "ready", label: "синхронизация интерфейса" },
 ];
 
 function Boot({ done }) {
-  const total = BOOT_STEPS.length - 1;
-  const progress = done / total;
+  const total = BOOT_STEPS.length;
+  const progress = clamp(done / total, 0, 1);
+  const current = Math.min(Math.max(done, 0), total - 1);
+
   return (
-    <div className="w-full flex flex-col items-center justify-center px-10 tx-fade"
+    <div className="w-full overflow-hidden flex flex-col items-center justify-center px-8 tx-fade relative"
       style={{ height: "100dvh", backgroundColor: BG }}>
 
-      <div className="relative">
-        {/* Кольцо заполняется вместе с реальным прогрессом загрузки. */}
-        <svg width="132" height="132" viewBox="0 0 132 132" className="absolute inset-0">
-          <circle cx="66" cy="66" r="60" fill="none" stroke={HAIR} strokeWidth="1.5" />
-          <circle cx="66" cy="66" r="60" fill="none" stroke={LONG} strokeWidth="1.5"
-            strokeLinecap="round" strokeDasharray={2 * Math.PI * 60}
-            strokeDashoffset={2 * Math.PI * 60 * (1 - progress)}
-            transform="rotate(-90 66 66)"
-            style={{ transition: "stroke-dashoffset var(--tx-slow) var(--tx-ease)" }} />
-          {[0, 1, 2, 3].map((i) => {
-            const a = (-90 + i * 90) * Math.PI / 180;
-            return <circle key={i} cx={66 + Math.cos(a) * 60} cy={66 + Math.sin(a) * 60} r="2.5"
-              fill={done >= i ? LONG : HAIR}
-              style={{ transition: "fill var(--tx-mid) var(--tx-ease)" }} />;
-          })}
-        </svg>
-        <div className="w-[132px] h-[132px] flex items-center justify-center">
-          <Logo size={62} live />
-        </div>
+      <div className="absolute inset-0 pointer-events-none">
+        <div className="absolute left-1/2 top-[18%] -translate-x-1/2 w-[280px] h-[280px] rounded-full tx-breathe"
+          style={{ background: "radial-gradient(circle, rgba(59,228,128,.14) 0%, rgba(59,228,128,.05) 34%, rgba(0,0,0,0) 72%)" }} />
+        <div className="absolute left-1/2 top-[18%] -translate-x-1/2 w-[340px] h-[340px] rounded-full tx-spin"
+          style={{ border: `1px solid ${HAIR}`, opacity: .38 }} />
+        <div className="absolute left-1/2 top-[18%] -translate-x-1/2 w-[236px] h-[236px] rounded-full tx-spin"
+          style={{ border: `1px solid rgba(59,228,128,.22)`, animationDirection: "reverse", animationDuration: "14s" }} />
+        <div className="absolute inset-x-0 top-[32%] h-px" style={{ backgroundColor: HAIR, opacity: .35 }} />
+        <div className="absolute inset-x-0 bottom-[24%] h-px" style={{ backgroundColor: HAIR, opacity: .26 }} />
       </div>
 
-      <div className="text-[22px] tracking-tight mt-5">trade.exe</div>
+      <div className="relative z-10 w-full max-w-[330px] rounded-[28px] px-6 py-7 tx-pop"
+        style={{
+          background: "linear-gradient(180deg, rgba(20,21,25,.92) 0%, rgba(8,9,12,.96) 100%)",
+          border: `1px solid ${HAIR}`,
+          boxShadow: "0 24px 80px rgba(0,0,0,.48)",
+        }}>
 
-      <div className="w-full max-w-[240px] mt-7">
-        {BOOT_STEPS.slice(0, total).map((s, i) => {
-          const state = done > i ? "done" : done === i ? "run" : "wait";
-          return (
-            <div key={s.key} className="flex items-center gap-2.5 py-1.5"
-              style={{ opacity: state === "wait" ? 0.35 : 1,
-                transition: "opacity var(--tx-mid) var(--tx-ease)" }}>
-              <span className="w-3.5 h-3.5 rounded-full flex items-center justify-center shrink-0"
-                style={{ border: `1px solid ${state === "done" ? LONG : FAINT}`,
-                  backgroundColor: state === "done" ? LONG : "transparent",
-                  transition: "background-color var(--tx-mid) var(--tx-ease), border-color var(--tx-mid) var(--tx-ease)" }}>
-                {state === "done" && <Icon name="check" size={9} color={BG} />}
-                {state === "run" && (
-                  <span className="w-1.5 h-1.5 rounded-full tx-pulse-dot"
-                    style={{ backgroundColor: LONG }} />
-                )}
-              </span>
-              <span className="text-[12px]"
-                style={{ color: state === "done" ? DIM : state === "run" ? TEXT : FAINT }}>
-                {s.label}
-              </span>
-            </div>
-          );
-        })}
+        <div className="flex items-center justify-between text-[10px] tracking-[0.34em]" style={{ color: FAINT }}>
+          <span>TRADE.EXE</span>
+          <span>{String(Math.round(progress * 100)).padStart(2, "0")}%</span>
+        </div>
+
+        <div className="relative mt-5 mx-auto w-[148px] h-[148px]">
+          <svg width="148" height="148" viewBox="0 0 148 148" className="absolute inset-0">
+            <circle cx="74" cy="74" r="68" fill="none" stroke={HAIR} strokeWidth="1.2" />
+            <circle cx="74" cy="74" r="56" fill="none" stroke="rgba(255,255,255,.05)" strokeWidth="12" />
+            <circle cx="74" cy="74" r="56" fill="none" stroke={LONG} strokeWidth="12"
+              strokeLinecap="round" strokeDasharray={2 * Math.PI * 56}
+              strokeDashoffset={2 * Math.PI * 56 * (1 - progress)}
+              transform="rotate(-90 74 74)"
+              style={{ transition: "stroke-dashoffset 320ms var(--tx-ease)" }} />
+            {[0, 1, 2, 3].map((i) => {
+              const a = (-90 + i * 90) * Math.PI / 180;
+              const active = done > i;
+              return (
+                <circle key={i} cx={74 + Math.cos(a) * 68} cy={74 + Math.sin(a) * 68} r="2.8"
+                  fill={active ? LONG : HAIR}
+                  style={{ transition: "fill var(--tx-mid) var(--tx-ease)" }} />
+              );
+            })}
+          </svg>
+
+          <div className="absolute inset-[22px] rounded-full flex items-center justify-center tx-logo-live"
+            style={{
+              background: "radial-gradient(circle at 50% 38%, rgba(23,25,31,1) 0%, rgba(7,8,11,1) 72%)",
+              border: `1px solid ${HAIR}`
+            }}>
+            <Logo size={70} live />
+          </div>
+        </div>
+
+        <div className="text-center mt-5">
+          <div className="text-[25px] tracking-tight">trade.exe</div>
+          <div className="text-[11px] tracking-[0.28em] mt-2" style={{ color: DIM }}>
+            ЗАГРУЗКА ТОРГОВОЙ СРЕДЫ
+          </div>
+          <div className="text-[12px] mt-3 leading-relaxed" style={{ color: FAINT }}>
+            Инициализируем профиль, движок рынка и визуальный интерфейс,
+            чтобы первая сессия запускалась плавно, без рывков.
+          </div>
+        </div>
+
+        <div className="mt-6 rounded-full p-1" style={{ backgroundColor: SURFACE, border: `1px solid ${HAIR}` }}>
+          <div className="h-1.5 rounded-full overflow-hidden" style={{ backgroundColor: HAIR }}>
+            <div style={{
+              width: `${progress * 100}%`,
+              height: "100%",
+              background: "linear-gradient(90deg, rgba(59,228,128,.8) 0%, rgba(168,255,213,1) 100%)",
+              transition: "width 320ms var(--tx-ease)",
+            }} />
+          </div>
+        </div>
+
+        <div className="text-[11px] mt-3" style={{ color: done >= total ? LONG : DIM }}>
+          {done >= total ? "среда готова" : BOOT_STEPS[current]?.label}
+        </div>
+
+        <div className="w-full mt-4">
+          {BOOT_STEPS.map((s, i) => {
+            const state = done > i ? "done" : done === i ? "run" : "wait";
+            return (
+              <div key={s.key} className="flex items-center gap-3 py-2.5"
+                style={{ opacity: state === "wait" ? 0.34 : 1, transition: "opacity var(--tx-mid) var(--tx-ease)" }}>
+                <span className="w-6 text-[9px] tracking-[0.22em] shrink-0" style={{ color: FAINT }}>
+                  {String(i + 1).padStart(2, "0")}
+                </span>
+                <span className="w-3.5 h-3.5 rounded-full flex items-center justify-center shrink-0"
+                  style={{
+                    border: `1px solid ${state === "done" ? LONG : state === "run" ? TEXT : FAINT}`,
+                    backgroundColor: state === "done" ? LONG : "transparent",
+                    transition: "background-color var(--tx-mid) var(--tx-ease), border-color var(--tx-mid) var(--tx-ease)",
+                  }}>
+                  {state === "done" && <Icon name="check" size={9} color={BG} />}
+                  {state === "run" && (
+                    <span className="w-1.5 h-1.5 rounded-full tx-pulse-dot" style={{ backgroundColor: LONG }} />
+                  )}
+                </span>
+                <span className="text-[12px] flex-1"
+                  style={{ color: state === "done" ? TEXT : state === "run" ? TEXT : FAINT }}>
+                  {s.label}
+                </span>
+                <span className="text-[10px] tracking-[0.18em]" style={{ color: state === "done" ? LONG : FAINT }}>
+                  {state === "done" ? "OK" : state === "run" ? "RUN" : "···"}
+                </span>
+              </div>
+            );
+          })}
+        </div>
       </div>
     </div>
   );
@@ -3825,14 +3903,14 @@ function EquityCurve({ sessions, rangeMs }) {
           <line x1={0} x2={W - PADR} y1={y(v)} y2={y(v)}
             stroke={HAIR} strokeWidth={0.7} strokeDasharray="2 4" />
           <text x={W - PADR + 7} y={y(v) + 3.2} fill={FAINT} fontSize={8.5}
-            fontFamily="DotumDigits, Neogurotesuku, monospace">{fmtSigned(v, 0)}</text>
+            fontFamily="SamsonDigits, Neogurotesuku, monospace">{fmtSigned(v, 0)}</text>
         </g>
       ))}
 
       {/* нулевая линия — опора для взгляда */}
       <line x1={0} x2={W - PADR} y1={zeroY} y2={zeroY} stroke={DIM} strokeWidth={0.9} />
       <text x={W - PADR + 7} y={zeroY + 3.2} fill={DIM} fontSize={8.5}
-        fontFamily="DotumDigits, Neogurotesuku, monospace">$0</text>
+        fontFamily="SamsonDigits, Neogurotesuku, monospace">$0</text>
 
       <g className="tx-fade">
         <path d={area} fill={`url(#${uid}g)`} clipPath={`url(#${uid}up)`} />
@@ -3852,8 +3930,8 @@ function EquityCurve({ sessions, rangeMs }) {
       <circle cx={x(t1)} cy={y(acc)} r={5.5} fill={up ? ACCENT : SHORT} opacity={0.16} />
       <circle cx={x(t1)} cy={y(acc)} r={2.8} fill={up ? ACCENT : SHORT} />
 
-      <text x={0} y={H - 4} fill={FAINT} fontSize={8.5} fontFamily="DotumDigits, Neogurotesuku, monospace">{hhmm(t0)}</text>
-      <text x={x(t1)} y={H - 4} fill={FAINT} fontSize={8.5} fontFamily="DotumDigits, Neogurotesuku, monospace"
+      <text x={0} y={H - 4} fill={FAINT} fontSize={8.5} fontFamily="SamsonDigits, Neogurotesuku, monospace">{hhmm(t0)}</text>
+      <text x={x(t1)} y={H - 4} fill={FAINT} fontSize={8.5} fontFamily="SamsonDigits, Neogurotesuku, monospace"
         textAnchor="end">{hhmm(t1)}</text>
     </svg>
   );
@@ -5421,13 +5499,17 @@ function PracticeApp({ onExit }) {
     let alive = true;
     const pause = (ms) => new Promise((res) => setTimeout(res, ms));
     (async () => {
+      const startedAt = Date.now();
+      const MIN_TOTAL_BOOT_MS = 2400;
+      const READY_HOLD_MS = 460;
+
       const acc = await authStore.current();
       if (!alive) return;
-      setAccount(acc ?? null); setBoot(1); await pause(160);
+      setAccount(acc ?? null); setBoot(1); await pause(240);
 
       const prof = await loadProfile();
       if (!alive) return;
-      setProfile(prof); setBoot(2); await pause(160);
+      setProfile(prof); setBoot(2); await pause(260);
 
       // Прогрев: одноразовая комната прогоняется вхолостую, чтобы JIT
       // скомпилировал клиринг и решения ботов до первой настоящей сессии.
@@ -5437,6 +5519,11 @@ function PracticeApp({ onExit }) {
       } catch (_) {}
       if (!alive) return;
       setBoot(3);
+
+      const elapsed = Date.now() - startedAt;
+      await pause(Math.max(READY_HOLD_MS, MIN_TOTAL_BOOT_MS - elapsed));
+      if (!alive) return;
+      setBoot(4);
     })();
     return () => { alive = false; };
   }, []);
@@ -5552,7 +5639,7 @@ function PracticeApp({ onExit }) {
     setScreen("result");
   };
 
-  if (boot < 3 || !profile || account === undefined) return <Boot done={boot} />;
+  if (boot < 4 || !profile || account === undefined) return <Boot done={boot} />;
 
   // Не вошёл — показываем онбординг, затем экран входа/регистрации.
   if (!account) {
