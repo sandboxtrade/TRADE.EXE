@@ -2580,6 +2580,7 @@ class FreeMarketLegacyRoom extends LegacyRoom {
     const equity = p.cash;
     p.cash = 0; p.u = 0; p.startingCapital = 0;
     p.entryPrice = null; p.invested = 0; p.basis = 0;
+    p.realizedPnL = 0; p.tradeCount = 0; p.liquidatedAt = null;
     p.stopLoss = null; p.takeProfit = null; p.limits = [];
     m.C = Math.max(1e-9, m.C - equity);
     m.startingCapital = m.C / m.players.length;
@@ -3272,7 +3273,7 @@ function Chart({ state, timeframe, mode, entryPrice, stopLoss, takeProfit,
           strokeDasharray={dash} opacity={strong ? 1 : 0.75} />
         <rect x={2} y={toY(value) - 13} width={label.length * 5.6 + 8} height={12} rx={2}
           fill={BG} opacity={0.75} />
-        <text x={6} y={toY(value) - 4} fill={color} fontSize={9} fontFamily="SamsonDigits, Neogurotesuku, monospace">
+        <text x={6} y={toY(value) - 4} fill={color} fontSize={9} fontFamily="RodchenkoDigits, Neogurotesuku, monospace">
           {label}
         </text>
         {strong && (
@@ -3280,7 +3281,7 @@ function Chart({ state, timeframe, mode, entryPrice, stopLoss, takeProfit,
             <rect x={plotW + 1} y={toY(value) - 8} width={AXIS_W - 2} height={16} rx={3}
               fill={BG} stroke={color} strokeWidth={1} />
             <text x={plotW + AXIS_W / 2} y={toY(value) + 4} textAnchor="middle"
-              fill={color} fontSize={10} fontFamily="SamsonDigits, Neogurotesuku, monospace">
+              fill={color} fontSize={10} fontFamily="RodchenkoDigits, Neogurotesuku, monospace">
               {value.toFixed(2)}
             </text>
           </>
@@ -3310,7 +3311,7 @@ function Chart({ state, timeframe, mode, entryPrice, stopLoss, takeProfit,
           <g key={p}>
             <line x1={0} x2={plotW} y1={toY(p)} y2={toY(p)} stroke={HAIR} strokeWidth={1} />
             <text x={plotW + 6} y={toY(p) + 3.5} fill={FAINT} fontSize={10.5}
-              fontFamily="SamsonDigits, Neogurotesuku, monospace">{p.toFixed(digits)}</text>
+              fontFamily="RodchenkoDigits, Neogurotesuku, monospace">{p.toFixed(digits)}</text>
           </g>
         ))}
 
@@ -3347,7 +3348,7 @@ function Chart({ state, timeframe, mode, entryPrice, stopLoss, takeProfit,
                   strokeWidth={0.8} opacity={0.5} strokeDasharray={thin ? "2 4" : ""} />
                 <line x1={0} x2={plotW} y1={c.y2} y2={c.y2} stroke={color}
                   strokeWidth={0.8} opacity={0.5} strokeDasharray={thin ? "2 4" : ""} />
-                <text x={5} y={c.y1 + h / 2 + 3} fontSize={9} fontFamily="SamsonDigits, Neogurotesuku, monospace"
+                <text x={5} y={c.y1 + h / 2 + 3} fontSize={9} fontFamily="RodchenkoDigits, Neogurotesuku, monospace"
                   fill={color} opacity={0.95}>
                   {c.type} {c.side} · {fmt(c.volume, 0)} · {c.participants}
                 </text>
@@ -3424,7 +3425,7 @@ function Chart({ state, timeframe, mode, entryPrice, stopLoss, takeProfit,
         <rect x={plotW + 1} y={priceY - 9} width={AXIS_W - 2} height={18} rx={3}
           fill={up ? LONG : SHORT} />
         <text x={plotW + AXIS_W / 2} y={priceY + 4} textAnchor="middle" fill={BG}
-          fontSize={11.5} fontFamily="SamsonDigits, Neogurotesuku, monospace" fontWeight="700">
+          fontSize={11.5} fontFamily="RodchenkoDigits, Neogurotesuku, monospace" fontWeight="700">
           {state.price.toFixed(2)}
         </text>
       </svg>
@@ -4503,14 +4504,14 @@ function EquityCurve({ sessions, rangeMs }) {
           <line x1={0} x2={W - PADR} y1={y(v)} y2={y(v)}
             stroke={HAIR} strokeWidth={0.7} strokeDasharray="2 4" />
           <text x={W - PADR + 7} y={y(v) + 3.2} fill={FAINT} fontSize={8.5}
-            fontFamily="SamsonDigits, Neogurotesuku, monospace">{fmtSigned(v, 0)}</text>
+            fontFamily="RodchenkoDigits, Neogurotesuku, monospace">{fmtSigned(v, 0)}</text>
         </g>
       ))}
 
       {/* нулевая линия — опора для взгляда */}
       <line x1={0} x2={W - PADR} y1={zeroY} y2={zeroY} stroke={DIM} strokeWidth={0.9} />
       <text x={W - PADR + 7} y={zeroY + 3.2} fill={DIM} fontSize={8.5}
-        fontFamily="SamsonDigits, Neogurotesuku, monospace">$0</text>
+        fontFamily="RodchenkoDigits, Neogurotesuku, monospace">$0</text>
 
       <g className="tx-fade">
         <path d={area} fill={`url(#${uid}g)`} clipPath={`url(#${uid}up)`} />
@@ -4530,8 +4531,8 @@ function EquityCurve({ sessions, rangeMs }) {
       <circle cx={x(t1)} cy={y(acc)} r={5.5} fill={up ? ACCENT : SHORT} opacity={0.16} />
       <circle cx={x(t1)} cy={y(acc)} r={2.8} fill={up ? ACCENT : SHORT} />
 
-      <text x={0} y={H - 4} fill={FAINT} fontSize={8.5} fontFamily="SamsonDigits, Neogurotesuku, monospace">{hhmm(t0)}</text>
-      <text x={x(t1)} y={H - 4} fill={FAINT} fontSize={8.5} fontFamily="SamsonDigits, Neogurotesuku, monospace"
+      <text x={0} y={H - 4} fill={FAINT} fontSize={8.5} fontFamily="RodchenkoDigits, Neogurotesuku, monospace">{hhmm(t0)}</text>
+      <text x={x(t1)} y={H - 4} fill={FAINT} fontSize={8.5} fontFamily="RodchenkoDigits, Neogurotesuku, monospace"
         textAnchor="end">{hhmm(t1)}</text>
     </svg>
   );
@@ -4807,32 +4808,45 @@ function ModeCard({ kind, title, text, cta, primary, onClick, disabled }) {
 }
 
 function FreeMarketMiniCard({ onClick }) {
-  const fm = CONFIG.market.freeMarket;
+  const fm = FREE_MARKET;
   return (
     <button onClick={onClick}
-      className="rounded-2xl p-3 text-left shrink-0 flex flex-col justify-between tap"
-      style={{ width: 162, minHeight: 128, backgroundColor: SURFACE, border: `1px solid ${HAIR}` }}>
-      <div className="flex items-start justify-between gap-2">
-        <div className="min-w-0">
-          <div className="text-[9px] tracking-[0.2em] truncate" style={{ color: FAINT }}>СВОБОДНЫЙ РЫНОК</div>
-          <div className="text-[12px] mt-1 leading-tight" style={{ color: TEXT }}>всегда открыт</div>
+      className="w-full rounded-[26px] p-3.5 text-left tap"
+      style={{ backgroundColor: SURFACE, border: `1px solid ${HAIR}` }}>
+      <div className="flex items-start justify-between gap-3">
+        <div className="min-w-0 flex-1">
+          <div className="flex items-center gap-2 flex-wrap">
+            <div className="text-[10px] tracking-[0.22em] leading-none" style={{ color: FAINT }}>
+              СВОБОДНЫЙ РЫНОК
+            </div>
+            <span className="text-[9px] px-2 py-1 rounded-full"
+              style={{ color: ACCENT, backgroundColor: RAISED, border: `1px solid ${HAIR}` }}>LIVE</span>
+          </div>
+          <div className="text-[20px] leading-none mt-3" style={{ color: TEXT }}>всегда открыт</div>
+          <div className="text-[11px] leading-snug mt-2.5 max-w-[240px]" style={{ color: DIM }}>
+            {fm.botCount.toLocaleString("ru-RU")} ботов с разными балансами и стратегиями. Войти можно в любой момент.
+          </div>
         </div>
-        <span className="text-[9px] px-2 py-1 rounded-full shrink-0"
-          style={{ color: ACCENT, backgroundColor: RAISED, border: `1px solid ${HAIR}` }}>LIVE</span>
+
+        <div className="w-[132px] shrink-0 rounded-[20px] overflow-hidden"
+          style={{ backgroundColor: "#08080A", border: `1px solid ${HAIR}` }}>
+          <ModeArt kind="free" />
+        </div>
       </div>
 
-      <div className="rounded-xl mt-2 overflow-hidden" style={{ backgroundColor: "#08080A" }}>
-        <ModeArt kind="free" />
-      </div>
-
-      <div className="grid grid-cols-2 gap-2 mt-2.5">
+      <div className="grid grid-cols-3 gap-2 mt-3.5 pt-3"
+        style={{ borderTop: `1px solid ${HAIR}` }}>
         <div>
           <div className="text-[8px] tracking-[0.16em]" style={{ color: FAINT }}>УЧАСТНИКИ</div>
-          <div className="text-[12px] font-mono mt-0.5">5 000 BOT</div>
+          <div className="text-[13px] font-mono mt-1">{fm.botCount.toLocaleString("ru-RU")} BOT</div>
         </div>
         <div>
           <div className="text-[8px] tracking-[0.16em]" style={{ color: FAINT }}>ВХОД</div>
-          <div className="text-[12px] font-mono mt-0.5">$10–$10K</div>
+          <div className="text-[13px] font-mono mt-1">{fmt(fm.minCapital, 0)}–{fmt(fm.maxCapital, 0)}</div>
+        </div>
+        <div>
+          <div className="text-[8px] tracking-[0.16em]" style={{ color: FAINT }}>РЕЖИМ</div>
+          <div className="text-[13px] font-mono mt-1">24/7</div>
         </div>
       </div>
     </button>
@@ -5715,20 +5729,21 @@ function Lobby({ profile, account, onNew, onFree, onReset, onExit, onSignOut, on
                  сумму на середину экрана.
                  Сумма набрана обычным шрифтом, а не моноширинным:
                  моноширинный на большом кегле читается как терминал. */}
-              <div className="mt-6 grid grid-cols-[minmax(0,1fr)_162px] gap-3 items-start">
-                <div className="min-w-0">
-                  <div className="text-[11px] tracking-[0.18em]" style={{ color: "#6E6E76" }}>
-                    БАЛАНС
-                  </div>
-                  <div className="text-[38px] leading-[1.05] font-semibold tracking-tight truncate tx-pop mt-1">
-                    {fmt(profile.wallet, 0)}
-                  </div>
-                  <div className="text-[13px] mt-1.5"
-                    style={{ color: st.total > 0 ? LONG : st.total < 0 ? SHORT : DIM }}>
-                    {st.count === 0 ? "сессий ещё не было"
-                      : `${fmtSigned(st.total)} за ${st.count} сесс.`}
-                  </div>
+              <div className="mt-6">
+                <div className="text-[11px] tracking-[0.18em]" style={{ color: "#6E6E76" }}>
+                  БАЛАНС
                 </div>
+                <div className="text-[38px] leading-[1.05] font-semibold tracking-tight truncate tx-pop mt-1">
+                  {fmt(profile.wallet, 0)}
+                </div>
+                <div className="text-[13px] mt-1.5"
+                  style={{ color: st.total > 0 ? LONG : st.total < 0 ? SHORT : DIM }}>
+                  {st.count === 0 ? "сессий ещё не было"
+                    : `${fmtSigned(st.total)} за ${st.count} сесс.`}
+                </div>
+              </div>
+
+              <div className="mt-4">
                 <FreeMarketMiniCard onClick={onFree} />
               </div>
 
@@ -5916,11 +5931,11 @@ function FreeMarketSetup({ wallet, onStart, onBack }) {
         <div className="grid grid-cols-2 gap-2 mt-3">
           <div className="rounded-xl px-4 py-3" style={{ backgroundColor: SURFACE, border: `1px solid ${HAIR}` }}>
             <div className="text-[9px] tracking-[0.16em]" style={{ color: FAINT }}>БОТОВ В РЫНКЕ</div>
-            <div className="text-[18px] font-mono mt-1">5,000</div>
+            <div className="text-[18px] font-mono mt-1">{FREE_MARKET.botCount.toLocaleString("en-US")}</div>
           </div>
           <div className="rounded-xl px-4 py-3" style={{ backgroundColor: SURFACE, border: `1px solid ${HAIR}` }}>
             <div className="text-[9px] tracking-[0.16em]" style={{ color: FAINT }}>ВХОД</div>
-            <div className="text-[18px] font-mono mt-1">$10–$10K</div>
+            <div className="text-[18px] font-mono mt-1">{fmt(FREE_MARKET.minCapital, 0)}–{fmt(FREE_MARKET.maxCapital, 0)}</div>
           </div>
         </div>
 
