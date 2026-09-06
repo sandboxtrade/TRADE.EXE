@@ -336,6 +336,12 @@ class Market {
    * даёт −2.8 при 40%.
    */
   sidesBasis() {
+    // В свободном рынке pendingIntents уже делает обязательный проход по
+    // 5 001 счёту ради стопов/тейков. Переиспользуем собранную там книгу,
+    // чтобы maker/crowd-стратегии не запускали дополнительные O(N) проходы.
+    if (this.freeMarket && this._freePreStats) {
+      return { L: this._freePreStats.longBasis || 0, S: this._freePreStats.shortBasis || 0 };
+    }
     let L = 0, S = 0;
     for (const p of this.players) {
       if (p.u > 0) L += p.basis; else if (p.u < 0) S += p.basis;
@@ -376,8 +382,10 @@ class Market {
        сдвинуть цену — как на настоящем рынке. Замер: удар заявки на $1000
        в комнате 100 x $1000 упал с 1.73% до 0.25%. */
     const n = this.players.length;
+    const book = this.freeMarket && Number.isFinite(this._freePreStats?.escrow)
+      ? this._freePreStats.escrow : this.escrow;
     return Math.pow(n / 100, 0.35) /
-      Math.max(1e-9, this.C * CONFIG.DEPTH_FRACTION + CONFIG.DEPTH_BOOK * this.escrow);
+      Math.max(1e-9, this.C * CONFIG.DEPTH_FRACTION + CONFIG.DEPTH_BOOK * book);
   }
 
   /** Сколько участник получит, если закроется сейчас: ровно свою ставку. */
@@ -517,7 +525,7 @@ class Market {
        сработал margin-call/stop/take/leave, он полностью подавляет рыночные,
        лимитные и NPC-намерения этого же участника. Иначе CLOSE мог случайно
        превратиться в разворот позиции. */
-    const PRIORITY = { leave: 5, liquidation: 4, stop: 3, take: 3 };
+    const PRIORITY = { leave: 5, "free-retire": 5, liquidation: 4, stop: 3, take: 3 };
     const merged = new Map();
     for (const o of orders) {
       if (!Number.isFinite(o.du) || o.du === 0) continue;
@@ -696,7 +704,7 @@ function checkInvariants(m, ctx = {}) {
     const lev = m.playerLeverage(p.id) > 1;
     if (!lev && p.cash < -TN) errs.push(`cash < 0 у #${p.id}: ${p.cash}`);
     if (!lev && m.equity(p.id) < -TN) errs.push(`equity < 0 у #${p.id}: ${m.equity(p.id)}`);
-    if (lev && m.equity(p.id) < -m.startingCapital * 4)
+    if (lev && m.equity(p.id) < -(p.startingCapital ?? m.startingCapital) * 4)
       errs.push(`неуправляемый долг у #${p.id}: ${m.equity(p.id)}`);
     if (!Number.isFinite(p.cash) || !Number.isFinite(p.u))
       errs.push(`не-число у #${p.id}`);
@@ -814,62 +822,46 @@ const TYPES = Object.keys(ARCHETYPES);
 const TREND_BIASES = new Set(["trend", "break", "hunt", "pullback", "flow",
   "accel", "chase", "squeeze", "copy"]);
 
-function attachNPCs(m, startIdx, count, seed, eyes = false) {
+function makeNPCState(type, spec, r, seed, ordinal) {
+  return {
+    type, spec,
+    size: CONFIG.NPC_SIZE_SCALE * (spec.size[0] + r() * (spec.size[1] - spec.size[0]))
+      * (TREND_BIASES.has(spec.bias) ? CONFIG.NPC_TREND_SIZE : 1)
+      * (spec.fast
+        ? (spec.bias === "fade" ? CONFIG.NPC_FAST_FADE_WEIGHT : CONFIG.NPC_FAST_TREND_WEIGHT)
+        : 1),
+    act: spec.act * (0.6 + 0.8 * r()) * CONFIG.NPC_ACT_SCALE,
+    lag: r() < CONFIG.NPC_INSTANT_FRACTION ? 1 : 2 + Math.floor(r() * 5),
+    look: Math.round(5 * Math.pow(48, r())),
+    thresh: (0.0004 + r() * 0.006) * CONFIG.NPC_THRESH_SCALE,
+    herd: r() * CONFIG.NPC_HERD_MAX,
+    trail: spec.bias === "trend" || spec.bias === "break" ? 0.3 + r() * 0.5 : 0,
+    stop: spec.stop * CONFIG.NPC_PNL_SCALE,
+    take: spec.take * CONFIG.NPC_PNL_SCALE,
+    hold: Math.round(CONFIG.NPC_HOLD_MIN +
+      r() * (CONFIG.NPC_HOLD_MAX - CONFIG.NPC_HOLD_MIN)),
+    usesOrders: r() < CONFIG.NPC_ORDER_FRACTION,
+    patience: 6 + Math.floor(r() * 40),
+    minGap: Math.round(CONFIG.NPC_MIN_GAP * Math.pow(4, r())),
+    flushAt: 0.88 + r() * 0.11,
+    lastTrade: -1e9, urgent: false,
+    flexibility: 0.15 + r() * 0.7,
+    since: 0, lastU: 0, lastBasis: 0, peak: 0, conviction: 1, mood: 0,
+    cooldown: 0, edge: 0, trades: 0, losses: 0, flipped: 0,
+    startEquity: null, entryEquity: null,
+    rng: mulberry32(seed * 7919 + ordinal + 1),
+  };
+}
+
+function attachNPCs(m, startIdx, count, seed, eyes = false, typeList = TYPES) {
   const r = mulberry32(seed);
+  const list = typeList && typeList.length ? typeList : TYPES;
   for (let k = 0; k < count; k++) {
-    const type = TYPES[k % TYPES.length];
+    const type = list[k % list.length];
     const spec = ARCHETYPES[type];
     const idx = startIdx + k;
     m.players[idx].name = `${type}-${k}`;
-    m.players[idx].npc = {
-      type, spec,
-      // Вес быстрых контр-трендовых подобран замером: при множителе 1
-      // автокорреляция +0.33, при 5 она −0.35, ноль приходится на 2.2.
-      size: CONFIG.NPC_SIZE_SCALE * (spec.size[0] + r() * (spec.size[1] - spec.size[0]))
-        * (TREND_BIASES.has(spec.bias) ? CONFIG.NPC_TREND_SIZE : 1)
-        * (spec.fast
-          ? (spec.bias === "fade" ? CONFIG.NPC_FAST_FADE_WEIGHT : CONFIG.NPC_FAST_TREND_WEIGHT)
-          : 1),
-      act: spec.act * (0.6 + 0.8 * r()) * CONFIG.NPC_ACT_SCALE,
-      // Доля с МИНИМАЛЬНОЙ задержкой. Лаг реакции был единственной причиной
-      // эксплойта самораскачки: при lag=1 её EV становится отрицательным.
-      lag: r() < CONFIG.NPC_INSTANT_FRACTION ? 1 : 2 + Math.floor(r() * 5),
-      // РАЗНЫЕ ГОРИЗОНТЫ. Раньше все смотрели на 1-5 тиков назад и потому
-      // реагировали на один и тот же шум — отсюда «боковик от одних уровней».
-      // Теперь окна разбросаны от 5 до 240 тиков по логарифмической шкале.
-      look: Math.round(5 * Math.pow(48, r())),
-      // Порог входа: ниже него движение считается шумом.
-      thresh: (0.0004 + r() * 0.006) * CONFIG.NPC_THRESH_SCALE,
-      // Насколько бот подхватывает настроение толпы.
-      herd: r() * CONFIG.NPC_HERD_MAX,
-      // Трейлинг для трендовых: тейк не срезает движение на старте.
-      trail: spec.bias === "trend" || spec.bias === "break" ? 0.3 + r() * 0.5 : 0,
-      stop: spec.stop * CONFIG.NPC_PNL_SCALE,
-      take: spec.take * CONFIG.NPC_PNL_SCALE,
-      hold: Math.round(CONFIG.NPC_HOLD_MIN +
-        r() * (CONFIG.NPC_HOLD_MAX - CONFIG.NPC_HOLD_MIN)),
-      // Часть ботов выставляет НАСТОЯЩИЕ заявки стоп/тейк, а не проверяет
-      // пороги у себя внутри. Их срабатывание идёт через pendingIntents в
-      // общем клиринге, поэтому массовый вынос стопов виден как каскад.
-      usesOrders: r() < CONFIG.NPC_ORDER_FRACTION,
-      // Терпение: сколько тиков бот выжидает после выхода. После убытка
-      // пауза длиннее — как у человека, который «отходит от сделки».
-      patience: 6 + Math.floor(r() * 40),
-      /* Минимальный интервал между действиями, в тиках. Логарифмический
-         разброс: примерно от 1.5 до 45 секунд. Скальперы внизу диапазона,
-         долгосрочные наверху. */
-      minGap: Math.round(CONFIG.NPC_MIN_GAP * Math.pow(4, r())),
-      // Своя точка разгрузки в конце сессии, от 75% до 97% времени.
-      flushAt: 0.88 + r() * 0.11,
-      lastTrade: -1e9, urgent: false,
-      // Насколько бот готов нарушить собственную стратегию, когда она
-      // перестала работать. 0 — догматик, 1 — легко переобувается.
-      flexibility: 0.15 + r() * 0.7,
-      since: 0, lastU: 0, lastBasis: 0, peak: 0, conviction: 1, mood: 0,
-      cooldown: 0, edge: 0, trades: 0, losses: 0, flipped: 0,
-      startEquity: null, entryEquity: null,
-      rng: mulberry32(seed * 7919 + k + 1),
-    };
+    m.players[idx].npc = makeNPCState(type, spec, r, seed, k);
   }
 }
 
@@ -897,6 +889,8 @@ function windowWidth(history, look, P) {
  * скрытых полей снапшота это не раскрывает: подражатель — такой же бот.
  */
 function leaderSide(m) {
+  if (m.freeMarket && Number.isFinite(m._freePreStats?.leaderSide))
+    return m._freePreStats.leaderSide;
   let best = null, bestPnL = 0;
   for (const p of m.players) {
     if (p.u === 0) continue;
@@ -962,7 +956,8 @@ function decideRaw(m, i, history) {
   const r = n.rng;
   const P = m.mark;
   const equity = m.equity(i);
-  if (pl.u === 0 && pl.cash <= m.startingCapital * 0.02) return 0;   // сгорел
+  const stake = pl.startingCapital ?? m.startingCapital;
+  if (pl.u === 0 && pl.cash <= stake * 0.02) return 0;   // сгорел
 
   /* ------------------------- ВРЕМЯ СЕССИИ -------------------------------
      Комната закрывается по общему таймеру, поэтому время для бота — такой
@@ -1017,7 +1012,7 @@ function decideRaw(m, i, history) {
        Именно из-за этого книга держалась на 0.5% капитала комнаты, рынок
        был вялым, а вход игрока на $1000 рисовал свечу во весь экран.
        Остаток меньше 1% взноса закрывается полностью. */
-    if (Math.abs(pl.u) < m.startingCapital * 0.01) {
+    if (Math.abs(pl.u) < stake * 0.01) {
       n.urgent = true; close(n, pnl > 0, equity); return -pl.u;
     }
     // Комната вот-вот закроется — держать позицию больше незачем.
@@ -1056,7 +1051,12 @@ function decideRaw(m, i, history) {
     if (r() < 0.12) {
       if (withFlow && pnl > 0 && n.conviction > 1) {
         const own = Math.max(0, pl.cash + m.curve.value(pl.u, P));
-        const add = m.curve.unitsFor(own * n.size * 0.4 * n.conviction * m.npcLeverage, P);
+        let addBudget = own * n.size * 0.4 * n.conviction * m.npcLeverage;
+        if (m.freeMarket && Number.isFinite(n.freeRiskCap)) {
+          const maxGross = own * n.freeRiskCap;
+          addBudget = Math.min(addBudget, Math.max(0, maxGross - Math.abs(pl.u)));
+        }
+        const add = m.curve.unitsFor(addBudget, P);
         return pl.u > 0 ? add : -add;
       }
       if (r() < 0.5) return -pl.u * (0.25 + 0.35 * r());
@@ -1213,6 +1213,11 @@ function decideRaw(m, i, history) {
   const drawdown = n.startEquity ? (n.startEquity - equity) / n.startEquity : 0;
   const appetite = clamp(1 + drawdown * 1.5, 0.55, 1.7);
   let budget = own * n.size * n.conviction * appetite * phSize * m.npcLeverage;
+  // В бессрочном рынке крупный счёт не должен механически доминировать
+  // только из-за размера. У каждого капитального класса есть собственный
+  // риск-бюджет: micro может рисковать большей долей счёта, whale — меньшей.
+  if (m.freeMarket && Number.isFinite(n.freeRiskCap))
+    budget = Math.min(budget, own * n.freeRiskCap);
   if (budget <= 0) return 0;
 
   let units = m.curve.unitsFor(budget, P);
@@ -1231,7 +1236,7 @@ function decideRaw(m, i, history) {
     units *= Math.max(scale, 0.05);
     budget *= Math.max(scale, 0.05);
   }
-  if (budget < m.startingCapital * 0.01) return 0;   // мелочь не стоит комиссии внимания
+  if (budget < stake * 0.01) return 0;   // мелочь не стоит комиссии внимания
 
   n.entryEquity = equity;
   if (n.usesOrders) {
@@ -1259,6 +1264,10 @@ function decideRaw(m, i, history) {
 function decide(m, i, history) {
   const pl = m.players[i], n = pl.npc;
   if (!n) return 0;
+
+  // Участник уже решил уйти из бессрочного рынка. Пока его позиция
+  // закрывается через приоритетный free-retire, новых входов/доливок нет.
+  if (m.freeMarket && n.retireRequested) return 0;
 
   syncNPCState(m, i);
   const gap = m.tick - (n.lastTrade ?? -1e9);
@@ -1321,11 +1330,37 @@ function note(n, win) {
 
 function npcIntents(m, history, fromIdx) {
   const out = [];
-  for (let i = fromIdx; i < m.players.length; i++) {
-    if (!m.players[i].npc) continue;
+  const start = Math.max(0, fromIdx || 0);
+  const total = m.players.length - start;
+  const batch = Math.max(0, Math.min(total, m.npcBatchSize || total));
+
+  // Обычные комнаты по-прежнему проверяют всех NPC каждый тик. Свободный
+  // рынок держит 5 000 реальных объектов-ботов, но распределяет их решения
+  // по тикам. При batch=160 каждый бот переоценивает рынок примерно раз в
+  // 3.1 секунды при tick=100 мс — это сохраняет разнообразие стратегий и
+  // не заставляет телефон выполнять 50 000 тяжёлых решений в секунду.
+  if (batch >= total) {
+    for (let i = start; i < m.players.length; i++) {
+      if (!m.players[i].npc) continue;
+      const du = decide(m, i, history);
+      if (Math.abs(du) > 1e-12) out.push({ i, du, reason: "npc" });
+    }
+    return out;
+  }
+
+  let cursor = Number.isFinite(m.npcCursor) ? m.npcCursor : start;
+  if (cursor < start || cursor >= m.players.length) cursor = start;
+  let seen = 0;
+  while (seen < batch) {
+    const i = cursor;
+    cursor++;
+    if (cursor >= m.players.length) cursor = start;
+    seen++;
+    if (!m.players[i]?.npc) continue;
     const du = decide(m, i, history);
     if (Math.abs(du) > 1e-12) out.push({ i, du, reason: "npc" });
   }
+  m.npcCursor = cursor;
   return out;
 }
 
@@ -1442,7 +1477,26 @@ function commandToIntent(m, i, cmd) {
 function pendingIntents(m) {
   const out = [];
   const P = m.mark;
+  // В свободном рынке этот проход всё равно нужен для SL/TP/лимиток всех
+  // 5 000 ботов. Заодно собираем агрегаты книги и переиспользуем их в
+  // depth/crowd, чтобы не сканировать весь массив ещё 2–3 раза за тик.
+  let freeL = 0, freeS = 0, freeLBasis = 0, freeSBasis = 0, freeEscrow = 0;
+  let freeLeaderPnL = -Infinity, freeLeaderSide = 0;
   for (const pl of m.players) {
+    if (m.freeMarket && pl.u !== 0) {
+      freeEscrow += Math.abs(pl.u);
+      if (pl.u > 0) { freeL++; freeLBasis += pl.basis; }
+      else { freeS++; freeSBasis += pl.basis; }
+      if (pl.realizedPnL > freeLeaderPnL) {
+        freeLeaderPnL = pl.realizedPnL; freeLeaderSide = Math.sign(pl.u);
+      }
+    }
+    // Уходящий бот закрывается приоритетно. Новый участник появится только
+    // после того, как старый полностью вышел из позиции.
+    if (m.freeMarket && pl.npc?.retireRequested && pl.u !== 0) {
+      out.push({ i: pl.id, du: -pl.u, reason: "free-retire" });
+      continue;
+    }
     if (pl.u !== 0 && pl.entryPrice !== null) {
       const long = pl.u > 0;
       if (pl.stopLoss !== null &&
@@ -1467,6 +1521,13 @@ function pendingIntents(m) {
         });
       }
     }
+  }
+  if (m.freeMarket) {
+    m._freePreStats = {
+      longPlayers: freeL, shortPlayers: freeS,
+      longBasis: freeLBasis, shortBasis: freeSBasis,
+      escrow: freeEscrow, leaderSide: freeLeaderSide, leaderPnL: freeLeaderPnL,
+    };
   }
   return out;
 }
@@ -1747,6 +1808,11 @@ class RoomV4 {
 
     m.accrueBorrowCost();
 
+    // Бессрочный рынок не может состоять из одного и того же замороженного
+    // населения вечно. Небольшими порциями выводим истощённые/старые счета
+    // и заводим новых ботов, сохраняя ровно 5 000 NPC без массовых скачков.
+    if (m.freeMarket) freeMarketLifecycle(m);
+
     const intents = [];
     // Маржин-колл идёт ПЕРВЫМ и в том же клиринге, что и всё остальное:
     // единая цена тика не даёт ликвидируемым проскочить раньше других.
@@ -1762,22 +1828,35 @@ class RoomV4 {
 
     const result = m.clear(intents);
     reconcileLimitFills(m, result.executed);
-    // Перекос толпы: доля участников в лонге минус доля в шорте.
-    // Считается один раз за тик и раздаётся всем — стадные боты смотрят
-    // именно на него, а не на цену.
-    let L = 0, S = 0;
-    for (const p of m.players) { if (p.u > 0) L++; else if (p.u < 0) S++; }
-    m.crowd = L + S > 0 ? (L - S) / (L + S) : 0;
-    /* Перекос ДЕНЕГ в книге. Считается один раз за тик и раздаётся всем,
-       как и m.crowd: боты не имеют права заглядывать в чужие позиции по
-       отдельности, им доступна только агрегированная величина. */
-    const sd = m.sidesBasis();
-    m.crowdMoney = sd.L + sd.S > 0 ? (sd.L - sd.S) / (sd.L + sd.S) : 0;
+    // Для 5 000 NPC повторный полный обход после клиринга слишком дорог.
+    // pendingIntents уже собрал состояние книги перед этим тиком; задержка
+    // crowd-сигнала на один тик = 100 мс и не даёт ботам дополнительной
+    // информации, зато убирает два полных прохода по 5 001 участнику.
+    if (m.freeMarket && m._freePreStats) {
+      const s = m._freePreStats;
+      const N = s.longPlayers + s.shortPlayers;
+      m.crowd = N > 0 ? (s.longPlayers - s.shortPlayers) / N : 0;
+      const B = s.longBasis + s.shortBasis;
+      m.crowdMoney = B > 0 ? (s.longBasis - s.shortBasis) / B : 0;
+    } else {
+      let L = 0, S = 0;
+      for (const p of m.players) { if (p.u > 0) L++; else if (p.u < 0) S++; }
+      m.crowd = L + S > 0 ? (L - S) / (L + S) : 0;
+      const sd = m.sidesBasis();
+      m.crowdMoney = sd.L + sd.S > 0 ? (sd.L - sd.S) / (sd.L + sd.S) : 0;
+    }
     this.history.push(m.mark);
-    if (this.history.length > 5000) this.history.shift();
+    if (m.freeMarket) {
+      if (this.history.length > 5200) this.history.splice(0, 200);
+    } else if (this.history.length > 5000) {
+      this.history.shift();
+    }
 
-    const inv = checkInvariants(m, { intents: intents.length });
-    if (!inv.ok) { this.halted = inv.report; return inv.report; }
+    const every = Math.max(1, m.invariantEvery || 1);
+    if (m.tick % every === 0) {
+      const inv = checkInvariants(m, { intents: intents.length });
+      if (!inv.ok) { this.halted = inv.report; return inv.report; }
+    }
     return result;
   }
 
@@ -1805,6 +1884,14 @@ CONFIG.market = {
   totalPlayers: 100,
   playerOptions: [100, 300, 500],   // сколько всего участников в комнате
   capitalOptions: [100, 500, 1000, 10000],
+  freeMarket: {
+    title: "СВОБОДНЫЙ РЫНОК",
+    minCapital: 10,
+    maxCapital: 10000,
+    botCount: 5000,
+    alwaysOpen: true,
+    noRoomLimits: true,
+  },
   durationOptions: [1, 5, 10, 30],     // минуты
   /* Плечо. Заём берётся из общей кассы комнаты, за него взимается плата
      (LEV_BORROW_RATE), ниже уровня поддержки позиция закрывается
@@ -2221,6 +2308,429 @@ LegacyRoom.ROSTER_EVERY = 3;
 // Старый интерфейс ожидает класс "Room" со старым API — LegacyRoom это и есть.
 const Room = LegacyRoom;
 
+/* ============================ СВОБОДНЫЙ РЫНОК =============================
+   Отдельная ветка движка. Это НЕ комната и не длинная сессия:
+   - нет таймера и warmup;
+   - 5 000 NPC существуют одновременно;
+   - у каждого свой стартовый капитал $10…$10 000;
+   - бот использует собственный капитал для размера позиции и порогов риска;
+   - тяжёлые решения NPC распределяются по тикам, а риск-ордера проверяются
+     каждый тик для всех игроков.
+
+   Локальная версия создаёт уже "живой" рынок через preroll при входе.
+   Настоящая непрерывность между устройствами/пользователями будет серверным
+   этапом: один authoritative FreeMarketRoom вместо отдельного экземпляра в
+   каждом браузере. Математика ниже для этого уже отделена от UI.
+   ========================================================================== */
+const FREE_MARKET = {
+  botCount: 5000,
+  minCapital: 10,
+  maxCapital: 10000,
+  npcBatchSize: 160,
+  prerollTicks: 500,
+  snapshotEvery: 5,          // тяжёлые агрегаты — 2 раза/с
+  uiSnapshotMs: 200,         // React получает 5 кадров/с, движок тикает 10/с
+  invariantEvery: 10,        // полный аудит 5 001 счёта раз в секунду
+  rosterSample: 120,
+  historyLimit: 6000,
+  lifecycleEvery: 50,        // каждые 5 секунд — лёгкий проход за ротацией
+  lifecycleMaxPerPass: 8,    // не больше 8 замен за раз, без массового шока
+  retireMinTicks: 9000,      // естественная жизнь бота: от ~15 минут
+  retireMaxTicks: 54000,     // до ~90 минут
+  distressFraction: 0.035,   // <3.5% исходного счёта — участник уходит
+};
+
+// В free-market нет заведомо «inactive»: все пять тысяч — участники,
+// способные торговать. Долгосрочные остаются медленными, но не выключенными.
+const FREE_TYPES = TYPES.filter((t) => t !== "inactive");
+
+const FREE_TIERS = [
+  { key: "micro",  max: 100,      risk: [0.72, 0.95], act: 1.18, gap: 0.72, look: 0.78, hold: 0.82, orders: 0.34 },
+  { key: "retail", max: 1000,     risk: [0.58, 0.82], act: 1.05, gap: 0.95, look: 0.95, hold: 1.00, orders: 0.46 },
+  { key: "pro",    max: 5000,     risk: [0.42, 0.64], act: 0.86, gap: 1.18, look: 1.22, hold: 1.24, orders: 0.62 },
+  { key: "whale",  max: Infinity, risk: [0.24, 0.42], act: 0.66, gap: 1.48, look: 1.55, hold: 1.52, orders: 0.78 },
+];
+
+function freeTierFor(capital) {
+  return FREE_TIERS.find((t) => capital < t.max) || FREE_TIERS[FREE_TIERS.length - 1];
+}
+
+function freeBotCapital(r) {
+  // Явные слои населения. Малых счетов много, крупных мало; при этом
+  // диапазон $10…$10k используется весь, а не только середина.
+  const u = r();
+  let lo, hi;
+  if (u < 0.40) { lo = 10; hi = 100; }
+  else if (u < 0.75) { lo = 100; hi = 1000; }
+  else if (u < 0.95) { lo = 1000; hi = 5000; }
+  else { lo = 5000; hi = 10000; }
+  return Math.round(lo * Math.pow(hi / lo, r()));
+}
+
+function applyFreePersonality(p, r, tick = 0, generation = 0) {
+  const n = p.npc;
+  if (!n) return;
+  const tier = freeTierFor(p.startingCapital || p.cash || FREE_MARKET.minCapital);
+  const risk = tier.risk[0] + r() * (tier.risk[1] - tier.risk[0]);
+  n.freeTier = tier.key;
+  n.freeRiskCap = risk;
+  n.freeGeneration = generation;
+  n.freeBirthTick = tick;
+  n.freeRetireAt = tick + Math.round(FREE_MARKET.retireMinTicks +
+    r() * (FREE_MARKET.retireMaxTicks - FREE_MARKET.retireMinTicks));
+  n.retireRequested = false;
+
+  // Капитал влияет не на «ум», а на стиль управления риском. Малые счета
+  // быстрее и агрессивнее, большие — медленнее, дольше смотрят на рынок и
+  // чаще используют защитные заявки. Это не даёт $10k-боту быть просто
+  // увеличенной в 1000 раз копией $10-бота.
+  n.act = clamp(n.act * tier.act * (0.90 + r() * 0.20), 0.01, 0.95);
+  n.minGap = Math.max(4, Math.round(n.minGap * tier.gap * (0.90 + r() * 0.20)));
+  n.look = Math.max(5, Math.min(360, Math.round(n.look * tier.look * (0.88 + r() * 0.24))));
+  n.hold = Math.max(12, Math.round(n.hold * tier.hold * (0.90 + r() * 0.20)));
+  n.usesOrders = r() < tier.orders;
+  n.flexibility = clamp(n.flexibility * (0.90 + r() * 0.22), 0.08, 0.92);
+}
+
+function resetFreeBot(m, p) {
+  const r = m.freeLifecycleRng || (m.freeLifecycleRng = mulberry32((m.seed ^ 0x4f1bbcdc) >>> 0));
+  const oldCash = Math.max(0, p.cash);
+  const fresh = freeBotCapital(r);
+  const type = FREE_TYPES[Math.floor(r() * FREE_TYPES.length) % FREE_TYPES.length];
+  const spec = ARCHETYPES[type];
+  const generation = (p.npc?.freeGeneration || 0) + 1;
+  const ordinal = p.id + generation * 10007;
+
+  p.cash = fresh; p.startingCapital = fresh; p.u = 0;
+  p.entryPrice = null; p.invested = 0; p.basis = 0; p.realizedPnL = 0;
+  p.tradeCount = 0; p.stopLoss = null; p.takeProfit = null; p.limits = [];
+  p.liquidatedAt = null; p.isHuman = false; p.name = `${type}-${p.id}-g${generation}`;
+  p.npc = makeNPCState(type, spec, r, m.seed + generation * 131, ordinal);
+  applyFreePersonality(p, r, m.tick, generation);
+
+  // Ушедший участник забирает остаток, новый заносит свой депозит. Это
+  // реальный внешний приток/отток капитала свободного рынка, не PnL.
+  m.C = Math.max(1e-9, m.C + fresh - oldCash);
+  m.freeTurnover = (m.freeTurnover || 0) + 1;
+}
+
+function freeMarketLifecycle(m) {
+  if (!m.freeMarket || m.tick % FREE_MARKET.lifecycleEvery !== 0) return;
+  let rotated = 0, curveDirty = false;
+  const start = Math.max(1, m.freeLifecycleCursor || 1);
+  let cursor = start;
+  let seen = 0;
+
+  while (seen < FREE_MARKET.botCount && rotated < FREE_MARKET.lifecycleMaxPerPass) {
+    const p = m.players[cursor];
+    cursor++; if (cursor >= m.players.length) cursor = 1;
+    seen++;
+    if (!p?.npc) continue;
+    const n = p.npc;
+    const eq = m.equity(p.id);
+    const distressed = eq <= Math.max(0.5, p.startingCapital * FREE_MARKET.distressFraction);
+    const expired = m.tick >= (n.freeRetireAt || Infinity);
+    if (!n.retireRequested && (distressed || expired)) n.retireRequested = true;
+    if (!n.retireRequested || p.u !== 0) continue;
+    resetFreeBot(m, p);
+    rotated++; curveDirty = true;
+  }
+
+  m.freeLifecycleCursor = cursor;
+  if (curveDirty) {
+    m.startingCapital = m.C / m.players.length;
+    m.curve = makeCurve(m.C, m);
+    m._freePreStats = null;
+  }
+}
+
+class FreeMarketLegacyRoom extends LegacyRoom {
+  constructor({ startingCapital = 0, seed = 7001, devMode = false,
+    attachHuman = true } = {}) {
+    // super нужен только для общего API/методов LegacyRoom; после него
+    // закрытая комната полностью заменяется отдельным бессрочным рынком.
+    super({ startingCapital: 1, seed, devMode: false, playerCount: 1,
+      leverage: 1, eyes: false, durationTicks: null, warmupTicks: 0 });
+
+    const requestedHumanCapital = Number(startingCapital) || 0;
+    const count = FREE_MARKET.botCount + 1; // 0 = зарезервированный слот человека
+    this._room = new RoomV4({ playerCount: count, startingCapital: 1, seed,
+      npcCount: 0, leverage: 1, eyes: false, durationTicks: null,
+      warmupTicks: 0, prerollTicks: 0 });
+    const m = this._room.market;
+    m.freeMarket = true;
+    m.phase = null;
+    m.totalTicks = null;
+    m.warmupTicks = 0;
+    m.npcLeverage = 1;
+    m.npcBatchSize = FREE_MARKET.npcBatchSize;
+    m.npcCursor = 1;
+    m.invariantEvery = FREE_MARKET.invariantEvery;
+
+    const human = m.players[0];
+    human.name = "ВЫ";
+    human.isHuman = true;
+    human.startingCapital = 0;
+    human.cash = 0;
+    human.npc = null;
+    this._room.humanSlots.add(0);
+
+    const r = mulberry32(seed ^ 0x51f15e);
+    for (let i = 1; i < count; i++) {
+      const cap = freeBotCapital(r);
+      const p = m.players[i];
+      p.startingCapital = cap;
+      p.cash = cap;
+    }
+
+    // Пересчитываем денежный масштаб ДО появления позиций. После этого C
+    // остаётся константой и обычные инварианты нулевой суммы продолжают
+    // работать без отдельной математики для "богатых" и "бедных" ботов.
+    m.C = m.players.reduce((s, p) => s + p.cash, 0);
+    m.startingCapital = m.C / count; // только fallback для legacy-кода
+    m.curve = makeCurve(m.C, m);
+    attachNPCs(m, 1, FREE_MARKET.botCount, seed + 17, false, FREE_TYPES);
+    m.freeLifecycleRng = mulberry32((seed ^ 0x4f1bbcdc) >>> 0);
+    m.freeLifecycleCursor = 1;
+    m.freeTurnover = 0;
+    for (let i = 1; i < count; i++) applyFreePersonality(m.players[i], r, 0, 0);
+
+    // Формируем историю до входа человека. Человек в preroll не торгует,
+    // поэтому его капитал остаётся ровно выбранным.
+    this._room._inPreroll = true;
+    for (let t = 0; t < FREE_MARKET.prerollTicks && !this._room.halted; t++) {
+      this._room.step();
+    }
+    this._room._inPreroll = false;
+
+    this.devMode = devMode;
+    this._startingCapital = 0;
+    this._humanAttached = false;
+    this._entryTick = m.tick;
+    this.leverage = 1;
+    this.eyesMode = false;
+    this.eyes = null;
+    this.paused = false;
+    this._buyPressure = 0;
+    this._sellPressure = 0;
+    this._buyTotal = 0;
+    this._sellTotal = 0;
+    this._totalTrades = 0;
+    this._openPrice = m.mark;
+    this._cache = null;
+    this._freeAggCache = null;
+    this._priceHistory = this._room.history.map((price, i, arr) => ({
+      price,
+      t: (i - (arr.length - 1)) * CONFIG.market.tickMs,
+      volume: 0,
+    }));
+
+    if (attachHuman && requestedHumanCapital >= FREE_MARKET.minCapital)
+      this.attachHuman(requestedHumanCapital);
+  }
+
+  join(_ignoredId, _name) { return 0; }
+
+  // Свободный рынок хранит собственный стартовый капитал у каждого бота.
+  // Обычный LegacyRoom оставлен неизменным и по-прежнему использует единый
+  // this._startingCapital для закрытых комнат.
+  _legacyPlayer(p) {
+    return {
+      ...p,
+      startingCapital: p.startingCapital ?? this._startingCapital,
+      position: p.position ? {
+        ...p.position,
+        margin: p.position.invested,
+        openedAtTick: null,
+        settlement: p.closeValue,
+      } : null,
+    };
+  }
+
+  attachHuman(capital) {
+    const m = this._room.market;
+    const p = m.players[0];
+    const amount = clamp(Number(capital) || 0, FREE_MARKET.minCapital, FREE_MARKET.maxCapital);
+    if (this._humanAttached) return this.snapshotFor(0);
+    p.cash = amount;
+    p.u = 0; p.startingCapital = amount; p.entryPrice = null;
+    p.invested = 0; p.basis = 0; p.realizedPnL = 0; p.tradeCount = 0;
+    p.stopLoss = null; p.takeProfit = null; p.limits = []; p.liquidatedAt = null;
+    m.C += amount;
+    m.startingCapital = m.C / m.players.length;
+    m.curve = makeCurve(m.C, m);
+    this._startingCapital = amount;
+    this._humanAttached = true;
+    this._entryTick = m.tick;
+    this._openPrice = m.mark;
+    this._freeAggCache = null;
+    return this.snapshotFor(0);
+  }
+
+  detachHuman() {
+    if (!this._humanAttached) return { equity: 0, snapshot: this.snapshotFor(0) };
+    const m = this._room.market;
+    const p = m.players[0];
+    if (p.u !== 0) {
+      const result = this._room.step([{ i: 0, du: -p.u, reason: "leave" }]);
+      this._recordStepResult(result);
+    }
+    this._freeAggCache = null;
+    const finalSnapshot = this.snapshotFor(0);
+    const equity = p.cash;
+    p.cash = 0; p.u = 0; p.startingCapital = 0;
+    p.entryPrice = null; p.invested = 0; p.basis = 0;
+    p.stopLoss = null; p.takeProfit = null; p.limits = [];
+    m.C = Math.max(1e-9, m.C - equity);
+    m.startingCapital = m.C / m.players.length;
+    m.curve = makeCurve(m.C, m);
+    this._startingCapital = 0;
+    this._humanAttached = false;
+    this._freeAggCache = null;
+    const inv = checkInvariants(m, { freeDetach: true });
+    if (!inv.ok) this._room.halted = inv.report;
+    return { equity, snapshot: finalSnapshot };
+  }
+
+  _recordStepResult(result) {
+    let buy = 0, sell = 0;
+    if (result?.executed) {
+      for (const e of result.executed) {
+        const notional = Math.abs(e.du);
+        if (e.du > 0) buy += notional; else sell += notional;
+      }
+      this._totalTrades += result.executed.length;
+    }
+    this._buyPressure = buy;
+    this._sellPressure = sell;
+    this._buyTotal += buy;
+    this._sellTotal += sell;
+    this._priceHistory.push({
+      price: this._room.market.mark,
+      t: this._room.market.tick * CONFIG.market.tickMs,
+      volume: buy + sell,
+    });
+    if (this._priceHistory.length > FREE_MARKET.historyLimit + 200)
+      this._priceHistory.splice(0, 200);
+    return result;
+  }
+
+  step() {
+    if (this.paused || this._room.halted) return null;
+    return this._recordStepResult(this._room.step());
+  }
+
+  leave(_playerId) { return this.detachHuman(); }
+
+  _freeAggregate(viewerId) {
+    const m = this._room.market;
+    const tick = m.tick;
+    if (this._freeAggCache && tick - this._freeAggCache.tick < FREE_MARKET.snapshotEvery)
+      return this._freeAggCache.value;
+
+    let totalEquity = 0, totalCash = 0, longExposure = 0, shortExposure = 0;
+    let longPlayers = 0, shortPlayers = 0, activeBots = 0, rank = 1;
+    let netExposure = 0, totalEscrow = 0;
+    const capitalTiers = { micro: 0, retail: 0, pro: 0, whale: 0 };
+    const tierCapital = { micro: 0, retail: 0, pro: 0, whale: 0 };
+    const strategies = {};
+    const me = m.players[viewerId];
+    const meEq = m.equity(viewerId);
+    const meReturn = (meEq - (me.startingCapital || 1)) / Math.max(1e-9, me.startingCapital || 1);
+    const sample = [];
+    const stride = Math.max(1, Math.floor(FREE_MARKET.botCount / FREE_MARKET.rosterSample));
+
+    for (let i = 0; i < m.players.length; i++) {
+      const p = m.players[i];
+      const eq = m.equity(i);
+      totalEquity += eq;
+      totalCash += p.cash;
+      netExposure += p.u;
+      totalEscrow += Math.abs(p.u);
+      const ret = (eq - (p.startingCapital || 1)) / Math.max(1e-9, p.startingCapital || 1);
+      if (i !== viewerId && ret > meReturn) rank++;
+      if (p.u > 0) { longPlayers++; longExposure += m.settlement(i); }
+      else if (p.u < 0) { shortPlayers++; shortExposure += m.settlement(i); }
+      if (i > 0) {
+        if (p.u !== 0) activeBots++;
+        const tier = p.npc?.freeTier || freeTierFor(p.startingCapital || 0).key;
+        capitalTiers[tier] = (capitalTiers[tier] || 0) + 1;
+        tierCapital[tier] = (tierCapital[tier] || 0) + eq;
+        const st = p.npc?.type || "unknown";
+        strategies[st] = (strategies[st] || 0) + 1;
+      }
+      if (i === viewerId || (i > 0 && i % stride === 0 && sample.length < FREE_MARKET.rosterSample)) {
+        const projected = projectPlayer(m, p, { viewer: i === viewerId, devMode: false });
+        projected.startingCapital = p.startingCapital;
+        sample.push(this._legacyPlayer(projected));
+      }
+    }
+    const directional = longPlayers + shortPlayers;
+    const value = {
+      rank, sample, q: netExposure, escrow: totalEscrow,
+      market: {
+        totalEquity, totalCash, longExposure, shortExposure, longPlayers, shortPlayers,
+        flatPlayers: m.players.length - directional,
+        activePositions: directional,
+        activeBots,
+        capitalTiers, tierCapital, strategies, botTurnover: m.freeTurnover || 0,
+        marketCap: totalEquity,
+        poolEquity: totalEscrow,
+        netExposure,
+        longShare: directional ? longPlayers / directional : 0,
+        shortShare: directional ? shortPlayers / directional : 0,
+      },
+    };
+    this._freeAggCache = { tick, value };
+    return value;
+  }
+
+  snapshotFor(viewerId) {
+    const m = this._room.market;
+    const agg = this._freeAggregate(viewerId);
+    const raw = projectPlayer(m, m.players[viewerId], { viewer: true, devMode: false });
+    raw.startingCapital = m.players[viewerId].startingCapital;
+    const me = this._legacyPlayer(raw);
+    const priceRange = [m.curve.PMIN, m.curve.PMAX];
+    const contextBase = { mark: m.mark, priceRange, participants: [] };
+    const context = this._context(contextBase);
+    const exp = agg.market.longExposure + agg.market.shortExposure;
+    context.imbalance = exp > 0
+      ? (agg.market.longExposure - agg.market.shortExposure) / exp : 0;
+
+    return {
+      tick: m.tick, mark: m.mark, liquidationPrice: m.liquidationPrice,
+      Q: agg.q, priceRange, escrow: agg.escrow, totalCapital: m.C,
+      players: agg.sample,
+      you: {
+        ...me,
+        marginLevel: null, liquidationPrice: null,
+        buyingPower: availableBuyingPower(m, viewerId), wasLiquidated: false,
+      },
+      buyPressure: this._buyPressure, sellPressure: this._sellPressure,
+      netPressure: this._buyPressure - this._sellPressure,
+      buyTotal: this._buyTotal, sellTotal: this._sellTotal,
+      netTotal: this._buyTotal - this._sellTotal,
+      longRealized: m.longRealized, shortRealized: m.shortRealized,
+      eyes: null, eyesMode: false, sessionPhase: null, warmupLeft: 0,
+      tradingOpen: true, leverage: 1, maintenance: 0, liquidations: 0,
+      totalTrades: this._totalTrades,
+      totalPlayers: FREE_MARKET.botCount + (this._humanAttached ? 1 : 0),
+      botCount: FREE_MARKET.botCount, freeMarket: true, humanAttached: this._humanAttached,
+      sessionTicks: this._humanAttached ? Math.max(0, m.tick - this._entryTick) : 0,
+      priceHistory: this._priceHistory,
+      lastPoint: this._priceHistory[this._priceHistory.length - 1],
+      market: agg.market, price: m.mark,
+      previousPrice: this._priceHistory.length >= 2
+        ? this._priceHistory[this._priceHistory.length - 2].price : m.mark,
+      initialPrice: this._openPrice ?? m.mark,
+      rank: this._humanAttached ? agg.rank : null,
+      yourOrders: raw.limits || [], yourTrades: [], orders: [],
+      liquidity: agg.q, phase: this._phase(contextBase), context,
+    };
+  }
+}
+
 // ==== ПРОФИЛЬ / ЛОКАЛЬНЫЙ ТРАНСПОРТ / ИНТЕРФЕЙС ====
 class LocalTransport {
   constructor({ startingCapital, seed, devMode = true, leverage = 1, eyes = false,
@@ -2248,6 +2758,89 @@ class LocalTransport {
   setSpeed(value) { this.speed = value; }
   setPaused(value) { this.room.paused = value; }
   get paused() { return this.room.paused; }
+}
+
+class FreeMarketHub {
+  constructor({ seed = Math.floor(Date.now() / 60000) } = {}) {
+    this.room = new FreeMarketLegacyRoom({ startingCapital: 0, seed,
+      devMode: false, attachHuman: false });
+    this.subscribers = new Set();
+    this.timer = null;
+    this.lastStepAt = performance.now();
+    this.lastEmitAt = 0;
+    this.start();
+  }
+  start() {
+    if (this.timer) return;
+    this.lastStepAt = performance.now();
+    this.timer = setInterval(() => this._pump(), CONFIG.market.tickMs);
+  }
+  _pump() {
+    const now = performance.now();
+    let due = Math.max(1, Math.floor((now - this.lastStepAt) / CONFIG.market.tickMs));
+    if (now - this.lastStepAt > 2000) {
+      due = 1;
+      this.lastStepAt = now - CONFIG.market.tickMs;
+    }
+    due = Math.min(due, 5);
+    this.room.advance(due);
+    this.lastStepAt += due * CONFIG.market.tickMs;
+    if (this.subscribers.size && now - this.lastEmitAt >= FREE_MARKET.uiSnapshotMs) {
+      const snap = this.room.snapshotFor(0);
+      this.lastEmitAt = now;
+      for (const cb of this.subscribers) cb(snap);
+    }
+  }
+  subscribe(cb) {
+    this.subscribers.add(cb);
+    cb(this.room.snapshotFor(0));
+    return () => this.subscribers.delete(cb);
+  }
+  attach(capital) { return this.room.attachHuman(capital); }
+  detach() { return this.room.detachHuman(); }
+  snapshot() { return this.room.snapshotFor(0); }
+  async send(command) { return this.room.send(0, command); }
+}
+
+let FREE_MARKET_HUB = null;
+function getFreeMarketHub() {
+  if (!FREE_MARKET_HUB) FREE_MARKET_HUB = new FreeMarketHub();
+  return FREE_MARKET_HUB;
+}
+
+class FreeMarketTransport {
+  constructor({ startingCapital } = {}) {
+    this.hub = getFreeMarketHub();
+    this.playerId = 0;
+    this.unsubscribe = null;
+    this.finalSnapshot = null;
+    this.left = false;
+    this.hub.attach(startingCapital);
+  }
+  start(onSnapshot) {
+    this.stop();
+    this.unsubscribe = this.hub.subscribe(onSnapshot);
+  }
+  stop() {
+    if (this.unsubscribe) this.unsubscribe();
+    this.unsubscribe = null;
+  }
+  async send(command) {
+    if (this.left) return { ok: false, reason: "вы уже вышли из свободного рынка" };
+    return this.hub.send(command);
+  }
+  snapshot() { return this.finalSnapshot || this.hub.snapshot(); }
+  leave() {
+    if (this.left) return { equity: this.finalSnapshot?.you?.equity || 0,
+      snapshot: this.finalSnapshot };
+    const exit = this.hub.detach();
+    this.finalSnapshot = exit.snapshot;
+    this.left = true;
+    return exit;
+  }
+  setSpeed() {}
+  setPaused() {}
+  get paused() { return false; }
 }
 
 /**
@@ -2422,7 +3015,7 @@ function Chart({ state, timeframe, mode, entryPrice, stopLoss, takeProfit,
     if (zoomRaf.current) return;
     zoomRaf.current = requestAnimationFrame(() => {
       zoomRaf.current = 0;
-      setYZoom((prev) => Math.abs(prev - zoomQueued.current) < 0.0001 ? prev : zoomQueued.current);
+      setYZoom((prev) => Math.abs(prev - zoomQueued.current) < 0.012 ? prev : zoomQueued.current);
     });
   };
   const auto = offset === 0 && Math.abs(yZoom - 1) < 0.02 && Math.abs(barW - BAR_DEFAULT) < 0.1;
@@ -2650,15 +3243,14 @@ function Chart({ state, timeframe, mode, entryPrice, stopLoss, takeProfit,
   geo.current = { min, max, plotH, padT: PAD_T, side, entryPrice, onLevel, fitAll: fitAllBarW,
     stopLoss: drag?.kind === "sl" ? drag.price : stopLoss,
     takeProfit: drag?.kind === "tp" ? drag.price : takeProfit };
-  // Позиция считается по времени, а не по номеру свечи. Раньше при
-  // появлении новой свечи весь ряд мгновенно прыгал влево на целую свечу;
-  // теперь он едет непрерывно, доля за долей текущего бакета.
-  // При прокрутке назад якорем становится последняя видимая свеча, иначе
-  // справа оставалась бы пустота размером со сдвиг.
+  // Последняя свеча теперь якорится по старту своего бакета.
+  // Прежняя «плавная» схема смещала весь ряд внутри текущей секунды, из-за
+  // чего активная свеча визуально отрывалась вправо и создавалось ощущение
+  // лага / задержки генерации после изменения масштаба. Здесь сдвиг только
+  // свечной: новая свеча появляется ровно следующим слотом, без подвисшего
+  // зазора справа. При прокрутке назад якорем остаётся последняя видимая.
   const last = shown[shown.length - 1];
-  const tAnchor = offset === 0 && state.lastPoint
-    ? Math.max(state.lastPoint.t, last.t) : last.t;
-  const xAt = (i) => plotW - barW / 2 - ((tAnchor - shown[i].t) / bucketMs) * barW;
+  const xAt = (i) => plotW - barW / 2 - ((last.t - shown[i].t) / bucketMs) * barW;
   const body = Math.max(1, Math.min(barW * 0.68, barW - 1.2));
   const wick = Math.max(0.7, Math.min(1.4, barW * 0.12));
 
@@ -2717,7 +3309,7 @@ function Chart({ state, timeframe, mode, entryPrice, stopLoss, takeProfit,
         {lines.map((p) => (
           <g key={p}>
             <line x1={0} x2={plotW} y1={toY(p)} y2={toY(p)} stroke={HAIR} strokeWidth={1} />
-            <text x={plotW + 6} y={toY(p) + 3.5} fill={FAINT} fontSize={10}
+            <text x={plotW + 6} y={toY(p) + 3.5} fill={FAINT} fontSize={10.5}
               fontFamily="SamsonDigits, Neogurotesuku, monospace">{p.toFixed(digits)}</text>
           </g>
         ))}
@@ -2832,7 +3424,7 @@ function Chart({ state, timeframe, mode, entryPrice, stopLoss, takeProfit,
         <rect x={plotW + 1} y={priceY - 9} width={AXIS_W - 2} height={18} rx={3}
           fill={up ? LONG : SHORT} />
         <text x={plotW + AXIS_W / 2} y={priceY + 4} textAnchor="middle" fill={BG}
-          fontSize={11} fontFamily="SamsonDigits, Neogurotesuku, monospace" fontWeight="700">
+          fontSize={11.5} fontFamily="SamsonDigits, Neogurotesuku, monospace" fontWeight="700">
           {state.price.toFixed(2)}
         </text>
       </svg>
@@ -4106,10 +4698,9 @@ function ProfileScreen({ profile, account, onClose, onSettings }) {
 
 function ModeArt({ kind }) {
   // Онлайн: вращающийся каркасный купол. Офлайн: точечная волна.
-  // Обе — светло-серые. Купол был зелёным, и вместе с зелёной кнопкой,
-  // зелёной полосой уровня и зелёной вкладкой экран становился сплошь
-  // подсвеченным.
-  // Обе картинки — чистый SVG с CSS-анимацией, без внешних файлов.
+  // Свободный рынок — плотный слой узлов и орбит: ассоциация с постоянно
+  // живым пространством, где одновременно торгуют тысячи участников.
+  // Все картинки — чистый SVG с CSS-анимацией, без внешних файлов.
   if (kind === "online") {
     const rings = [0.30, 0.48, 0.66, 0.84, 1.0];
     return (
@@ -4139,6 +4730,32 @@ function ModeArt({ kind }) {
           })}
         </g>
         <circle cx="80" cy="70" r="2.4" fill={ACCENT} className="tx-dot" />
+      </svg>
+    );
+  }
+  if (kind === "free") {
+    const rings = [0.28, 0.44, 0.62, 0.82, 1.0];
+    return (
+      <svg viewBox="0 0 160 96" className="w-full" style={{ height: 96 }}>
+        {rings.map((k, i) => (
+          <ellipse key={i} cx="80" cy="50" rx={60 * k} ry={24 * k}
+            fill="none" stroke={ACCENT} strokeWidth="0.7" opacity={0.08 + i * 0.07} />
+        ))}
+        {Array.from({ length: 38 }, (_, i) => {
+          const a = (i / 38) * Math.PI * 2;
+          const r = 14 + (i % 5) * 10;
+          const x = 80 + Math.cos(a) * r;
+          const y = 50 + Math.sin(a) * (r * 0.42);
+          return <circle key={i} cx={x} cy={y} r={1 + (i % 4) * 0.25}
+            fill={TEXT} opacity={0.16 + (i % 6) * 0.08}
+            className="tx-twinkle" style={{ animationDelay: `${(i % 9) * 180}ms` }} />;
+        })}
+        {Array.from({ length: 10 }, (_, i) => {
+          const y = 20 + i * 6.5;
+          return <line key={i} x1="18" y1={y} x2="142" y2={96 - y * 0.72}
+            stroke={ACCENT} strokeWidth="0.45" opacity="0.08" />;
+        })}
+        <circle cx="80" cy="50" r="3.2" fill={ACCENT} opacity="0.85" className="tx-dot" />
       </svg>
     );
   }
@@ -4186,6 +4803,39 @@ function ModeCard({ kind, title, text, cta, primary, onClick, disabled }) {
         {cta}
       </button>
     </div>
+  );
+}
+
+function FreeMarketMiniCard({ onClick }) {
+  const fm = CONFIG.market.freeMarket;
+  return (
+    <button onClick={onClick}
+      className="rounded-2xl p-3 text-left shrink-0 flex flex-col justify-between tap"
+      style={{ width: 162, minHeight: 128, backgroundColor: SURFACE, border: `1px solid ${HAIR}` }}>
+      <div className="flex items-start justify-between gap-2">
+        <div className="min-w-0">
+          <div className="text-[9px] tracking-[0.2em] truncate" style={{ color: FAINT }}>СВОБОДНЫЙ РЫНОК</div>
+          <div className="text-[12px] mt-1 leading-tight" style={{ color: TEXT }}>всегда открыт</div>
+        </div>
+        <span className="text-[9px] px-2 py-1 rounded-full shrink-0"
+          style={{ color: ACCENT, backgroundColor: RAISED, border: `1px solid ${HAIR}` }}>LIVE</span>
+      </div>
+
+      <div className="rounded-xl mt-2 overflow-hidden" style={{ backgroundColor: "#08080A" }}>
+        <ModeArt kind="free" />
+      </div>
+
+      <div className="grid grid-cols-2 gap-2 mt-2.5">
+        <div>
+          <div className="text-[8px] tracking-[0.16em]" style={{ color: FAINT }}>УЧАСТНИКИ</div>
+          <div className="text-[12px] font-mono mt-0.5">5 000 BOT</div>
+        </div>
+        <div>
+          <div className="text-[8px] tracking-[0.16em]" style={{ color: FAINT }}>ВХОД</div>
+          <div className="text-[12px] font-mono mt-0.5">$10–$10K</div>
+        </div>
+      </div>
+    </button>
   );
 }
 
@@ -4613,7 +5263,7 @@ function RankingTab({ profile, period, onPeriod }) {
 }
 
 /* --------------------------------- РЫНКИ --------------------------------- */
-function MarketsTab({ onPlay }) {
+function MarketsTab({ onPlay, onFree }) {
   const m = CONFIG.market;
   const row = (label, value) => (
     <div className="flex justify-between py-2 text-[12px]" style={{ borderColor: HAIR }}>
@@ -4650,6 +5300,35 @@ function MarketsTab({ onPlay }) {
 
       <div className="rounded-2xl p-4 mt-2 tx-in"
         style={{ backgroundColor: SURFACE, border: `1px solid ${HAIR}`, ...stagger(1) }}>
+        <div className="flex items-start justify-between gap-3">
+          <div>
+            <div className="text-[17px] font-mono">{m.assetSymbol} · FREE</div>
+            <div className="text-[11px] mt-1" style={{ color: DIM }}>
+              всегда открыт · без лимита по размеру комнаты
+            </div>
+          </div>
+          <span className="text-[10px] px-2 py-1 rounded-full shrink-0"
+            style={{ color: ACCENT, backgroundColor: RAISED, border: `1px solid ${HAIR}` }}>5000 BOT</span>
+        </div>
+        <div className="my-3 rounded-xl overflow-hidden" style={{ backgroundColor: "#08080A" }}>
+          <ModeArt kind="free" />
+        </div>
+        {row("Диапазон входа", `${fmt(m.freeMarket.minCapital, 0)} · ${fmt(m.freeMarket.maxCapital, 0)}`)}
+        {row("Торгуют сейчас", `${m.freeMarket.botCount.toLocaleString("en-US")} ботов`)}
+        {row("Формат", "свободный рынок · всегда открыт")}
+        <div className="text-[11px] leading-snug mt-2" style={{ color: FAINT }}>
+          Отдельный бессрочный движок: 5 000 ботов с разными балансами и стратегиями.
+          В локальной версии рынок создаётся с историей перед вашим входом.
+        </div>
+        <button onClick={onFree}
+          className="w-full rounded-xl py-3.5 mt-3 text-[12px] tracking-[0.2em] font-bold tap"
+          style={btnSoft(true)}>
+          ВОЙТИ В СВОБОДНЫЙ РЫНОК
+        </button>
+      </div>
+
+      <div className="rounded-2xl p-4 mt-2 tx-in"
+        style={{ backgroundColor: SURFACE, border: `1px solid ${HAIR}`, ...stagger(2) }}>
         <div className="flex items-start justify-between gap-3">
           <div className="flex items-center gap-2">
             <Icon name="eye" size={17} color={DIM} />
@@ -4966,7 +5645,7 @@ function SettingsScreen({ account, onClose, onReset, onExit, onSignOut }) {
 }
 
 /* --------------------------------- ЛОББИ --------------------------------- */
-function Lobby({ profile, account, onNew, onReset, onExit, onSignOut, onTopUp, onRedeem }) {
+function Lobby({ profile, account, onNew, onFree, onReset, onExit, onSignOut, onTopUp, onRedeem }) {
   const st = profileStats(profile);
   const [tab, setTab] = useState("home");
   const [profileOpen, setProfileOpen] = useState(false);
@@ -5036,18 +5715,21 @@ function Lobby({ profile, account, onNew, onReset, onExit, onSignOut, onTopUp, o
                  сумму на середину экрана.
                  Сумма набрана обычным шрифтом, а не моноширинным:
                  моноширинный на большом кегле читается как терминал. */}
-              <div className="mt-6">
-                <div className="text-[11px] tracking-[0.18em]" style={{ color: "#6E6E76" }}>
-                  БАЛАНС
+              <div className="mt-6 grid grid-cols-[minmax(0,1fr)_162px] gap-3 items-start">
+                <div className="min-w-0">
+                  <div className="text-[11px] tracking-[0.18em]" style={{ color: "#6E6E76" }}>
+                    БАЛАНС
+                  </div>
+                  <div className="text-[38px] leading-[1.05] font-semibold tracking-tight truncate tx-pop mt-1">
+                    {fmt(profile.wallet, 0)}
+                  </div>
+                  <div className="text-[13px] mt-1.5"
+                    style={{ color: st.total > 0 ? LONG : st.total < 0 ? SHORT : DIM }}>
+                    {st.count === 0 ? "сессий ещё не было"
+                      : `${fmtSigned(st.total)} за ${st.count} сесс.`}
+                  </div>
                 </div>
-                <div className="text-[38px] leading-[1.05] font-semibold tracking-tight truncate tx-pop mt-1">
-                  {fmt(profile.wallet, 0)}
-                </div>
-                <div className="text-[13px] mt-1.5"
-                  style={{ color: st.total > 0 ? LONG : st.total < 0 ? SHORT : DIM }}>
-                  {st.count === 0 ? "сессий ещё не было"
-                    : `${fmtSigned(st.total)} за ${st.count} сесс.`}
-                </div>
+                <FreeMarketMiniCard onClick={onFree} />
               </div>
 
               <div className="grid grid-cols-3 gap-2.5 mt-4">
@@ -5182,13 +5864,94 @@ function Lobby({ profile, account, onNew, onReset, onExit, onSignOut, onTopUp, o
             </div>
           )}
 
-          {tab === "markets" && <MarketsTab onPlay={(e) => onNew(e)} />}
+          {tab === "markets" && <MarketsTab onPlay={(e) => onNew(e)} onFree={onFree} />}
           {tab === "rank" && <RankingTab profile={profile} period={period} onPeriod={setPeriod} />}
 
         </div>
       </div>
 
       <TabBar active={tab} onChange={(k) => { setTab(k); setNotice(null); }} />
+    </div>
+  );
+}
+
+/* ----------------------------- СВОБОДНЫЙ РЫНОК ---------------------------- */
+function FreeMarketSetup({ wallet, onStart, onBack }) {
+  const max = Math.min(FREE_MARKET.maxCapital, Math.max(0, wallet));
+  const [amount, setAmount] = useState(String(Math.min(max, Math.max(FREE_MARKET.minCapital, Math.min(100, max)))));
+  const value = Math.max(0, Number(amount) || 0);
+  const valid = value >= FREE_MARKET.minCapital && value <= max && value <= FREE_MARKET.maxCapital;
+
+  // Начинаем поднимать 5 000 ботов, пока пользователь выбирает сумму. Так
+  // тяжёлый первый preroll обычно заканчивается ДО нажатия «Войти». После
+  // первого запуска singleton уже живёт сам и повторных прогревов нет.
+  useEffect(() => {
+    if (FREE_MARKET_HUB) return undefined;
+    let cancelled = false;
+    const warm = () => { if (!cancelled && !FREE_MARKET_HUB) getFreeMarketHub(); };
+    if (typeof requestIdleCallback === "function") {
+      const id = requestIdleCallback(warm, { timeout: 800 });
+      return () => { cancelled = true; if (typeof cancelIdleCallback === "function") cancelIdleCallback(id); };
+    }
+    const id = setTimeout(warm, 350);
+    return () => { cancelled = true; clearTimeout(id); };
+  }, []);
+  return (
+    <div className="w-full flex flex-col" style={{ height: "100dvh", backgroundColor: BG, color: TEXT }}>
+      <div className="max-w-md w-full mx-auto flex-1 overflow-y-auto no-scrollbar px-6 pt-8 pb-6">
+        <button onClick={onBack} className="text-[12px] mb-8 text-left" style={{ color: DIM }}>← назад</button>
+        <div className="flex items-center justify-between">
+          <div>
+            <div className="text-[10px] tracking-[0.28em]" style={{ color: FAINT }}>FREE MARKET</div>
+            <div className="text-[28px] mt-1">Свободный рынок</div>
+          </div>
+          <span className="text-[10px] px-2.5 py-1.5 rounded-full"
+            style={{ color: ACCENT, backgroundColor: RAISED, border: `1px solid ${HAIR}` }}>24 / 7</span>
+        </div>
+
+        <div className="rounded-2xl overflow-hidden mt-5" style={{ backgroundColor: SURFACE, border: `1px solid ${HAIR}` }}>
+          <ModeArt kind="free" />
+        </div>
+
+        <div className="grid grid-cols-2 gap-2 mt-3">
+          <div className="rounded-xl px-4 py-3" style={{ backgroundColor: SURFACE, border: `1px solid ${HAIR}` }}>
+            <div className="text-[9px] tracking-[0.16em]" style={{ color: FAINT }}>БОТОВ В РЫНКЕ</div>
+            <div className="text-[18px] font-mono mt-1">5,000</div>
+          </div>
+          <div className="rounded-xl px-4 py-3" style={{ backgroundColor: SURFACE, border: `1px solid ${HAIR}` }}>
+            <div className="text-[9px] tracking-[0.16em]" style={{ color: FAINT }}>ВХОД</div>
+            <div className="text-[18px] font-mono mt-1">$10–$10K</div>
+          </div>
+        </div>
+
+        <div className="text-[10px] tracking-[0.22em] mt-7 mb-2" style={{ color: FAINT }}>СКОЛЬКО ВВЕСТИ В РЫНОК</div>
+        <div className="rounded-xl flex items-center px-4" style={{ backgroundColor: RAISED, border: `1px solid ${valid ? HAIR : SHORT}` }}>
+          <span className="text-[20px] mr-2" style={{ color: DIM }}>$</span>
+          <input value={amount} onChange={(e) => setAmount(e.target.value.replace(/[^0-9.]/g, ""))}
+            inputMode="decimal" className="flex-1 bg-transparent outline-none py-4 text-[24px] font-mono min-w-0"
+            style={{ color: TEXT }} />
+          <span className="text-[11px]" style={{ color: FAINT }}>макс. {fmt(max, 0)}</span>
+        </div>
+        {!valid && <div className="text-[11px] mt-2" style={{ color: SHORT }}>
+          Сумма должна быть от $10 до {fmt(Math.min(FREE_MARKET.maxCapital, max), 0)}.
+        </div>}
+
+        <div className="rounded-2xl px-4 py-4 mt-5 text-[12px] leading-relaxed"
+          style={{ backgroundColor: SURFACE, border: `1px solid ${HAIR}`, color: DIM }}>
+          Рынок не заканчивается по таймеру. Можно войти и выйти в любой момент без штрафа.
+          У 5 000 ботов разные капиталы, горизонты, частота действий, риск и стратегии.
+          После первого запуска локальное ядро продолжает жить между вашими входами, поэтому
+          повторный вход возвращает в тот же рынок и ту же историю. Перезагрузка приложения
+          пока создаёт новое ядро — постоянство между устройствами будет серверным этапом.
+        </div>
+      </div>
+      <div className="max-w-md w-full mx-auto px-6 pb-8">
+        <button disabled={!valid} onClick={() => onStart(value)}
+          className="w-full rounded-xl py-4 text-[14px] tracking-[0.16em] font-semibold tap disabled:opacity-30"
+          style={btnSoft(true)}>
+          ВОЙТИ В РЫНОК · {valid ? fmt(value, 0) : "—"}
+        </button>
+      </div>
     </div>
   );
 }
@@ -5402,17 +6165,18 @@ function SessionResult({ result, onDone }) {
     <div className="w-full flex flex-col" style={{ height: "100dvh", backgroundColor: BG, color: TEXT }}>
       <div className="max-w-md w-full mx-auto flex-1 flex flex-col justify-center px-6">
         <div className="text-[11px] tracking-[0.4em] mb-3" style={{ color: FAINT }}>
-          {result.early ? "ДОСРОЧНЫЙ ВЫХОД" : "СЕССИЯ ЗАВЕРШЕНА"}
+          {result.mode === "free" ? "ВЫХОД ИЗ СВОБОДНОГО РЫНКА"
+            : result.early ? "ДОСРОЧНЫЙ ВЫХОД" : "СЕССИЯ ЗАВЕРШЕНА"}
         </div>
         <div className="text-[52px] leading-none font-mono tracking-tight" style={{ color: good ? LONG : SHORT }}>
           {fmtSigned(result.pnl)}
         </div>
         <div className="text-[15px] font-mono mt-2" style={{ color: DIM }}>
-          {((result.pnl / result.capital) * 100).toFixed(2)}% от взноса
+          {((result.pnl / result.capital) * 100).toFixed(2)}% {result.mode === "free" ? "от введённого капитала" : "от взноса"}
         </div>
 
         <div className="mt-10">
-          <Line left="Взнос" right={fmt(result.capital)} />
+          <Line left={result.mode === "free" ? "Введено в рынок" : "Взнос"} right={fmt(result.capital)} />
           <Line left="Итоговый капитал" right={fmt(result.equity)} />
           <Line left="Место в рейтинге" right={`${result.rank} из ${result.totalPlayers || CONFIG.market.totalPlayers}`} />
           <Line left="Сделок" right={String(result.trades)} />
@@ -5472,6 +6236,7 @@ function PracticeApp({ onExit }) {
   const [screen, setScreen] = useState("lobby");
   const [result, setResult] = useState(null);
   const [session, setSession] = useState(null);
+  const [marketMode, setMarketMode] = useState("session"); // session | free
   const [pending, setPending] = useState(null);   // взнос и режим, пока идёт подбор
   const [leverage, setLeverage] = useState(1);
   const [pendingEyes, setPendingEyes] = useState(false);
@@ -5538,11 +6303,16 @@ function PracticeApp({ onExit }) {
   useEffect(() => () => clearTimeout(toastTimer.current), []);
 
   useEffect(() => {
-    if (screen !== "game" || !session || !sessionDurationTicks) return undefined;
+    if (screen !== "game" || !session) return undefined;
     const transport = engineRef.current;
     if (!transport) return undefined;
     transport.start((next) => {
       setSnapshot(next);
+      if (marketMode === "free") {
+        setLeft(0);
+        return;
+      }
+      if (!sessionDurationTicks) return;
       // Таймер идёт по времени СИМУЛЯЦИИ, а не по Date.now(). Поэтому 2x/5x/10x
       // ускоряют и рынок, и таймер одинаково; раньше боты доходили до конца
       // сессии раньше таймера и рынок мог оставаться пустым несколько минут.
@@ -5552,7 +6322,7 @@ function PracticeApp({ onExit }) {
       if (remainingTicks <= 0) finishSession(false);
     });
     return () => transport.stop();
-  }, [screen, session, sessionDurationTicks]);
+  }, [screen, session, sessionDurationTicks, marketMode]);
 
   useEffect(() => { engineRef.current?.setSpeed(speed); }, [speed]);
 
@@ -5566,6 +6336,7 @@ function PracticeApp({ onExit }) {
   };
 
   const startSession = ({ capital, leverage, minutes, eyes, players }) => {
+    setMarketMode("session");
     // Приложение больше не создаёт движок напрямую — только транспорт.
     // При переезде на сервер здесь меняется одна строка на RemoteTransport.
     const durationTicks = Math.round(minutes * 60000 / CONFIG.market.tickMs);
@@ -5591,6 +6362,28 @@ function PracticeApp({ onExit }) {
     setPending(null);
   };
 
+  const startFreeMarket = (capital) => {
+    const amount = clamp(Number(capital) || 0, FREE_MARKET.minCapital,
+      Math.min(FREE_MARKET.maxCapital, profile.wallet));
+    if (amount < FREE_MARKET.minCapital || amount > profile.wallet) return;
+    engineRef.current?.stop?.();
+    engineRef.current = new FreeMarketTransport({ startingCapital: amount });
+    setMarketMode("free");
+    setSession(amount);
+    setLeverage(1);
+    setSessionDurationTicks(null);
+    setLeft(0);
+    setSize(String(Math.max(10, Math.round(amount * 0.3))));
+    setSheet(null);
+    setLimitPrice("");
+    setPaused(false);
+    setSpeed(1);
+    setTab("Рынок");
+    setSnapshot(engineRef.current.snapshot());
+    setScreen("game");
+    persist({ ...profile, wallet: profile.wallet - amount });
+  };
+
   /** Завершение сессии: итоговый капитал возвращается на баланс. */
   /**
    * Завершение сессии. early = вышли раньше срока: тогда с остатка снимается
@@ -5600,13 +6393,16 @@ function PracticeApp({ onExit }) {
   const finishSession = (early = false) => {
     const transport = engineRef.current;
     if (!transport) return;
+    const free = marketMode === "free";
     let penalty = 0;
-    if (early && typeof transport.leave === "function") {
-      penalty = transport.leave(CONFIG.market.earlyExitPenalty) || 0;
+    let snap = null;
+    if (typeof transport.leave === "function") {
+      if (free) {
+        const exit = transport.leave();
+        snap = exit?.snapshot || null;
+      } else if (early) penalty = transport.leave(CONFIG.market.earlyExitPenalty) || 0;
     }
-    // Итог сессии берётся из снапшота, а не считается клиентом:
-    // на сервере это будет ответ функции closeSession.
-    const snap = transport.snapshot();
+    if (!snap) snap = transport.snapshot();
     const record = {
       capital: session,
       equity: snap.you.equity,
@@ -5616,16 +6412,18 @@ function PracticeApp({ onExit }) {
       trades: snap.you.tradeCount,
       // Время сессии начинается после разогрева; раньше в статистику
       // ошибочно попадали лишние 10 секунд warmup.
-      ticks: Math.max(0, snap.tick - CONFIG.market.warmupTicks),
+      ticks: free ? Math.max(0, snap.sessionTicks || 0) : Math.max(0, snap.tick - CONFIG.market.warmupTicks),
       price: snap.price,
       at: Date.now(),        // отметка времени для кривой "дневная динамика"
       leverage,
-      early,
+      mode: free ? "free" : "session",
+      early: free ? false : early,
       penalty,
       // Тройка лидеров комнаты на момент закрытия. Считается по снапшоту,
       // чтобы экран итога не зависел от того, жив ли ещё транспорт.
-      top: [...(snap.players || [])]
-        .map((p) => ({ name: p.name, pnl: p.equity - session, you: p.id === snap.you.id }))
+      top: free ? [] : [...(snap.players || [])]
+        .map((p) => ({ name: p.name,
+          pnl: p.equity - (p.startingCapital ?? session), you: p.id === snap.you.id }))
         .sort((a, b) => b.pnl - a.pnl)
         .slice(0, 3),
     };
@@ -5640,6 +6438,7 @@ function PracticeApp({ onExit }) {
     engineRef.current = null;
     setSnapshot(null);
     setSession(null);
+    setMarketMode("session");
     setSessionDurationTicks(null);
     setLeft(0);
     setShowSettings(false);
@@ -5678,8 +6477,13 @@ function PracticeApp({ onExit }) {
 
   if (screen === "lobby") {
     return <Lobby profile={profile} account={account} onSignOut={signOut} onTopUp={topUp} onRedeem={redeem}
-      onNew={(e) => { setPendingEyes(!!e); setScreen("setup"); }} onExit={onExit}
+      onNew={(e) => { setPendingEyes(!!e); setScreen("setup"); }}
+      onFree={() => setScreen("free-setup")} onExit={onExit}
       onReset={() => persist({ ...profile, wallet: 0 })} />;
+  }
+  if (screen === "free-setup") {
+    return <FreeMarketSetup wallet={profile.wallet} onStart={startFreeMarket}
+      onBack={() => setScreen("lobby")} />;
   }
   if (screen === "setup") {
     return <SessionSetup wallet={profile.wallet} onStart={queueSession}
@@ -5696,7 +6500,8 @@ function PracticeApp({ onExit }) {
   }
   if (!engineRef.current || !snapshot) {
     return <Lobby profile={profile} account={account} onSignOut={signOut} onTopUp={topUp} onRedeem={redeem}
-      onNew={(e) => { setPendingEyes(!!e); setScreen("setup"); }} onExit={onExit}
+      onNew={(e) => { setPendingEyes(!!e); setScreen("setup"); }}
+      onFree={() => setScreen("free-setup")} onExit={onExit}
       onReset={() => persist({ ...profile, wallet: 0 })} />;
   }
 
@@ -5801,7 +6606,7 @@ function PracticeApp({ onExit }) {
         {/* --------------------------------- шапка --------------------------- */}
         <div className="flex items-center justify-between px-5 py-3">
           <span className="text-[11px] tracking-[0.3em]" style={{ color: FAINT }}>
-            {CONFIG.market.assetSymbol} · {fmt(session, 0)}
+            {CONFIG.market.assetSymbol} · {marketMode === "free" ? "FREE · " : ""}{fmt(session, 0)}
             {leverage > 1 && (
               <span className="ml-2 px-1.5 py-0.5 rounded font-semibold"
                 style={{ backgroundColor: RAISED, color: LONG }}>x{leverage}</span>
@@ -5812,7 +6617,9 @@ function PracticeApp({ onExit }) {
             )}
           </span>
           <div className="flex items-center gap-4">
-            {sessionDurationTicks && (
+            {marketMode === "free" ? (
+              <span className="text-[11px] font-mono" style={{ color: ACCENT }}>24/7</span>
+            ) : sessionDurationTicks && (
               <span className="text-[12px] font-mono tabular-nums"
                 style={{ color: left < 30000 ? SHORT : left < 60000 ? TEXT : DIM }}>
                 {clock(left)}
@@ -5827,15 +6634,23 @@ function PracticeApp({ onExit }) {
 
         {showSettings && (
           <div className="px-5 pb-4 flex flex-col gap-3">
-            <div className="flex items-center justify-between">
-              <span className="text-[11px] tracking-[0.15em]" style={{ color: FAINT }}>СКОРОСТЬ</span>
-              <div className="flex gap-1">
-                {[1, 2, 5, 10].map((s) => (
-                  <Toggle key={s} active={speed === s} onClick={() => setSpeed(s)}>{s}x</Toggle>
-                ))}
+            {marketMode !== "free" && (
+              <div className="flex items-center justify-between">
+                <span className="text-[11px] tracking-[0.15em]" style={{ color: FAINT }}>СКОРОСТЬ</span>
+                <div className="flex gap-1">
+                  {[1, 2, 5, 10].map((s) => (
+                    <Toggle key={s} active={speed === s} onClick={() => setSpeed(s)}>{s}x</Toggle>
+                  ))}
+                </div>
               </div>
-            </div>
-            {confirmingEnd && left > 0 && (
+            )}
+            {confirmingEnd && marketMode === "free" && (
+              <div className="mb-2 text-[11px] leading-snug" style={{ color: DIM }}>
+                Открытая позиция будет закрыта по текущему рынку. Штрафа за выход нет,
+                итоговый капитал вернётся на баланс.
+              </div>
+            )}
+            {confirmingEnd && marketMode !== "free" && left > 0 && (
               <div className="mb-2 text-[11px] leading-snug" style={{ color: SHORT }}>
                 До конца сессии ещё {clock(left)}. При досрочном выходе
                 с остатка спишется {Math.round(CONFIG.market.earlyExitPenalty * 100)}%
@@ -5848,7 +6663,7 @@ function PracticeApp({ onExit }) {
                   style={btnSoft(false)}>
                   Отмена
                 </button>
-                <button onClick={() => finishSession(left > 0)}
+                <button onClick={() => finishSession(marketMode === "free" ? false : left > 0)}
                   className="flex-1 rounded-lg py-3 text-[13px] font-semibold tap"
                   style={{ backgroundColor: SHORT, color: BG }}>
                   Да, завершить
@@ -5857,8 +6672,9 @@ function PracticeApp({ onExit }) {
             ) : (
               <button onClick={() => setConfirmingEnd(true)} className="rounded-lg py-3 text-[13px] font-semibold tap"
                 style={btnSoft(false)}>
-                Завершить сессию · {fmt(left > 0
-                  ? equity * (1 - CONFIG.market.earlyExitPenalty) : equity)} на баланс
+                {marketMode === "free" ? "Выйти из рынка" : "Завершить сессию"} · {fmt(
+                  marketMode === "free" ? equity : left > 0
+                    ? equity * (1 - CONFIG.market.earlyExitPenalty) : equity)} на баланс
               </button>
             )}
           </div>
@@ -6145,7 +6961,10 @@ function PracticeApp({ onExit }) {
                 if (playerFilter === "Лонг") list = list.filter((p) => p.position?.side === "long");
                 if (playerFilter === "Шорт") list = list.filter((p) => p.position?.side === "short");
                 if (playerFilter === "Вне рынка") list = list.filter((p) => !p.position);
-                list.sort((a, b) => b.equity - a.equity);
+                list.sort((a, b) => snap.freeMarket
+                  ? ((b.equity - b.startingCapital) / Math.max(1e-9, b.startingCapital))
+                    - ((a.equity - a.startingCapital) / Math.max(1e-9, a.startingCapital))
+                  : b.equity - a.equity);
                 if (playerFilter === "Топ-15") list = list.slice(0, 15);
                 if (list.length === 0) return <Blank>пусто</Blank>;
                 return list.map((p, i) => {
@@ -6171,7 +6990,8 @@ function PracticeApp({ onExit }) {
                       <div className="text-right whitespace-nowrap">
                         <div className="text-[13px] font-mono">{fmt(eq)}</div>
                         <div className="text-[11px] font-mono" style={{ color: delta >= 0 ? LONG : SHORT }}>
-                          {fmtSigned(delta)}
+                          {fmtSigned(delta)}{snap.freeMarket
+                            ? ` · ${((delta / Math.max(1e-9, p.startingCapital)) * 100).toFixed(1)}%` : ""}
                         </div>
                       </div>
                     </div>
