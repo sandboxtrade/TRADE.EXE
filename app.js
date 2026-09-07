@@ -2882,21 +2882,34 @@ function buildCandles(points, bucketMs, maxCandles) {
    читается как цифра, а не как подсветка. Белый тоже смягчён до #F2F2F5:
    чистый #FFFFFF на чистом чёрном даёт заметный ореол на OLED. */
 const BG = "#000000";
-const SURFACE = "#0C0C0E";
-const RAISED = "#161618";
-const HAIR = "#232326";
-const TEXT = "#F2F2F5";
-const DIM = "#8A8A93";
-const FAINT = "#5A5A63";
-const LONG = "#34C77B";
-const SHORT = "#E05563";
-const GOLD = "#D2A254";   // кубки
-/* Нейтральный акцент. Зелёный оставлен ТОЛЬКО для знака денег (PnL сторон,
-   результат сессии). Всё остальное — прогресс уровня, активная вкладка,
-   ссылки, значки, полосы распределения, линия дневного графика — рисуется
-   этим светло-серым. Зелёная подсветка на каждом втором элементе читалась
-   как оформление подпольной площадки, а не как акцент. */
-const ACCENT = "#DCDCE2";
+const SURFACE = "#09090B";
+const RAISED = "#111115";
+const HAIR = "#1D1D22";
+const TEXT = "#F4F1EB";
+const DIM = "#918D86";
+const FAINT = "#5E5A55";
+/* Боевые цвета оставлены, но специально приглушены: это уже не кислотные
+   биржевые кнопки, а спокойные глубокие оттенки. */
+const LONG = "#4E866D";
+const SHORT = "#8B5762";
+const GOLD = "#B68D4A";   // кубки
+/* Главный декоративный акцент — тёплый почти-белый, чтобы интерфейс был
+   чёрно-белым и дорогим по вайбу, а не неоновым. */
+const ACCENT = "#DED8CF";
+
+/* Цвета именно для графика: он должен выглядеть как на референсе — белые /
+   серые свечи на глубоком чёрном фоне, а не зелёно-красная лента. */
+const CHART_UP_FILL = "#F1EEE8";
+const CHART_UP_STROKE = "#ECE7DD";
+const CHART_DOWN_FILL = "rgba(0,0,0,0)";
+const CHART_DOWN_STROKE = "#6D6A73";
+const CHART_WICK = "#8A8690";
+const CHART_LINE = "#D9D3CA";
+const CHART_LINE_FAINT = "rgba(217,211,202,.16)";
+const CHART_VOL_UP = "rgba(241,238,232,.18)";
+const CHART_VOL_DOWN = "rgba(125,121,131,.26)";
+const CHART_PRICE_BG = "#08080A";
+const CHART_PRICE_STROKE = "#F1EEE8";
 
 /** Затемнение цвета — для нижней точки градиента кнопки и её рамки. */
 const shade = (hex, k) => {
@@ -2910,15 +2923,16 @@ const shade = (hex, k) => {
    экране, поэтому у всех кнопок мягкий вертикальный градиент и волосяная
    светлая рамка. Свечения (boxShadow с неоновым цветом) убраны. */
 const btnAccent = (c) => ({
-  backgroundImage: `linear-gradient(180deg, ${c}, ${shade(c, 0.84)})`,
-  color: "#07120C", border: `1px solid ${shade(c, 0.78)}`,
-  boxShadow: `0 4px 14px ${shade(c, 0.5)}55`,
+  backgroundImage: `linear-gradient(180deg, ${c}, ${shade(c, 0.78)})`,
+  color: TEXT,
+  border: `1px solid ${shade(c, 0.68)}`,
+  boxShadow: "inset 0 1px 0 rgba(255,255,255,.04), 0 8px 18px rgba(0,0,0,.28)",
 });
 const btnSoft = (on) => on
-  ? { backgroundImage: "linear-gradient(180deg,#F4F4F6,#DEDEE2)", color: "#0A0A0B",
-      border: "1px solid rgba(255,255,255,0.18)" }
-  : { backgroundImage: "linear-gradient(180deg,#1A1A1C,#0E0E10)", color: TEXT,
-      border: "1px solid rgba(255,255,255,0.08)" };
+  ? { backgroundImage: "linear-gradient(180deg,#F3EEE5,#D8D2C7)", color: "#09090A",
+      border: "1px solid rgba(255,255,255,0.12)" }
+  : { backgroundImage: "linear-gradient(180deg,#16161A,#0B0B0D)", color: TEXT,
+      border: "1px solid rgba(255,255,255,0.07)" };
 
 const fmt = (v, d = 2) => {
   const digits = Math.abs(v) >= 1000 ? 0 : d;
@@ -3405,15 +3419,16 @@ function Chart({ state, timeframe, mode, entryPrice, stopLoss, takeProfit,
               const x = xAt(i);
               if (x < -barW) return null;
               const grow = c.close >= c.open;
-              const color = grow ? LONG : SHORT;
+              const fill = grow ? CHART_UP_FILL : CHART_DOWN_FILL;
+              const stroke = grow ? CHART_UP_STROKE : CHART_DOWN_STROKE;
               const top = toY(Math.max(c.open, c.close));
               const bottom = toY(Math.min(c.open, c.close));
               return (
                 <g key={c.t}>
                   <rect x={x - wick / 2} y={toY(c.high)} width={wick}
-                    height={Math.max(0.6, toY(c.low) - toY(c.high))} fill={color} />
+                    height={Math.max(0.6, toY(c.low) - toY(c.high))} fill={CHART_WICK} opacity={0.95} />
                   <rect x={x - body / 2} y={top} width={body}
-                    height={Math.max(1, bottom - top)} fill={color}
+                    height={Math.max(1, bottom - top)} fill={fill} stroke={stroke} strokeWidth={1}
                     rx={body > 5 ? 1 : 0} />
                 </g>
               );
@@ -3421,7 +3436,7 @@ function Chart({ state, timeframe, mode, entryPrice, stopLoss, takeProfit,
           </g>
         ) : (() => {
           const pts = shown.map((c, i) => `${xAt(i).toFixed(1)},${toY(c.close).toFixed(1)}`);
-          const trend = shown[shown.length - 1].close >= shown[0].open ? LONG : SHORT;
+          const trend = CHART_LINE;
           if (shown.length === 1) {
             const x = xAt(0), y = toY(shown[0].close);
             return (
@@ -3436,12 +3451,12 @@ function Chart({ state, timeframe, mode, entryPrice, stopLoss, takeProfit,
             <g>
               <defs>
                 <linearGradient id="tx-area" x1="0" y1="0" x2="0" y2="1">
-                  <stop offset="0%" stopColor={trend} stopOpacity="0.22" />
+                  <stop offset="0%" stopColor={trend} stopOpacity="0.18" />
                   <stop offset="100%" stopColor={trend} stopOpacity="0" />
                 </linearGradient>
               </defs>
               <polygon fill="url(#tx-area)"
-                points={`${pts.join(" ")} ${xAt(shown.length - 1)},${PAD_T + plotH} ${xAt(0)},${PAD_T + plotH}`} />
+                points={`${pts.join(" ")} ${xAt(shown.length - 1)},${PAD_T + plotH} ${xAt(0)},${PAD_T + plotH}`} opacity="0.9" />
               <polyline points={pts.join(" ")} fill="none" stroke={trend}
                 strokeWidth={1.6} strokeLinejoin="round" strokeLinecap="round" />
             </g>
@@ -3468,15 +3483,15 @@ function Chart({ state, timeframe, mode, entryPrice, stopLoss, takeProfit,
           const h = volRef === 0 ? 0 : Math.min(1, c.volume / volRef) * (VOL_H - 6);
           return <rect key={`v${c.t}`} x={x - body / 2} y={volTop + (VOL_H - 6 - h)}
             width={body} height={Math.max(0.5, h)}
-            fill={c.close >= c.open ? LONG : SHORT} opacity={0.28} rx={body > 5 ? 1 : 0} />;
+            fill={c.close >= c.open ? CHART_VOL_UP : CHART_VOL_DOWN} rx={body > 5 ? 1 : 0} />;
         })}
 
         {/* текущая цена */}
-        <line x1={0} x2={plotW} y1={priceY} y2={priceY} stroke={TEXT} strokeWidth={1}
-          strokeDasharray="2 3" opacity={0.35} />
-        <rect x={plotW + 1} y={priceY - 9} width={AXIS_W - 2} height={18} rx={3}
-          fill={up ? LONG : SHORT} />
-        <text x={plotW + AXIS_W / 2} y={priceY + 4} textAnchor="middle" fill={BG}
+        <line x1={0} x2={plotW} y1={priceY} y2={priceY} stroke={CHART_LINE_FAINT} strokeWidth={1}
+          strokeDasharray="2 4" />
+        <rect x={plotW + 1.5} y={priceY - 10} width={AXIS_W - 3} height={20} rx={4}
+          fill={CHART_PRICE_BG} stroke={CHART_PRICE_STROKE} strokeWidth={1.1} />
+        <text x={plotW + AXIS_W / 2} y={priceY + 4} textAnchor="middle" fill={TEXT}
           fontSize={11.5} fontFamily="RodchenkoDigits, Neogurotesuku, monospace" fontWeight="700">
           {state.price.toFixed(2)}
         </text>
@@ -3762,9 +3777,17 @@ button { -webkit-tap-highlight-color: transparent; touch-action: manipulation; }
 button:disabled { cursor: default; }
 input, textarea { caret-color: #F2F2F5; }
 input::placeholder, textarea::placeholder { color: #5A5A63; opacity: 1; }
-button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-visible {
+button:focus-visible, select:focus-visible {
   outline: 2px solid rgba(220,220,226,.52);
   outline-offset: 2px;
+}
+input:focus-visible, textarea:focus-visible { outline: none; }
+.ui-field {
+  transition: border-color var(--tx-fast) var(--tx-ease), box-shadow var(--tx-fast) var(--tx-ease);
+}
+.ui-field:focus-within {
+  border-color: rgba(220,220,226,.34) !important;
+  box-shadow: 0 0 0 1px rgba(220,220,226,.08) inset;
 }
 .ui-safe-top { padding-top: max(16px, var(--tx-safe-top)); }
 .ui-safe-bottom { padding-bottom: max(14px, var(--tx-safe-bottom)); }
@@ -5070,11 +5093,11 @@ function DepositScreen({ profile, onBack, onDemoTopUp }) {
         <div className="text-[10px] tracking-[0.25em] mt-6 mb-2" style={{ color: FAINT }}>
           СУММА ПОПОЛНЕНИЯ
         </div>
-        <div className="flex items-center rounded-2xl px-4"
+        <div className="ui-field flex items-center rounded-2xl px-4"
           style={{ backgroundColor: SURFACE, border: `1px solid ${HAIR}` }}>
           <span className="text-[16px] font-mono" style={{ color: DIM }}>$</span>
           <input value={amount} onChange={(e) => setAmount(e.target.value)}
-            inputMode="decimal"
+            inputMode="decimal" autoComplete="off" spellCheck="false"
             className="flex-1 min-w-0 bg-transparent outline-none py-4 pl-1 text-[16px] font-mono"
             style={{ color: TEXT }} />
         </div>
@@ -5179,7 +5202,7 @@ function WithdrawScreen({ profile, onBack }) {
         <div className="text-[10px] tracking-[0.25em] mt-6 mb-2" style={{ color: FAINT }}>
           СУММА ВЫВОДА
         </div>
-        <div className="flex items-center rounded-2xl px-4"
+        <div className="ui-field flex items-center rounded-2xl px-4"
           style={{ backgroundColor: SURFACE, border: `1px solid ${HAIR}` }}>
           <span className="text-[16px] font-mono" style={{ color: DIM }}>$</span>
           <input value={amount} onChange={(e) => setAmount(e.target.value)}
@@ -6894,7 +6917,7 @@ function PracticeApp({ onExit }) {
                     className="ui-hit flex items-center gap-2 px-3 rounded-xl text-[10px] tracking-[0.2em] tap"
                     style={{ backgroundColor: eyesOn ? "#0E2A1B" : RAISED,
                       color: eyesOn ? LONG : DIM,
-                      border: `1px solid ${eyesOn ? "#1E4A32" : HAIR}` }}>
+                      border: `1px solid ${eyesOn ? shade(LONG, 0.9) : HAIR}` }}>
                     <Icon name="eye" size={13} color={eyesOn ? LONG : DIM} />
                     EYES
                   </button>
@@ -7224,7 +7247,7 @@ function PracticeApp({ onExit }) {
 
         {/* ---------------------------- панель торговли ---------------------- */}
         {tab === "Рынок" && (
-          <div className="px-4 pt-3 pb-3 border-t"
+          <div className="px-4 pt-2 pb-2 border-t"
             style={{ borderColor: HAIR, backgroundColor: "#050506" }}>
 
             {sheet && snap.tradingOpen && (
@@ -7317,7 +7340,7 @@ function PracticeApp({ onExit }) {
                         </div>
                         <input value={limitPrice} onChange={(e) => setLimitPrice(e.target.value)} inputMode="decimal"
                           placeholder={state.price.toFixed(2)}
-                          className="w-full rounded-xl px-3.5 min-h-[48px] outline-none font-mono text-[16px]"
+                          className="ui-field w-full rounded-xl px-3.5 min-h-[48px] outline-none font-mono text-[16px]"
                           style={{ backgroundColor: RAISED, color: TEXT, border: `1px solid ${HAIR}` }} />
                       </div>
 
@@ -7343,99 +7366,80 @@ function PracticeApp({ onExit }) {
               </>
             )}
 
-            <div className="flex items-center justify-between gap-3 mb-2.5">
-              <div className="text-[10px] tracking-[0.18em]" style={{ color: FAINT }}>ОРДЕР</div>
-              <div className="text-[10px] font-mono" style={{ color: DIM }}>
-                доступно {fmt(orderCapacity, 0)}
+            {/* Компактная торговая панель: крупные action-кнопки остаются,
+                а служебные элементы собираются в две плотные строки, чтобы
+                график не терял треть экрана. */}
+            <div className="flex items-center justify-between gap-3 mb-2">
+              <div className="text-[9px] tracking-[0.18em]" style={{ color: FAINT }}>ОРДЕР</div>
+              <div className="flex items-center gap-2 min-w-0 text-[10px]">
+                {pos && (
+                  <span className="font-mono truncate" style={{ color: pos.side === "long" ? LONG : SHORT }}>
+                    {pos.side === "long" ? "LONG" : "SHORT"} {fmt(pos.margin, 0)} · {fmtSigned(pnl)}
+                  </span>
+                )}
+                <span className="font-mono shrink-0" style={{ color: DIM }}>
+                  свободно {fmt(orderCapacity, 0)}
+                </span>
               </div>
             </div>
 
-            {pos && (
-              <div className="flex items-center justify-between gap-3 rounded-xl px-3 py-2 mb-2.5"
-                style={{ backgroundColor: SURFACE, border: `1px solid ${HAIR}` }}>
-                <div className="flex items-center gap-2 min-w-0">
-                  <span className="text-[10px] tracking-[0.14em]" style={{ color: FAINT }}>ПОЗИЦИЯ</span>
-                  <span className="text-[12px] font-semibold"
-                    style={{ color: pos.side === "long" ? LONG : SHORT }}>
-                    {pos.side === "long" ? "LONG" : "SHORT"}
-                  </span>
-                  <span className="text-[11px] font-mono truncate" style={{ color: DIM }}>{fmt(pos.margin, 0)}</span>
-                </div>
-                <span className="text-[12px] font-mono shrink-0" style={{ color: pnlColor }}>{fmtSigned(pnl)}</span>
-              </div>
-            )}
-
-            <div className="flex items-stretch gap-2 mb-2">
-              <div className="flex-1 min-w-0 rounded-2xl px-3.5 flex flex-col justify-center"
+            <div className="flex items-stretch gap-1.5 mb-1.5">
+              <div className="ui-field flex-1 min-w-0 rounded-xl px-3 flex items-center"
                 style={{ backgroundColor: SURFACE,
                   border: `1px solid ${orderTooLarge ? SHORT : HAIR}` }}>
-                <div className="text-[8px] tracking-[0.14em] mb-0.5" style={{ color: FAINT }}>РАЗМЕР ОРДЕРА</div>
-                <div className="flex items-center min-w-0">
-                  <span className="font-mono text-[13px] mr-1.5" style={{ color: FAINT }}>$</span>
-                  <input value={size} onChange={(e) => setSize(e.target.value)} inputMode="decimal"
-                    placeholder="0" aria-label="Размер позиции"
-                    className="w-full bg-transparent outline-none font-mono text-[18px] min-w-0 h-[28px] leading-none"
-                    style={{ color: orderTooLarge ? SHORT : TEXT }} />
-                </div>
+                <span className="font-mono text-[12px] mr-1.5 shrink-0" style={{ color: FAINT }}>$</span>
+                <input value={size} onChange={(e) => setSize(e.target.value)} inputMode="decimal"
+                  placeholder="0" aria-label="Размер позиции"
+                  className="w-full bg-transparent outline-none font-mono text-[17px] min-w-0 h-[46px] leading-none"
+                  style={{ color: orderTooLarge ? SHORT : TEXT }} />
               </div>
 
-              <div className="grid grid-cols-3 gap-1.5 shrink-0">
-                {[[0.25, "25%"], [0.5, "50%"], [1, "MAX"]].map(([f, label]) => (
-                  <button key={label}
-                    onClick={() => setSize(String(Math.round(orderCapacity * f)))}
-                    className="min-w-[50px] h-[54px] rounded-xl font-mono text-[11px] font-semibold tap"
-                    style={btnSoft(false)}>
-                    {label}
-                  </button>
-                ))}
+              {[[0.25, "25%"], [0.5, "50%"], [1, "MAX"]].map(([f, label]) => (
+                <button key={label}
+                  onClick={() => setSize(String(Math.round(orderCapacity * f)))}
+                  className="w-[52px] h-[48px] rounded-xl font-mono text-[10px] font-semibold tap shrink-0"
+                  style={btnSoft(false)}>
+                  {label}
+                </button>
+              ))}
+            </div>
+
+            <div className="min-h-[16px] mb-1.5 flex items-center justify-between gap-2">
+              <span className="text-[9px] truncate" style={{ color: orderTooLarge ? SHORT : FAINT }}>
+                {orderTooLarge
+                  ? `выше доступного на ${fmt(notional - orderCapacity, 0)}`
+                  : notional > 0 ? `ордер ${fmt(notional, 0)}` : "введите размер"}
+              </span>
+              <div className="flex gap-1.5 shrink-0">
+                <button disabled={!pos}
+                  onClick={() => pos && setSheet(sheet === "risk" ? null : "risk")}
+                  className="h-[34px] min-w-[78px] rounded-lg px-2.5 text-[10px] font-semibold tap disabled:opacity-30"
+                  style={sheet === "risk" ? btnSoft(true) : btnSoft(false)}>
+                  SL / TP
+                </button>
+                <button disabled={!snap.tradingOpen || !validOrderSize}
+                  onClick={() => snap.tradingOpen && validOrderSize && setSheet(sheet === "limit" ? null : "limit")}
+                  className="h-[34px] min-w-[78px] rounded-lg px-2.5 text-[10px] font-semibold tap disabled:opacity-30"
+                  style={sheet === "limit" ? btnSoft(true) : btnSoft(false)}>
+                  ЛИМИТ{myLimits.length ? ` · ${myLimits.length}` : ""}
+                </button>
               </div>
             </div>
 
-            {orderTooLarge && (
-              <div className="text-[10px] mb-2" style={{ color: SHORT }}>
-                Размер выше доступного на {fmt(notional - orderCapacity, 0)}
-              </div>
-            )}
-
-            <div className="grid grid-cols-2 gap-2 mb-2.5">
-              <button disabled={!pos}
-                onClick={() => pos && setSheet(sheet === "risk" ? null : "risk")}
-                className="min-h-[48px] rounded-xl px-3 text-left tap disabled:opacity-30"
-                style={sheet === "risk" ? btnSoft(true) : btnSoft(false)}>
-                <div className="text-[11px] font-semibold">SL / TP</div>
-                <div className="text-[9px] mt-0.5 truncate"
-                  style={{ color: sheet === "risk" ? "#555" : FAINT }}>
-                  {pos
-                    ? `${human.stopLoss ? `SL ${human.stopLoss.toFixed(2)}` : "SL —"} · ${human.takeProfit ? `TP ${human.takeProfit.toFixed(2)}` : "TP —"}`
-                    : "нужна позиция"}
-                </div>
-              </button>
-              <button disabled={!snap.tradingOpen || !validOrderSize}
-                onClick={() => snap.tradingOpen && validOrderSize && setSheet(sheet === "limit" ? null : "limit")}
-                className="min-h-[48px] rounded-xl px-3 text-left tap disabled:opacity-30"
-                style={sheet === "limit" ? btnSoft(true) : btnSoft(false)}>
-                <div className="text-[11px] font-semibold">ЛИМИТ{myLimits.length ? ` · ${myLimits.length}` : ""}</div>
-                <div className="text-[9px] mt-0.5 truncate"
-                  style={{ color: sheet === "limit" ? "#555" : FAINT }}>
-                  {myLimits.length ? `${myLimits.length} активн.` : "заявка по цене"}
-                </div>
-              </button>
-            </div>
-
-            <div className="grid grid-cols-2 gap-2.5">
+            <div className="grid grid-cols-2 gap-2">
               <button disabled={!snap.tradingOpen || (!(pos && pos.side === "short") && !validOrderSize)} onClick={doBuy}
-                className="rounded-2xl min-h-[68px] px-3 disabled:opacity-25 flex flex-col items-start justify-center text-left tap"
+                className="rounded-2xl h-[60px] px-3 disabled:opacity-25 flex flex-col items-start justify-center text-left tap"
                 style={btnAccent(LONG)}>
                 <span className="font-bold text-[17px] tracking-wide">ЛОНГ</span>
-                <span className="text-[9px] opacity-70 mt-0.5 leading-tight">
+                <span className="text-[9px] opacity-70 mt-0.5 leading-tight truncate w-full">
                   {pos && pos.side === "short" ? "закрыть SHORT" : `${fmt(notional, 0)} · открыть / добавить`}
                 </span>
               </button>
               <button disabled={!snap.tradingOpen || (!(pos && pos.side === "long") && !validOrderSize)} onClick={doSell}
-                className="rounded-2xl min-h-[68px] px-3 disabled:opacity-25 flex flex-col items-start justify-center text-left tap"
+                className="rounded-2xl h-[60px] px-3 disabled:opacity-25 flex flex-col items-start justify-center text-left tap"
                 style={btnAccent(SHORT)}>
                 <span className="font-bold text-[17px] tracking-wide">ШОРТ</span>
-                <span className="text-[9px] opacity-70 mt-0.5 leading-tight">
+                <span className="text-[9px] opacity-70 mt-0.5 leading-tight truncate w-full">
                   {pos && pos.side === "long" ? "закрыть LONG" : `${fmt(notional, 0)} · открыть / добавить`}
                 </span>
               </button>
@@ -7443,11 +7447,11 @@ function PracticeApp({ onExit }) {
 
             {pos && (
               <button disabled={!snap.tradingOpen} onClick={() => doClose(1, "позиция закрыта")}
-                className="w-full min-h-[46px] mt-2.5 rounded-xl px-3 flex items-center justify-between gap-3 tap disabled:opacity-30"
+                className="w-full h-[38px] mt-1.5 rounded-xl px-3 flex items-center justify-between gap-3 tap disabled:opacity-30"
                 style={btnSoft(false)}>
-                <span className="text-[11px] font-semibold tracking-[0.08em]">ЗАКРЫТЬ ПОЗИЦИЮ</span>
-                <span className="text-[12px] font-mono" style={{ color: pnlColor }}>
-                  {pos.side === "long" ? "LONG" : "SHORT"} · {fmtSigned(pnl)}
+                <span className="text-[10px] font-semibold tracking-[0.08em]">ЗАКРЫТЬ ПОЗИЦИЮ</span>
+                <span className="text-[11px] font-mono" style={{ color: pnlColor }}>
+                  {fmtSigned(pnl)}
                 </span>
               </button>
             )}
@@ -7455,7 +7459,7 @@ function PracticeApp({ onExit }) {
         )}
 
         {toast && (
-          <div className="absolute left-0 right-0 flex justify-center pointer-events-none" style={{ bottom: tab === "Рынок" ? (pos ? 282 : 228) : 84 }}>
+          <div className="absolute left-0 right-0 flex justify-center pointer-events-none" style={{ bottom: tab === "Рынок" ? (pos ? 214 : 172) : 84 }}>
             <div className="px-4 py-2 rounded-full text-[12px]"
               style={{ backgroundColor: RAISED, color: toast.color, border: `1px solid ${HAIR}` }}>
               {toast.text}
