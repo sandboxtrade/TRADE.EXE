@@ -17,29 +17,9 @@ import { createRoot } from "react-dom/client";
  * Менять их можно только вместе с перепрогоном test/audit.js.
  */
 const CONFIG = {
-  // --- Ценовая кривая p(Q) = P0 * (1 + beta * tanh(Q / kappa)) ---
-  P0: 100,          // базовая цена
-  beta: 0.75,       // диапазон цены: [P0*(1-beta), P0*(1+beta)] = [25, 175]
-                    // Ограниченность с ОБЕИХ сторон -> убыток обеих сторон
-                    // конечен -> equity >= 0 без ликвидаций (MODEL-V2, разд. I)
-
-  // kappa НЕ задаётся вручную. kappa = C / (P0 * THETA).
-  // Это даёт масштабную инвариантность: движение цены зависит только от
-  // ДОЛИ совокупного капитала (MODEL-V2, разд. 3: 12 конфигураций,
-  // идентичный результат до 6-го знака).
-  // Глубина кривой. Чем больше THETA, тем меньше kappa и тем сильнее один и
-  // тот же поток двигает цену. Поднято с 0.5 до 0.62.
-  //
-  // Компромисс замерен: 0.5 -> размах 7.1%, колебание 0.137%/тик, моментум
-  // почти не окупается (EV 0.11); 0.8 -> размах 11.9% и 0.326%/тик, но
-  // моментум даёт EV 2.88. Живая цена сама по себе делает рынок проще:
-  // на пологой кривой собственный поток трейдера двигает цену сильнее.
-  // 0.62 — середина: размах 9.2%, 0.212%/тик, моментум EV 0.59.
-  THETA: 0.62,
-
-  // --- Клиринг ---
-  CLIP_MAX_ITER: 200,   // предел итераций обрезки; эмпирически хватает <= 14
-  EPS: 1e-12,
+  // --- Базовая цена и жёсткие границы MODEL-S ---
+  P0: 100,
+  beta: 0.75,       // диапазон цены: [25, 175]
 
   // --- NPC ---
   // Доля NPC, реагирующих БЕЗ задержки. Найдена численно в SELFPUMP-FIX:
@@ -103,7 +83,6 @@ const CONFIG = {
      длинные полки. С 4 доля неподвижных тиков падает с 49% до 30%. */
   NPC_MIN_GAP: 15,
   // --- маржинальный режим ---
-  LEV_DEPTH: 0.7,        // глубина кривой = C * L^LEV_DEPTH
   /* Поддерживающая маржа = LEV_MAINTENANCE / L, то есть 5% при x10.
      ОНА ОБЯЗАНА БЫТЬ СИЛЬНО НИЖЕ НАЧАЛЬНОЙ. При входе на всю покупательную
      способность позиция стоит ровно L собственных средств, значит начальная
@@ -135,7 +114,6 @@ const CONFIG = {
   NPC_TILT: 0.05,        // вероятность сделки «на эмоциях» после серии потерь
   NPC_THRESH_SCALE: 0.4,
   NPC_HERD_MAX: 0.25,
-  NPC_CONVICTION_UP: 1.10,
 
   /* --- МОДЕЛЬ S ---
      DEPTH_FRACTION: какая доля капитала комнаты двигает цену на один пункт.
@@ -241,7 +219,7 @@ const CONFIG = {
  */
 
 /** Совместимость: остальной файл ждёт объект curve с этими полями. */
-function makeCurve(totalCapital, marketRef) {
+function makeCurve(marketRef) {
   const { P0, beta } = CONFIG;
   const PMIN = P0 * (1 - beta);
   const PMAX = P0 * (1 + beta);
@@ -252,7 +230,7 @@ function makeCurve(totalCapital, marketRef) {
     /** Размер позиции: ставка в деньгах и есть размер. */
     unitsFor: (budget) => Math.max(0, budget),
     /** Оценка собственного сдвига цены — нужна ботам для расчёта выгоды. */
-    clearingPrice: (Q, du) => marketRef.P + marketRef.depth() * du,
+    clearingPrice: (_Q, du) => marketRef.P + marketRef.depth() * du,
     /** Цена — самостоятельное состояние, отдельной «цены ликвидации» нет. */
     liquidationPrice: () => marketRef.P,
     p: () => marketRef.P,
@@ -260,7 +238,7 @@ function makeCurve(totalCapital, marketRef) {
 }
 
 class Market {
-  constructor({ playerCount, startingCapital, seed = 1, leverage = 1, eyes = false }) {
+  constructor({ playerCount, startingCapital, seed = 1, leverage = 1 }) {
     /* ПЛЕЧО В МОДЕЛИ S.
        Заём берётся из общей кассы комнаты: cash участника уходит в минус
        ровно на занятую сумму. Тождество Σcash + Σ|u| = C от этого не
@@ -272,7 +250,6 @@ class Market {
       ? CONFIG.LEV_MAINTENANCE / this.leverage : 0;
     this.npcLeverage = 1;
     this.liquidations = 0;
-    this.badDebt = 0;
     this.totalTicks = null;
     this.phase = null;
     this.warmupTicks = 0;
@@ -290,7 +267,7 @@ class Market {
       this.rng() * (CONFIG.CENTER_MAX - CONFIG.CENTER_MIN);
     this.P = this.center;
 
-    this.curve = makeCurve(this.C, this);
+    this.curve = makeCurve(this);
     this.tick = 0;
     this.longRealized = 0;
     this.shortRealized = 0;
@@ -459,8 +436,6 @@ class Market {
     const lev = this.playerLeverage(i);
     return Math.max(0, lev * this.equity(i) - Math.abs(pl.u));
   }
-  maxUnitsSolo(i) { return this.buyingPower(i); }
-
   /**
    * Уровень маржи = эквити / размер позиции. При входе на всю
    * покупательную способность равен 1/L, то есть 10% при плече x10.
@@ -853,7 +828,7 @@ function makeNPCState(type, spec, r, seed, ordinal) {
   };
 }
 
-function attachNPCs(m, startIdx, count, seed, eyes = false, typeList = TYPES) {
+function attachNPCs(m, startIdx, count, seed, typeList = TYPES) {
   const r = mulberry32(seed);
   const list = typeList && typeList.length ? typeList : TYPES;
   for (let k = 0; k < count; k++) {
@@ -1624,9 +1599,9 @@ function createSnapshot(m, viewerId, { level = "full", devMode = false } = {}) {
  */
 class RoomV4 {
   constructor({ playerCount = 100, startingCapital = 100, seed = 1, npcCount = null,
-    leverage = 1, eyes = false, durationTicks = null, warmupTicks = 0,
+    leverage = 1, durationTicks = null, warmupTicks = 0,
     prerollTicks = null } = {}) {
-    this.market = new Market({ playerCount, startingCapital, seed, leverage, eyes });
+    this.market = new Market({ playerCount, startingCapital, seed, leverage });
     this.market.totalTicks = durationTicks;
     this.market.warmupTicks = warmupTicks;
     this.history = [this.market.mark];
@@ -1637,7 +1612,7 @@ class RoomV4 {
     this._inPreroll = false;
     this.liveSteps = 0;
     const npcs = npcCount === null ? playerCount : npcCount;
-    if (npcs > 0) attachNPCs(this.market, playerCount - npcs, npcs, seed, eyes);
+    if (npcs > 0) attachNPCs(this.market, playerCount - npcs, npcs, seed);
     /* ПРЕДВАРИТЕЛЬНЫЙ ПРОГОН. Без него сессия начиналась бы ровно в скрытом
        центре, и он читался бы прямо со стартовой цены. Боты торгуют заранее,
        цена уходит в сторону, и к моменту входа игрока центр по графику не
@@ -1876,21 +1851,16 @@ class RoomV4 {
 }
 
 
-// ==== ПЕРЕХОДНИК ДЛЯ КРАСИВОГО ИНТЕРФЕЙСА (тот же смысл, что legacyRoom.js в packages/engine) ====
-const LEGACY_HUMAN_ID = 0;
-
+// ==== ПЕРЕХОДНИК ДЛЯ ИНТЕРФЕЙСА ====
 CONFIG.market = {
   assetSymbol: "SIM",
   totalPlayers: 100,
   playerOptions: [100, 300, 500],   // сколько всего участников в комнате
   capitalOptions: [100, 500, 1000, 10000],
   freeMarket: {
-    title: "СВОБОДНЫЙ РЫНОК",
     minCapital: 10,
     maxCapital: 10000,
     botCount: 5000,
-    alwaysOpen: true,
-    noRoomLimits: true,
   },
   durationOptions: [1, 5, 10, 30],     // минуты
   /* Плечо. Заём берётся из общей кассы комнаты, за него взимается плата
@@ -2073,7 +2043,7 @@ class LegacyRoom {
     this.warmupTicks = 0;
     this.eyes = eyes ? new EyesLayer() : null;
     this._room = new RoomV4({ playerCount: count, startingCapital, seed,
-      npcCount: count - 1, leverage, eyes, durationTicks, warmupTicks });
+      npcCount: count - 1, leverage, durationTicks, warmupTicks });
     this.devMode = devMode;
     this._startingCapital = startingCapital;
     this.paused = false;
@@ -2332,7 +2302,8 @@ const FREE_MARKET = {
   uiSnapshotMs: 200,         // React получает 5 кадров/с, движок тикает 10/с
   invariantEvery: 10,        // полный аудит 5 001 счёта раз в секунду
   rosterSample: 120,
-  historyLimit: 6000,
+  historyLimit: 36000,        // 1 час raw-истории при тике 100 мс
+  historyTrimChunk: 2000,    // режем редко и пачкой, а не shift() каждый тик
   lifecycleEvery: 50,        // каждые 5 секунд — лёгкий проход за ротацией
   lifecycleMaxPerPass: 8,    // не больше 8 замен за раз, без массового шока
   retireMinTicks: 9000,      // естественная жизнь бота: от ~15 минут
@@ -2439,7 +2410,7 @@ function freeMarketLifecycle(m) {
   m.freeLifecycleCursor = cursor;
   if (curveDirty) {
     m.startingCapital = m.C / m.players.length;
-    m.curve = makeCurve(m.C, m);
+    m.curve = makeCurve(m);
     m._freePreStats = null;
   }
 }
@@ -2455,7 +2426,7 @@ class FreeMarketLegacyRoom extends LegacyRoom {
     const requestedHumanCapital = Number(startingCapital) || 0;
     const count = FREE_MARKET.botCount + 1; // 0 = зарезервированный слот человека
     this._room = new RoomV4({ playerCount: count, startingCapital: 1, seed,
-      npcCount: 0, leverage: 1, eyes: false, durationTicks: null,
+      npcCount: 0, leverage: 1, durationTicks: null,
       warmupTicks: 0, prerollTicks: 0 });
     const m = this._room.market;
     m.freeMarket = true;
@@ -2488,8 +2459,8 @@ class FreeMarketLegacyRoom extends LegacyRoom {
     // работать без отдельной математики для "богатых" и "бедных" ботов.
     m.C = m.players.reduce((s, p) => s + p.cash, 0);
     m.startingCapital = m.C / count; // только fallback для legacy-кода
-    m.curve = makeCurve(m.C, m);
-    attachNPCs(m, 1, FREE_MARKET.botCount, seed + 17, false, FREE_TYPES);
+    m.curve = makeCurve(m);
+    attachNPCs(m, 1, FREE_MARKET.botCount, seed + 17, FREE_TYPES);
     m.freeLifecycleRng = mulberry32((seed ^ 0x4f1bbcdc) >>> 0);
     m.freeLifecycleCursor = 1;
     m.freeTurnover = 0;
@@ -2519,9 +2490,14 @@ class FreeMarketLegacyRoom extends LegacyRoom {
     this._openPrice = m.mark;
     this._cache = null;
     this._freeAggCache = null;
+    /* В free-market тик НЕ сбрасывается после preroll. Если оставить хвост
+       истории в диапазоне -N..0, а новые точки писать уже как m.tick*dt,
+       график рвётся на две отдельные пачки свечей с огромной дырой между
+       ними. Поэтому хвост сразу выравнивается в абсолютное время рынка:
+       последняя историческая точка соответствует текущему m.tick. */
     this._priceHistory = this._room.history.map((price, i, arr) => ({
       price,
-      t: (i - (arr.length - 1)) * CONFIG.market.tickMs,
+      t: (m.tick - (arr.length - 1 - i)) * CONFIG.market.tickMs,
       volume: 0,
     }));
 
@@ -2558,7 +2534,7 @@ class FreeMarketLegacyRoom extends LegacyRoom {
     p.stopLoss = null; p.takeProfit = null; p.limits = []; p.liquidatedAt = null;
     m.C += amount;
     m.startingCapital = m.C / m.players.length;
-    m.curve = makeCurve(m.C, m);
+    m.curve = makeCurve(m);
     this._startingCapital = amount;
     this._humanAttached = true;
     this._entryTick = m.tick;
@@ -2584,7 +2560,7 @@ class FreeMarketLegacyRoom extends LegacyRoom {
     p.stopLoss = null; p.takeProfit = null; p.limits = [];
     m.C = Math.max(1e-9, m.C - equity);
     m.startingCapital = m.C / m.players.length;
-    m.curve = makeCurve(m.C, m);
+    m.curve = makeCurve(m);
     this._startingCapital = 0;
     this._humanAttached = false;
     this._freeAggCache = null;
@@ -2611,8 +2587,8 @@ class FreeMarketLegacyRoom extends LegacyRoom {
       t: this._room.market.tick * CONFIG.market.tickMs,
       volume: buy + sell,
     });
-    if (this._priceHistory.length > FREE_MARKET.historyLimit + 200)
-      this._priceHistory.splice(0, 200);
+    if (this._priceHistory.length > FREE_MARKET.historyLimit + FREE_MARKET.historyTrimChunk)
+      this._priceHistory.splice(0, FREE_MARKET.historyTrimChunk);
     return result;
   }
 
@@ -2967,7 +2943,7 @@ const fmtSigned = (v, d = 2) => `${v >= 0 ? "+" : "−"}${fmt(Math.abs(v), d).re
 const AXIS_W = 56;          // ширина ценовой шкалы справа
 const VOL_H = 44;           // высота стакана объёмов снизу
 const PAD_T = 10, PAD_B = 6;
-const BAR_MIN = 1.0, BAR_MAX = 40, BAR_DEFAULT = 8;
+const BAR_MIN = 2.0, BAR_MAX = 40, BAR_DEFAULT = 8;   // не рендерим сотни микросвечей по 1px на iPhone
 const Y_MIN = 0.2, Y_MAX = 6;   // растяжение ценовой шкалы
 const HISTORY_CANDLES = 2000;
 
@@ -3003,27 +2979,55 @@ function Chart({ state, timeframe, mode, entryPrice, stopLoss, takeProfit,
   const [yZoom, setYZoom] = useState(1);           // растяжение ценовой шкалы
   const view = useRef({ barW, offset, yZoom });
   view.current = { barW, offset, yZoom };
+  const scale = useRef(null);
   // Всё, что нужно обработчикам касаний: они вешаются один раз, поэтому
   // читают свежие значения через ref, а не через замыкание.
   const geo = useRef({});
   const [drag, setDrag] = useState(null);   // {kind, price} во время перетаскивания
   const dragRef = useRef(null);
   dragRef.current = drag;
-  const zoomRaf = useRef(0);
-  const zoomQueued = useRef(1);
-  const queueYZoom = (next) => {
-    zoomQueued.current = clamp(next, Y_MIN, Y_MAX);
-    if (zoomRaf.current) return;
-    zoomRaf.current = requestAnimationFrame(() => {
-      zoomRaf.current = 0;
-      setYZoom((prev) => Math.abs(prev - zoomQueued.current) < 0.012 ? prev : zoomQueued.current);
+
+  /* Жесты раньше напрямую дёргали React-state на каждом touchmove. На iOS
+     это легко даёт 100+ setState/с одновременно с входящими снапшотами.
+     Теперь ширина свечи, Y-zoom и прокрутка объединяются в один RAF-кадр. */
+  const viewRaf = useRef(0);
+  const viewQueued = useRef({});
+  const queueView = (patch) => {
+    Object.assign(viewQueued.current, patch);
+    if (viewRaf.current) return;
+    viewRaf.current = requestAnimationFrame(() => {
+      viewRaf.current = 0;
+      const q = viewQueued.current;
+      viewQueued.current = {};
+      if (Number.isFinite(q.barW)) {
+        const next = clamp(q.barW, BAR_MIN, BAR_MAX);
+        setBarW((prev) => Math.abs(prev - next) < 0.12 ? prev : next);
+      }
+      if (Number.isFinite(q.yZoom)) {
+        const next = clamp(q.yZoom, Y_MIN, Y_MAX);
+        setYZoom((prev) => Math.abs(prev - next) < 0.008 ? prev : next);
+      }
+      if (Number.isFinite(q.offset)) {
+        const next = Math.max(0, Math.round(q.offset));
+        setOffset((prev) => prev === next ? prev : next);
+      }
     });
   };
+  const queueYZoom = (next) => queueView({ yZoom: next });
   const auto = offset === 0 && Math.abs(yZoom - 1) < 0.02 && Math.abs(barW - BAR_DEFAULT) < 0.1;
 
   useEffect(() => () => {
-    if (zoomRaf.current) cancelAnimationFrame(zoomRaf.current);
+    if (viewRaf.current) cancelAnimationFrame(viewRaf.current);
   }, []);
+
+  /* Каждый таймфрейм открывается на последней цене и в собственном
+     автомасштабе. Старый zoom/offset от 1с не должен ломать 1м/5м. */
+  useEffect(() => {
+    setBarW(BAR_DEFAULT);
+    setOffset(0);
+    setYZoom(1);
+    scale.current = null;
+  }, [timeframe]);
 
   // --- жесты ---
   useEffect(() => {
@@ -3053,7 +3057,8 @@ function Chart({ state, timeframe, mode, entryPrice, stopLoss, takeProfit,
     const start = (e) => {
       if (e.touches.length === 2) {
         const s = spread(e.touches);
-        two = { d: Math.max(12, Math.hypot(s.x, s.y)), ...view.current };
+        two = { sx: Math.max(1, s.x), sy: Math.max(1, s.y),
+          useX: s.x >= 24, useY: s.y >= 24, ...view.current };
         one = null; grab = null;
         return;
       }
@@ -3097,11 +3102,12 @@ function Chart({ state, timeframe, mode, entryPrice, stopLoss, takeProfit,
       if (e.touches.length === 2 && two) {
         e.preventDefault();
         const s = spread(e.touches);
-        // Как при просмотре фотографии: щипок тянет обе оси разом.
-        // Отдельная подстройка только по цене — потягиванием за шкалу справа.
-        const k = Math.max(12, Math.hypot(s.x, s.y)) / two.d;
-        setBarW(clamp(two.barW * k, BAR_MIN, BAR_MAX));
-        queueYZoom(two.yZoom * k);
+        // Горизонтальная дистанция управляет временем, вертикальная — ценой.
+        // Раньше один общий коэффициент одновременно растягивал обе оси,
+        // поэтому горизонтальный pinch неожиданно ломал Y-масштаб.
+        const kx = two.useX ? clamp(Math.max(1, s.x) / two.sx, 0.25, 4) : 1;
+        const ky = two.useY ? clamp(Math.max(1, s.y) / two.sy, 0.25, 4) : 1;
+        queueView({ barW: two.barW * kx, yZoom: two.yZoom * ky });
         return;
       }
       if (e.touches.length === 1 && grab) {
@@ -3113,8 +3119,8 @@ function Chart({ state, timeframe, mode, entryPrice, stopLoss, takeProfit,
         const dx = e.touches[0].clientX - one.x;
         if (Math.abs(dx) < 6) return;
         e.preventDefault();
-        setOffset(clamp(Math.round(one.offset + dx / view.current.barW),
-          0, HISTORY_CANDLES));
+        queueView({ offset: clamp(one.offset + dx / Math.max(BAR_MIN, view.current.barW),
+          0, HISTORY_CANDLES) });
       }
     };
 
@@ -3132,8 +3138,7 @@ function Chart({ state, timeframe, mode, entryPrice, stopLoss, takeProfit,
     const wheel = (e) => {
       e.preventDefault();
       const k = e.deltaY > 0 ? 0.9 : 1.11;
-      setBarW((w) => clamp(w * k, BAR_MIN, BAR_MAX));
-      queueYZoom(view.current.yZoom * k);
+      queueView({ barW: view.current.barW * k, yZoom: view.current.yZoom * k });
     };
 
     el.addEventListener("touchstart", start, { passive: true });
@@ -3194,7 +3199,11 @@ function Chart({ state, timeframe, mode, entryPrice, stopLoss, takeProfit,
   const need = Math.min(HISTORY_CANDLES, Math.ceil(plotW / barW) + offset + 8);
   const all = useMemo(
     () => buildCandles(state.priceHistory, bucketMs, need),
-    [state.priceHistory.length, bucketMs, need]
+    /* После достижения лимита истории длина массива перестаёт расти,
+       поэтому зависимость только от length замораживала свечи. Берём tick/
+       lastPoint: тогда пересборка идёт на каждый новый снапшот, даже если
+       массив остаётся одной и той же длины. */
+    [state.tick, state.lastPoint?.t, state.lastPoint?.price, state.priceHistory.length, bucketMs, need]
   );
   const fit = Math.max(4, Math.ceil(plotW / barW));
   // Ширина свечи, при которой в окно влезает вся накопленная история.
@@ -3204,21 +3213,35 @@ function Chart({ state, timeframe, mode, entryPrice, stopLoss, takeProfit,
     ? state.priceHistory[state.priceHistory.length - 1].t - state.priceHistory[0].t : 0;
   const totalCandles = Math.max(4, Math.min(HISTORY_CANDLES, Math.ceil(span0 / bucketMs) + 1));
   const fitAllBarW = clamp(plotW / totalCandles, BAR_MIN, BAR_MAX);
-  const end = Math.max(1, all.length - offset);
+  const maxOffset = Math.max(0, all.length - fit);
+  const effectiveOffset = Math.min(offset, maxOffset);
+  const end = Math.max(1, all.length - effectiveOffset);
   const shown = all.slice(Math.max(0, end - fit), end);
 
+  /* При смене таймфрейма / масштаба старый offset мог указывать дальше,
+     чем вообще существует свечей. Рендер сразу использует effectiveOffset,
+     а state догоняет его без промежуточного пустого кадра. */
+  useEffect(() => {
+    setOffset((prev) => (prev > maxOffset ? maxOffset : prev));
+  }, [maxOffset]);
+
   // --- сглаживание ценовой шкалы ---
-  const scale = useRef(null);
-  let lo = Infinity, hi = -Infinity, maxVol = 0;
+  let lo = Infinity, hi = -Infinity;
+  const volSamples = [];
   for (const c of shown) {
     lo = Math.min(lo, c.low); hi = Math.max(hi, c.high);
-    maxVol = Math.max(maxVol, c.volume);
+    if (c.volume > 0) volSamples.push(c.volume);
   }
+  volSamples.sort((a, b) => a - b);
+  // Один огромный тик больше не сплющивает все остальные объёмы в ноль.
+  const volRef = volSamples.length
+    ? volSamples[Math.min(volSamples.length - 1, Math.floor((volSamples.length - 1) * 0.90))]
+    : 0;
   for (const lvl of [entryPrice, stopLoss, takeProfit, liquidationPrice]) {
     if (lvl && lvl > lo * 0.94 && lvl < hi * 1.06) { lo = Math.min(lo, lvl); hi = Math.max(hi, lvl); }
   }
 
-  if (shown.length < 2 || !Number.isFinite(lo) || !Number.isFinite(hi)) {
+  if (shown.length < 1 || !Number.isFinite(lo) || !Number.isFinite(hi)) {
     return (
       <div ref={box} className="w-full h-full flex items-center justify-center text-[12px]"
         style={{ minHeight: 110 }}>
@@ -3232,11 +3255,19 @@ function Chart({ state, timeframe, mode, entryPrice, stopLoss, takeProfit,
   const tMin = mid - half, tMax = mid + half;
 
   const prev = scale.current;
-  const jump = !prev || prev.tf !== timeframe || prev.off !== offset || Math.abs((prev?.z ?? yZoom) - yZoom) > 0.025;
-  const EASE = 0.2;
-  const min = jump ? tMin : prev.min + (tMin - prev.min) * EASE;
-  const max = jump ? tMax : prev.max + (tMax - prev.max) * EASE;
-  scale.current = { min, max, tf: timeframe, z: yZoom, off: offset };
+  const viewJump = !prev || prev.tf !== timeframe || prev.off !== effectiveOffset
+    || Math.abs((prev?.z ?? yZoom) - yZoom) > 0.004;
+  const CONTRACT = 0.10;
+  // Диапазон расширяется НЕМЕДЛЕННО (никаких свечей за пределами экрана),
+  // а обратно сжимается мягко, чтобы шкала не дёргалась на каждом тике.
+  let min, max;
+  if (viewJump) {
+    min = tMin; max = tMax;
+  } else {
+    min = tMin < prev.min ? tMin : prev.min + (tMin - prev.min) * CONTRACT;
+    max = tMax > prev.max ? tMax : prev.max + (tMax - prev.max) * CONTRACT;
+  }
+  scale.current = { min, max, tf: timeframe, z: yZoom, off: effectiveOffset };
 
   const span = max - min || 1;
   const toY = (p) => PAD_T + plotH - ((p - min) / span) * plotH;
@@ -3251,7 +3282,9 @@ function Chart({ state, timeframe, mode, entryPrice, stopLoss, takeProfit,
   // свечной: новая свеча появляется ровно следующим слотом, без подвисшего
   // зазора справа. При прокрутке назад якорем остаётся последняя видимая.
   const last = shown[shown.length - 1];
-  const xAt = (i) => plotW - barW / 2 - ((last.t - shown[i].t) / bucketMs) * barW;
+  const xAt = (i) => shown.length === 1
+    ? plotW * 0.72
+    : plotW - barW / 2 - ((last.t - shown[i].t) / bucketMs) * barW;
   const body = Math.max(1, Math.min(barW * 0.68, barW - 1.2));
   const wick = Math.max(0.7, Math.min(1.4, barW * 0.12));
 
@@ -3261,7 +3294,7 @@ function Chart({ state, timeframe, mode, entryPrice, stopLoss, takeProfit,
   for (let p = Math.ceil(min / step) * step; p <= max; p += step) lines.push(p);
 
   const digits = step < 0.1 ? 3 : step < 1 ? 2 : 1;
-  const priceY = toY(state.price);
+  const priceY = clamp(toY(state.price), PAD_T, PAD_T + plotH);
   const up = state.price >= state.previousPrice;
 
   /** Уровень с подписью и меткой на ценовой шкале. */
@@ -3293,11 +3326,20 @@ function Chart({ state, timeframe, mode, entryPrice, stopLoss, takeProfit,
     <div ref={box} className="w-full h-full relative select-none"
       style={{ minHeight: 160, touchAction: "none" }}>
 
+      {shown.length < 2 && bucketMs > 1000 && (
+        <div className="absolute inset-x-0 top-[44%] z-10 flex justify-center pointer-events-none">
+          <div className="px-2.5 py-1 rounded text-[10px]"
+            style={{ backgroundColor: "rgba(12,12,14,.9)", color: DIM, border: `1px solid ${HAIR}` }}>
+            {timeframe}: история накапливается · сейчас {shown.length} свеча
+          </div>
+        </div>
+      )}
+
       {!auto && (
         <button onClick={() => { setBarW(BAR_DEFAULT); setOffset(0); setYZoom(1); }}
-          className="absolute top-1 left-1 z-10 px-2 py-1 rounded text-[10px] font-mono tap"
+          className="absolute top-1 left-1 z-10 min-h-[36px] px-2.5 rounded-lg text-[10px] font-mono tap"
           style={{ backgroundColor: RAISED, color: DIM, border: `1px solid ${HAIR}` }}>
-          {shown.length} св.{offset ? ` · −${offset}` : ""} · сброс
+          {shown.length} св.{effectiveOffset ? ` · −${effectiveOffset}` : ""} · сброс
         </button>
       )}
 
@@ -3305,7 +3347,7 @@ function Chart({ state, timeframe, mode, entryPrice, stopLoss, takeProfit,
       <div ref={axis} className="absolute top-0 right-0 z-10"
         style={{ width: AXIS_W, height: PAD_T + plotH, touchAction: "none" }} />
 
-      <svg width={W} height={H} viewBox={`0 0 ${W} ${H}`}>
+      <svg width={W} height={H} viewBox={`0 0 ${W} ${H}`} style={{ overflow: "hidden" }}>
         {/* сетка и ценовая шкала */}
         {lines.map((p) => (
           <g key={p}>
@@ -3380,6 +3422,16 @@ function Chart({ state, timeframe, mode, entryPrice, stopLoss, takeProfit,
         ) : (() => {
           const pts = shown.map((c, i) => `${xAt(i).toFixed(1)},${toY(c.close).toFixed(1)}`);
           const trend = shown[shown.length - 1].close >= shown[0].open ? LONG : SHORT;
+          if (shown.length === 1) {
+            const x = xAt(0), y = toY(shown[0].close);
+            return (
+              <g>
+                <line x1={Math.max(0, x - 16)} x2={Math.min(plotW, x + 16)} y1={y} y2={y}
+                  stroke={trend} strokeWidth={1.6} strokeLinecap="round" />
+                <circle cx={x} cy={y} r={2.6} fill={trend} />
+              </g>
+            );
+          }
           return (
             <g>
               <defs>
@@ -3413,7 +3465,7 @@ function Chart({ state, timeframe, mode, entryPrice, stopLoss, takeProfit,
         {shown.map((c, i) => {
           const x = xAt(i);
           if (x < -barW) return null;
-          const h = maxVol === 0 ? 0 : (c.volume / maxVol) * (VOL_H - 6);
+          const h = volRef === 0 ? 0 : Math.min(1, c.volume / volRef) * (VOL_H - 6);
           return <rect key={`v${c.t}`} x={x - body / 2} y={volTop + (VOL_H - 6 - h)}
             width={body} height={Math.max(0.5, h)}
             fill={c.close >= c.open ? LONG : SHORT} opacity={0.28} rx={body > 5 ? 1 : 0} />;
@@ -3450,7 +3502,7 @@ function niceStep(raw) {
    ------------------------------------------------------------------------ */
 const EYES_FILTERS = ["ВСЁ", "STOP", "TAKE", "LONG", "SHORT"];
 
-function pressureOf(type, side) {
+function pressureOf(side) {
   // STOP LONG и TAKE LONG закрываются продажей, обе SHORT-зоны — покупкой.
   return side === "LONG" ? "потенциальное давление продаж"
                          : "потенциальное давление покупок";
@@ -3544,7 +3596,7 @@ function EyesPanel({ eyes, filter, onFilter, view, onView }) {
                 </div>
                 <div className="flex items-center justify-between gap-3 mt-1.5">
                   <span className="text-[11px]" style={{ color: FAINT }}>
-                    {pressureOf(c.type, c.side)}
+                    {pressureOf(c.side)}
                   </span>
                   <span className="text-[10px] tracking-[0.1em]"
                     style={{ color: c.status === "TRIGGERED" ? color
@@ -3570,32 +3622,41 @@ function EyesPanel({ eyes, filter, onFilter, view, onView }) {
 function Metric({ label, value, color = TEXT }) {
   return (
     <div className="min-w-0">
-      <div className="text-[10px] tracking-[0.12em] mb-1" style={{ color: FAINT }}>{label}</div>
-      <div className="text-[15px] font-mono truncate" style={{ color }}>{value}</div>
+      <div className="text-[9px] tracking-[0.1em] leading-[1.15] min-h-[21px] flex items-end mb-1"
+        style={{ color: FAINT }}>{label}</div>
+      <div className="text-[15px] leading-none font-mono truncate" style={{ color }}>{value}</div>
     </div>
   );
 }
 function Line({ left, right, color }) {
   return (
-    <div className="flex justify-between gap-3 py-2 border-b" style={{ borderColor: HAIR }}>
-      <span className="text-[12px] truncate" style={{ color: DIM }}>{left}</span>
-      <span className="text-[12px] font-mono whitespace-nowrap" style={{ color: color ?? TEXT }}>{right}</span>
+    <div className="flex items-center justify-between gap-3 min-h-[42px] py-2.5 border-b" style={{ borderColor: HAIR }}>
+      <span className="text-[12px] leading-snug min-w-0" style={{ color: DIM }}>{left}</span>
+      <span className="text-[12px] font-mono whitespace-nowrap shrink-0" style={{ color: color ?? TEXT }}>{right}</span>
     </div>
   );
 }
 const Blank = ({ children }) => (
-  <div className="text-[12px] py-8 text-center" style={{ color: FAINT }}>{children}</div>
+  <div className="text-[12px] py-9 text-center" style={{ color: FAINT }}>{children}</div>
 );
 function Toggle({ active, onClick, children }) {
   return (
-    <button onClick={onClick} className="px-2.5 py-1.5 rounded text-[12px] transition"
-      style={{ color: active ? BG : TEXT,
-        backgroundColor: active ? TEXT : RAISED,
-        border: `1px solid ${active ? TEXT : HAIR}`, marginRight: 2 }}>
+    <button onClick={onClick}
+      className="ui-hit min-w-[44px] px-3 rounded-xl text-[12px] font-semibold tap"
+      style={{ color: active ? BG : DIM,
+        backgroundColor: active ? TEXT : SURFACE,
+        border: `1px solid ${active ? TEXT : HAIR}` }}>
       {children}
     </button>
   );
 }
+
+
+const BackButton = ({ onClick, label = "Назад" }) => (
+  <button onClick={onClick} aria-label={label} className="ui-back tap shrink-0">
+    <span aria-hidden="true" className="text-[19px] leading-none -translate-y-px">←</span>
+  </button>
+);
 
 /* ================================ ПРОФИЛЬ ================================
    Профиль переживает сессии: кошелёк, история результатов, статистика.
@@ -3686,7 +3747,38 @@ const GLOBAL_CSS = `
   --tx-fast: 200ms;
   --tx-mid: 320ms;
   --tx-slow: 480ms;
+  --tx-safe-top: env(safe-area-inset-top, 0px);
+  --tx-safe-bottom: env(safe-area-inset-bottom, 0px);
 }
+* { box-sizing: border-box; }
+html, body, #root { width: 100%; min-height: 100%; }
+body {
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+  -webkit-text-size-adjust: 100%;
+}
+button, input, textarea, select { font: inherit; }
+button { -webkit-tap-highlight-color: transparent; touch-action: manipulation; }
+button:disabled { cursor: default; }
+input, textarea { caret-color: #F2F2F5; }
+input::placeholder, textarea::placeholder { color: #5A5A63; opacity: 1; }
+button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-visible {
+  outline: 2px solid rgba(220,220,226,.52);
+  outline-offset: 2px;
+}
+.ui-safe-top { padding-top: max(16px, var(--tx-safe-top)); }
+.ui-safe-bottom { padding-bottom: max(14px, var(--tx-safe-bottom)); }
+.ui-hit { min-height: 44px; }
+.ui-section-title { color: #5A5A63; font-size: 10px; letter-spacing: .22em; line-height: 1.2; }
+.ui-back {
+  width: 44px; height: 44px; display: inline-flex; align-items: center; justify-content: center;
+  border-radius: 14px; color: #F2F2F5; background: #0C0C0E; border: 1px solid #232326;
+}
+.ui-bottom-surface {
+  background: linear-gradient(180deg, rgba(0,0,0,.86), #000 28%);
+  border-top: 1px solid #232326;
+}
+.ui-scroll-pad { padding-bottom: calc(24px + var(--tx-safe-bottom)); }
 @keyframes tx-fade-up { from { opacity: 0; transform: translateY(14px); }
                           to { opacity: 1; transform: none; } }
 @keyframes tx-fade    { from { opacity: 0; } to { opacity: 1; } }
@@ -3706,9 +3798,7 @@ const GLOBAL_CSS = `
 @keyframes tx-twinkle { 0%,100% { opacity: .18; } 50% { opacity: .9; } }
 @keyframes tx-wave    { 0%,100% { transform: translateY(0); }
                         50% { transform: translateY(-4px); } }
-@keyframes tx-float   { 0%,100% { transform: translateY(0) rotate(0deg); }
                         50% { transform: translateY(-5px) rotate(1.5deg); } }
-@keyframes tx-layer   { 0%,100% { opacity: .45; transform: translateY(0); }
                         50% { opacity: 1; transform: translateY(-2.5px); } }
 @keyframes tx-breathe { 0%,100% { transform: scale(1); opacity: .85; }
                         50% { transform: scale(1.06); opacity: 1; } }
@@ -3747,8 +3837,6 @@ const GLOBAL_CSS = `
 .tx-dome    { transform-origin: 80px 70px; animation: tx-dome-spin 7s var(--tx-ease) infinite; }
 .tx-twinkle { animation: tx-twinkle 2.6s ease-in-out infinite; }
 .tx-wave    { animation: tx-wave 4.2s ease-in-out infinite; }
-.tx-float   { animation: tx-float 5s ease-in-out infinite; }
-.tx-layer   { transform-origin: 50px 50px; animation: tx-layer 2.8s ease-in-out infinite; }
 .tx-breathe { animation: tx-breathe 2.4s var(--tx-ease) infinite; }
 .tx-pulse-dot { animation: tx-pulsedot 1s var(--tx-ease) infinite; }
 .tx-logo-live  { animation: tx-logo-live 6.5s cubic-bezier(.45,0,.25,1) infinite; }
@@ -3761,11 +3849,13 @@ const GLOBAL_CSS = `
                      background-color var(--tx-fast) var(--tx-ease),
                      color var(--tx-fast) var(--tx-ease),
                      border-color var(--tx-fast) var(--tx-ease); }
-.tap:active { transform: scale(.97); opacity: .9; }
+.tap:active { transform: scale(.975); opacity: .92; }
+button:not(:disabled):active { transform: scale(.985); }
+button:disabled { opacity: .32; }
 
 @media (prefers-reduced-motion: reduce) {
   .tx-screen, .tx-in, .tx-fade, .tx-pop, .tx-sheet, .tx-dot, .tx-line, .tx-spin,
-  .tx-dome, .tx-twinkle, .tx-wave, .tx-float, .tx-layer,
+  .tx-dome, .tx-twinkle, .tx-wave,
   .tx-logo-live, .tx-slide, .tx-slide-back { animation: none !important; }
 }
 `;
@@ -4032,7 +4122,7 @@ function Onboarding({ onSignIn, onSignUp }) {
   return (
     <div className="w-full flex flex-col tx-screen"
       style={{ height: "100dvh", backgroundColor: BG, color: TEXT }}>
-      <div className="max-w-md w-full mx-auto flex-1 min-h-0 flex flex-col justify-center px-7">
+      <div className="max-w-md w-full mx-auto flex-1 min-h-0 flex flex-col justify-center px-7 ui-safe-top">
 
         {slide === 0 && (
           <div key="s0" className={`flex flex-col items-center ${anim}`}>
@@ -4079,13 +4169,15 @@ function Onboarding({ onSignIn, onSignUp }) {
         )}
       </div>
 
-      <div className="max-w-md w-full mx-auto px-7 pb-8 shrink-0">
+      <div className="max-w-md w-full mx-auto px-7 pb-5 shrink-0 ui-safe-bottom">
         <div className="flex justify-center gap-2 mb-7">
           {[0, 1, 2].map((i) => (
-            <button key={i} onClick={() => go(i)} className="rounded-full"
-              style={{ width: i === slide ? 22 : 7, height: 7,
+            <button key={i} onClick={() => go(i)} aria-label={`Слайд ${i + 1}`}
+              className="w-8 h-8 flex items-center justify-center rounded-full tap">
+              <span className="rounded-full" style={{ width: i === slide ? 22 : 7, height: 7,
                 backgroundColor: i === slide ? TEXT : HAIR,
                 transition: "width var(--tx-mid) var(--tx-ease), background-color var(--tx-mid) var(--tx-ease)" }} />
+            </button>
           ))}
         </div>
 
@@ -4109,15 +4201,15 @@ function Field({ label, value, onChange, placeholder, secret, type = "text" }) {
   return (
     <div className="mb-4 tx-in">
       <div className="text-[10px] tracking-[0.2em] mb-2" style={{ color: FAINT }}>{label}</div>
-      <div className="flex items-center rounded-xl px-4"
-        style={{ backgroundColor: RAISED, border: `1px solid ${HAIR}` }}>
+      <div className="flex items-center rounded-2xl px-4"
+        style={{ backgroundColor: SURFACE, border: `1px solid ${HAIR}` }}>
         <input value={value} onChange={(e) => onChange(e.target.value)}
           placeholder={placeholder} type={secret && !shown ? "password" : type}
           autoCapitalize="none" autoCorrect="off" spellCheck="false"
-          className="flex-1 min-w-0 bg-transparent outline-none py-4 text-[14px]"
+          className="flex-1 min-w-0 bg-transparent outline-none py-4 text-[14px] min-h-[52px]"
           style={{ color: TEXT }} />
         {secret && (
-          <button onClick={() => setShown((v) => !v)} className="pl-3 text-[11px]"
+          <button onClick={() => setShown((v) => !v)} className="min-h-[44px] px-2 text-[11px] tap"
             style={{ color: shown ? TEXT : FAINT }}>
             {shown ? "скрыть" : "показать"}
           </button>
@@ -4176,9 +4268,8 @@ function AuthScreen({ mode, onMode, onBack, onDone }) {
   return (
     <div className="w-full flex flex-col tx-screen"
       style={{ height: "100dvh", backgroundColor: BG, color: TEXT }}>
-      <div className="max-w-md w-full mx-auto flex-1 min-h-0 overflow-y-auto no-scrollbar px-6 pt-6 pb-6">
-        <button onClick={onBack} className="text-[20px] leading-none py-2"
-          style={{ color: TEXT }}>←</button>
+      <div className="max-w-md w-full mx-auto flex-1 min-h-0 overflow-y-auto no-scrollbar px-5 pb-8 ui-safe-top ui-scroll-pad">
+        <BackButton onClick={onBack} />
 
         <div className="text-center mt-6">
           <div className="text-[13px] tracking-[0.3em]" style={{ color: DIM }}>
@@ -4207,7 +4298,8 @@ function AuthScreen({ mode, onMode, onBack, onDone }) {
         {!signup ? (
           <div className="flex items-center justify-between mt-1 mb-6">
             <Check on={remember} onClick={() => setRemember((v) => !v)}>Запомнить меня</Check>
-            <button className="text-[12px] whitespace-nowrap" style={{ color: DIM }}>
+            <button onClick={() => setError("Восстановление пароля появится после подключения авторизации")}
+              className="min-h-[44px] px-2 text-[12px] whitespace-nowrap tap" style={{ color: DIM }}>
               Забыли пароль?
             </button>
           </div>
@@ -4350,20 +4442,7 @@ const Icon = ({ name, size = 16, color = TEXT }) => {
   return null;
 };
 
-/** Кнопка-иконка в шапке. */
-const IconButton = ({ name, onClick, active }) => (
-  <button onClick={onClick}
-    className="w-11 h-11 rounded-xl flex items-center justify-center shrink-0 tap"
-    style={btnSoft(active)}>
-    <Icon name={name} size={18} color={active ? "#0A0A0B" : TEXT} />
-  </button>
-);
-
-/**
- * Круглая кнопка в шапке кошелька. Отличается от IconButton формой и
- * размером: в шапке кнопки стоят рядом с крупным логотипом, и квадраты
- * 44px рядом с ним выглядели мелкими.
- */
+/** Круглая кнопка действий в шапке кошелька. */
 const RoundButton = ({ name, onClick, dot }) => (
   <button onClick={onClick}
     className="relative w-12 h-12 rounded-full flex items-center justify-center shrink-0 tap"
@@ -4372,7 +4451,7 @@ const RoundButton = ({ name, onClick, dot }) => (
     <Icon name={name} size={19} color="#EDEDF0" />
     {dot && (
       <span className="absolute rounded-full"
-        style={{ width: 8, height: 8, top: 2, right: 2, backgroundColor: LONG,
+        style={{ width: 7, height: 7, top: 3, right: 3, backgroundColor: ACCENT,
           border: `2px solid ${BG}` }} />
     )}
   </button>
@@ -4385,8 +4464,8 @@ const RoundButton = ({ name, onClick, dot }) => (
  */
 const WalletAction = ({ icon, label, onClick }) => (
   <button onClick={onClick}
-    className="flex flex-col items-center justify-center gap-2 rounded-[22px] tap"
-    style={{ height: 84, backgroundImage: "linear-gradient(180deg,#1A1A1C,#0E0E10)",
+    className="flex flex-col items-center justify-center gap-2 rounded-[20px] tap ui-hit"
+    style={{ height: 82, backgroundImage: "linear-gradient(180deg,#1A1A1C,#0E0E10)",
       border: "1px solid rgba(255,255,255,0.08)" }}>
     <Icon name={icon} size={21} color="#EDEDF0" />
     <span className="text-[12.5px]" style={{ color: "#EDEDF0" }}>{label}</span>
@@ -4584,13 +4663,13 @@ function ProfileScreen({ profile, account, onClose, onSettings }) {
   return (
     <div className="w-full flex flex-col tx-sheet"
       style={{ height: "100dvh", backgroundColor: BG, color: TEXT }}>
-      <div className="max-w-md w-full mx-auto flex-1 min-h-0 overflow-y-auto no-scrollbar px-5 pt-5 pb-4">
+      <div className="max-w-md w-full mx-auto flex-1 min-h-0 overflow-y-auto no-scrollbar px-5 pb-6 ui-safe-top ui-scroll-pad">
 
         <div className="flex items-center justify-between">
-          <button onClick={onClose} className="text-[20px] leading-none py-1 tap">←</button>
+          <BackButton onClick={onClose} />
           <div className="text-[10px] tracking-[0.3em]" style={{ color: DIM }}>ПРОФИЛЬ</div>
           <button onClick={onSettings}
-            className="w-9 h-9 rounded-xl flex items-center justify-center tap"
+            className="w-11 h-11 rounded-xl flex items-center justify-center tap"
             style={{ backgroundColor: RAISED, border: `1px solid ${HAIR}` }}>
             <Icon name="gear" size={16} color={TEXT} />
           </button>
@@ -4884,9 +4963,9 @@ function TrophyScreen({ profile, onBack, onRedeem }) {
   return (
     <div className="w-full flex flex-col tx-screen"
       style={{ height: "100dvh", backgroundColor: BG, color: TEXT }}>
-      <div className="max-w-md w-full mx-auto flex-1 min-h-0 overflow-y-auto no-scrollbar px-5 pt-5 pb-4">
+      <div className="max-w-md w-full mx-auto flex-1 min-h-0 overflow-y-auto no-scrollbar px-5 pb-6 ui-safe-top ui-scroll-pad">
         <div className="flex items-center gap-4">
-          <button onClick={onBack} className="text-[20px] leading-none py-1 tap">←</button>
+          <BackButton onClick={onBack} />
           <div className="text-[11px] tracking-[0.25em]" style={{ color: DIM }}>ТРОФЕИ</div>
         </div>
 
@@ -4975,9 +5054,9 @@ function DepositScreen({ profile, onBack, onDemoTopUp }) {
   return (
     <div className="w-full flex flex-col tx-screen"
       style={{ height: "100dvh", backgroundColor: BG, color: TEXT }}>
-      <div className="max-w-md w-full mx-auto flex-1 min-h-0 overflow-y-auto no-scrollbar px-5 pt-5 pb-4">
+      <div className="max-w-md w-full mx-auto flex-1 min-h-0 overflow-y-auto no-scrollbar px-5 pb-6 ui-safe-top ui-scroll-pad">
         <div className="flex items-center gap-4">
-          <button onClick={onBack} className="text-[20px] leading-none py-1 tap">←</button>
+          <BackButton onClick={onBack} />
           <div className="text-[11px] tracking-[0.25em]" style={{ color: DIM }}>
             ПОПОЛНЕНИЕ БАЛАНСА
           </div>
@@ -4991,8 +5070,8 @@ function DepositScreen({ profile, onBack, onDemoTopUp }) {
         <div className="text-[10px] tracking-[0.25em] mt-6 mb-2" style={{ color: FAINT }}>
           СУММА ПОПОЛНЕНИЯ
         </div>
-        <div className="flex items-center rounded-xl px-4"
-          style={{ backgroundColor: RAISED, border: `1px solid ${HAIR}` }}>
+        <div className="flex items-center rounded-2xl px-4"
+          style={{ backgroundColor: SURFACE, border: `1px solid ${HAIR}` }}>
           <span className="text-[16px] font-mono" style={{ color: DIM }}>$</span>
           <input value={amount} onChange={(e) => setAmount(e.target.value)}
             inputMode="decimal"
@@ -5003,7 +5082,7 @@ function DepositScreen({ profile, onBack, onDemoTopUp }) {
         <div className="grid grid-cols-4 gap-2 mt-2">
           {[50, 100, 250, 500].map((v) => (
             <button key={v} onClick={() => setAmount(String(v))}
-              className="rounded-xl py-3 text-[12px] font-mono font-semibold tap"
+              className="rounded-xl min-h-[44px] px-2 text-[12px] font-mono font-semibold tap"
               style={{ backgroundColor: String(v) === amount ? TEXT : RAISED,
                 color: String(v) === amount ? BG : TEXT,
                 border: `1px solid ${String(v) === amount ? TEXT : HAIR}` }}>
@@ -5049,7 +5128,7 @@ function DepositScreen({ profile, onBack, onDemoTopUp }) {
         )}
       </div>
 
-      <div className="max-w-md w-full mx-auto px-5 pb-5 pt-2 shrink-0">
+      <div className="max-w-md w-full mx-auto px-5 pt-3 shrink-0 ui-bottom-surface ui-safe-bottom">
         <button disabled={!ok}
           onClick={() => setNote("Приём оплат ещё не подключён. Пока баланс можно пополнить только в демо-режиме.")}
           className="w-full rounded-2xl py-4 text-[13px] tracking-[0.25em] font-bold tap disabled:opacity-40"
@@ -5086,9 +5165,9 @@ function WithdrawScreen({ profile, onBack }) {
   return (
     <div className="w-full flex flex-col tx-screen"
       style={{ height: "100dvh", backgroundColor: BG, color: TEXT }}>
-      <div className="max-w-md w-full mx-auto flex-1 min-h-0 overflow-y-auto no-scrollbar px-5 pt-5 pb-4">
+      <div className="max-w-md w-full mx-auto flex-1 min-h-0 overflow-y-auto no-scrollbar px-5 pb-6 ui-safe-top ui-scroll-pad">
         <div className="flex items-center gap-4">
-          <button onClick={onBack} className="text-[20px] leading-none py-1 tap">←</button>
+          <BackButton onClick={onBack} />
           <div className="text-[11px] tracking-[0.25em]" style={{ color: DIM }}>ВЫВОД СРЕДСТВ</div>
         </div>
 
@@ -5100,8 +5179,8 @@ function WithdrawScreen({ profile, onBack }) {
         <div className="text-[10px] tracking-[0.25em] mt-6 mb-2" style={{ color: FAINT }}>
           СУММА ВЫВОДА
         </div>
-        <div className="flex items-center rounded-xl px-4"
-          style={{ backgroundColor: RAISED, border: `1px solid ${HAIR}` }}>
+        <div className="flex items-center rounded-2xl px-4"
+          style={{ backgroundColor: SURFACE, border: `1px solid ${HAIR}` }}>
           <span className="text-[16px] font-mono" style={{ color: DIM }}>$</span>
           <input value={amount} onChange={(e) => setAmount(e.target.value)}
             placeholder="0" inputMode="decimal"
@@ -5116,7 +5195,7 @@ function WithdrawScreen({ profile, onBack }) {
         <div className="grid grid-cols-4 gap-2 mt-2">
           {[25, 50, 75, 100].map((p) => (
             <button key={p} onClick={() => setAmount(String(Math.floor(profile.wallet * p / 100)))}
-              className="rounded-xl py-3 text-[12px] font-mono font-semibold tap"
+              className="rounded-xl min-h-[44px] px-2 text-[12px] font-mono font-semibold tap"
               style={btnSoft(false)}>
               {p}%
             </button>
@@ -5160,7 +5239,7 @@ function WithdrawScreen({ profile, onBack }) {
         )}
       </div>
 
-      <div className="max-w-md w-full mx-auto px-5 pb-5 pt-2 shrink-0">
+      <div className="max-w-md w-full mx-auto px-5 pt-3 shrink-0 ui-bottom-surface ui-safe-bottom">
         <button disabled={!enough}
           onClick={() => setNote("Выплаты ещё не подключены. Баланс остаётся на месте.")}
           className="w-full rounded-2xl py-4 text-[13px] tracking-[0.25em] font-bold tap disabled:opacity-40"
@@ -5202,7 +5281,7 @@ function RankingTab({ profile, period, onPeriod }) {
   const podium = [rows[1], rows[0], rows[2]];
 
   return (
-    <div className="px-5 pt-5">
+    <div className="px-5 ui-safe-top">
       <div className="text-[11px] tracking-[0.25em] text-center" style={{ color: DIM }}>
         РЕЙТИНГ ИГРОКОВ
       </div>
@@ -5286,7 +5365,7 @@ function MarketsTab({ onPlay, onFree }) {
     </div>
   );
   return (
-    <div className="px-5 pt-5">
+    <div className="px-5 ui-safe-top">
       <div className="text-[11px] tracking-[0.25em] text-center" style={{ color: DIM }}>
         ДОСТУПНЫЕ РЫНКИ
       </div>
@@ -5390,14 +5469,14 @@ function TabBar({ active, onChange }) {
     /* Колонок ровно столько, сколько вкладок. Раньше стояло grid-cols-4 при
        трёх вкладках — они прижимались влево, а справа зияла пустая четверть.
        Активная вкладка помечается белым, а не зелёным. */
-    <div className="max-w-md w-full mx-auto grid shrink-0 pt-2 pb-5"
+    <div className="max-w-md w-full mx-auto grid shrink-0 pt-2 ui-safe-bottom"
       style={{ borderTop: `1px solid ${HAIR}`,
         gridTemplateColumns: `repeat(${TABS.length}, minmax(0, 1fr))` }}>
       {TABS.map((t) => {
         const on = t.key === active;
         return (
           <button key={t.key} onClick={() => onChange(t.key)}
-            className="flex flex-col items-center gap-1.5 py-1.5 tap">
+            className="flex flex-col items-center justify-center gap-1.5 min-h-[54px] tap">
             <Icon name={t.icon} size={20} color={on ? TEXT : FAINT} />
             <span className="text-[10px] tracking-[0.06em]"
               style={{ color: on ? TEXT : FAINT }}>
@@ -5595,9 +5674,9 @@ function SettingsScreen({ account, onClose, onReset, onExit, onSignOut }) {
   return (
     <div className="w-full flex flex-col tx-screen"
       style={{ height: "100dvh", backgroundColor: BG, color: TEXT }}>
-      <div className="max-w-md w-full mx-auto flex-1 min-h-0 overflow-y-auto no-scrollbar px-5 pt-5 pb-6">
+      <div className="max-w-md w-full mx-auto flex-1 min-h-0 overflow-y-auto no-scrollbar px-5 pb-7 ui-safe-top ui-scroll-pad">
         <div className="flex items-center gap-4">
-          <button onClick={onClose} className="text-[20px] leading-none py-1 tap">←</button>
+          <BackButton onClick={onClose} />
           <div className="text-[11px] tracking-[0.25em]" style={{ color: DIM }}>НАСТРОЙКИ</div>
         </div>
 
@@ -5706,7 +5785,7 @@ function Lobby({ profile, account, onNew, onFree, onReset, onExit, onSignOut, on
         <div className="max-w-md w-full mx-auto pb-4">
 
           {tab === "home" && (
-            <div className="px-5 pt-5">
+            <div className="px-5 ui-safe-top">
               {/* ---------------------------- шапка --------------------------
                  Логотип и название в одну строку, действия — круглыми
                  кнопками справа. Раньше название стояло ПОД логотипом, из-за
@@ -5913,9 +5992,9 @@ function FreeMarketSetup({ wallet, onStart, onBack }) {
   }, []);
   return (
     <div className="w-full flex flex-col" style={{ height: "100dvh", backgroundColor: BG, color: TEXT }}>
-      <div className="max-w-md w-full mx-auto flex-1 overflow-y-auto no-scrollbar px-6 pt-8 pb-6">
-        <button onClick={onBack} className="text-[12px] mb-8 text-left" style={{ color: DIM }}>← назад</button>
-        <div className="flex items-center justify-between">
+      <div className="max-w-md w-full mx-auto flex-1 min-h-0 overflow-y-auto no-scrollbar px-5 pb-8 ui-safe-top ui-scroll-pad">
+        <BackButton onClick={onBack} />
+        <div className="flex items-center justify-between mt-5">
           <div>
             <div className="text-[10px] tracking-[0.28em]" style={{ color: FAINT }}>FREE MARKET</div>
             <div className="text-[28px] mt-1">Свободный рынок</div>
@@ -5960,9 +6039,9 @@ function FreeMarketSetup({ wallet, onStart, onBack }) {
           пока создаёт новое ядро — постоянство между устройствами будет серверным этапом.
         </div>
       </div>
-      <div className="max-w-md w-full mx-auto px-6 pb-8">
+      <div className="max-w-md w-full mx-auto px-5 pt-3 ui-bottom-surface ui-safe-bottom">
         <button disabled={!valid} onClick={() => onStart(value)}
-          className="w-full rounded-xl py-4 text-[14px] tracking-[0.16em] font-semibold tap disabled:opacity-30"
+          className="w-full rounded-2xl min-h-[54px] px-4 text-[14px] tracking-[0.14em] font-semibold tap"
           style={btnSoft(true)}>
           ВОЙТИ В РЫНОК · {valid ? fmt(value, 0) : "—"}
         </button>
@@ -5983,8 +6062,9 @@ function SessionSetup({ wallet, onStart, onBack, eyes = false }) {
 
   return (
     <div className="w-full flex flex-col" style={{ height: "100dvh", backgroundColor: BG, color: TEXT }}>
-      <div className="max-w-md w-full mx-auto flex-1 flex flex-col justify-center px-6">
-        <button onClick={onBack} className="text-[12px] mb-8 text-left" style={{ color: DIM }}>← назад</button>
+      <div className="max-w-md w-full mx-auto flex-1 min-h-0 overflow-y-auto no-scrollbar px-5 pb-8 ui-safe-top ui-scroll-pad">
+        <BackButton onClick={onBack} />
+        <div className="mt-5">
 
         <div className="text-[11px] tracking-[0.15em] mb-3" style={{ color: FAINT }}>ВЗНОС В СЕССИЮ</div>
         <div className="grid grid-cols-2 gap-2">
@@ -5993,7 +6073,7 @@ function SessionSetup({ wallet, onStart, onBack, eyes = false }) {
             const locked = value > wallet;
             return (
               <button key={value} disabled={locked} onClick={() => setCapital(value)}
-                className="rounded-lg py-5 text-left px-4 transition disabled:opacity-25"
+                className="rounded-2xl min-h-[82px] py-4 text-left px-4 tap"
                 style={{
                   backgroundColor: active && !locked ? TEXT : SURFACE,
                   color: active && !locked ? BG : TEXT,
@@ -6016,7 +6096,7 @@ function SessionSetup({ wallet, onStart, onBack, eyes = false }) {
             const active = players === n;
             return (
               <button key={n} onClick={() => setPlayers(n)}
-                className="rounded-lg py-3.5 text-[13px] font-mono font-semibold tap"
+                className="rounded-xl min-h-[48px] px-2 text-[13px] font-mono font-semibold tap"
                 style={{ backgroundColor: active ? TEXT : SURFACE, color: active ? BG : TEXT,
                   border: `1px solid ${active ? TEXT : HAIR}` }}>
                 {n}
@@ -6033,7 +6113,7 @@ function SessionSetup({ wallet, onStart, onBack, eyes = false }) {
             const active = leverage === lv;
             return (
               <button key={lv} onClick={() => setLeverage(lv)}
-                className="rounded-lg py-3.5 text-[13px] font-mono font-semibold tap"
+                className="rounded-xl min-h-[48px] px-2 text-[13px] font-mono font-semibold tap"
                 style={{ backgroundColor: active ? TEXT : SURFACE, color: active ? BG : TEXT,
                   border: `1px solid ${active ? TEXT : HAIR}` }}>
                 {lv === 1 ? "без плеча" : `x${lv}`}
@@ -6058,7 +6138,7 @@ function SessionSetup({ wallet, onStart, onBack, eyes = false }) {
             const active = minutes === mm;
             return (
               <button key={mm} onClick={() => setMinutes(mm)}
-                className="rounded-lg py-3.5 text-[13px] font-mono font-semibold tap"
+                className="rounded-xl min-h-[48px] px-2 text-[13px] font-mono font-semibold tap"
                 style={{ backgroundColor: active ? TEXT : SURFACE, color: active ? BG : TEXT,
                   border: `1px solid ${active ? TEXT : HAIR}` }}>
                 {mm} мин
@@ -6077,11 +6157,12 @@ function SessionSetup({ wallet, onStart, onBack, eyes = false }) {
           а в конце сессии на баланс возвращается ваш итоговый капитал.
           Размер сессии меняет только масштаб денег — поведение рынка от него не зависит.
         </div>
+        </div>
       </div>
 
-      <div className="max-w-md w-full mx-auto px-6 pb-8">
+      <div className="max-w-md w-full mx-auto px-5 pt-3 ui-bottom-surface ui-safe-bottom">
         <button onClick={() => onStart(capital, leverage, minutes, eyes, players)}
-          className="w-full rounded-lg py-4 text-[15px] tracking-[0.15em] font-semibold tap"
+          className="w-full rounded-2xl min-h-[54px] px-4 text-[14px] tracking-[0.13em] font-semibold tap"
           style={btnSoft(true)}>
           ВОЙТИ В {eyes ? "EYES" : "РЫНОК"} · {fmt(capital, 0)} · {minutes} МИН · {players}
         </button>
@@ -6134,7 +6215,7 @@ function Matchmaking({ capital, leverage = 1, total: totalProp, onReady, onCance
   return (
     <div className="w-full flex flex-col tx-screen"
       style={{ height: "100dvh", backgroundColor: BG, color: TEXT }}>
-      <div className="max-w-md w-full mx-auto flex-1 flex flex-col justify-center px-6">
+      <div className="max-w-md w-full mx-auto flex-1 flex flex-col justify-center px-5 ui-safe-top">
         <div className="text-[11px] tracking-[0.3em]" style={{ color: FAINT }}>ПОДБОР УЧАСТНИКОВ</div>
         <div className="text-[64px] leading-none font-mono tracking-tight mt-3">
           {joined}<span className="text-[24px]" style={{ color: FAINT }}> / {total}</span>
@@ -6163,8 +6244,8 @@ function Matchmaking({ capital, leverage = 1, total: totalProp, onReady, onCance
         </div>
       </div>
 
-      <div className="max-w-md w-full mx-auto px-6 pb-8">
-        <button onClick={onCancel} className="w-full rounded-lg py-4 text-[13px] tracking-[0.15em] font-semibold tap"
+      <div className="max-w-md w-full mx-auto px-5 pt-3 ui-safe-bottom">
+        <button onClick={onCancel} className="w-full rounded-2xl min-h-[52px] px-4 text-[13px] tracking-[0.14em] font-semibold tap"
           style={btnSoft(false)}>
           ОТМЕНИТЬ ПОДБОР
         </button>
@@ -6178,7 +6259,7 @@ function SessionResult({ result, onDone }) {
   const good = result.pnl >= 0;
   return (
     <div className="w-full flex flex-col" style={{ height: "100dvh", backgroundColor: BG, color: TEXT }}>
-      <div className="max-w-md w-full mx-auto flex-1 flex flex-col justify-center px-6">
+      <div className="max-w-md w-full mx-auto flex-1 min-h-0 overflow-y-auto no-scrollbar px-5 pb-8 ui-safe-top ui-scroll-pad">
         <div className="text-[11px] tracking-[0.4em] mb-3" style={{ color: FAINT }}>
           {result.mode === "free" ? "ВЫХОД ИЗ СВОБОДНОГО РЫНКА"
             : result.early ? "ДОСРОЧНЫЙ ВЫХОД" : "СЕССИЯ ЗАВЕРШЕНА"}
@@ -6229,8 +6310,8 @@ function SessionResult({ result, onDone }) {
           </>
         )}
       </div>
-      <div className="max-w-md w-full mx-auto px-6 pb-8">
-        <button onClick={onDone} className="w-full rounded-lg py-4 text-[15px] tracking-[0.15em] font-semibold"
+      <div className="max-w-md w-full mx-auto px-5 pt-3 ui-bottom-surface ui-safe-bottom">
+        <button onClick={onDone} className="w-full rounded-2xl min-h-[54px] px-4 text-[14px] tracking-[0.14em] font-semibold tap"
           style={btnSoft(true)}>
           НА ГЛАВНУЮ
         </button>
@@ -6532,6 +6613,9 @@ function PracticeApp({ onExit }) {
   const human = snap.you;
   const stats = snap.market;
   const notional = Math.max(0, Number(size) || 0);
+  const orderCapacity = Math.max(0, Number(leverage > 1 ? human.buyingPower : human.cash) || 0);
+  const orderTooLarge = notional > orderCapacity + 1e-9;
+  const validOrderSize = notional >= 1 && !orderTooLarge;
   const myLimits = snap.yourOrders;
   const changeAbs = snap.price - snap.initialPrice;
   const changePct = changeAbs / snap.initialPrice;
@@ -6619,7 +6703,7 @@ function PracticeApp({ onExit }) {
       <div className="max-w-md w-full mx-auto flex flex-col h-full relative">
 
         {/* --------------------------------- шапка --------------------------- */}
-        <div className="flex items-center justify-between px-5 py-3">
+        <div className="flex items-center justify-between px-5 pb-3 ui-safe-top">
           <span className="text-[11px] tracking-[0.3em]" style={{ color: FAINT }}>
             {CONFIG.market.assetSymbol} · {marketMode === "free" ? "FREE · " : ""}{fmt(session, 0)}
             {leverage > 1 && (
@@ -6641,14 +6725,16 @@ function PracticeApp({ onExit }) {
               </span>
             )}
             <button onClick={() => setShowSettings((v) => !v)}
-              className="text-[11px] tracking-[0.15em]" style={{ color: showSettings ? TEXT : FAINT }}>
+              className="ui-hit px-2.5 rounded-xl text-[11px] tracking-[0.15em] tap"
+              style={{ color: showSettings ? TEXT : FAINT, backgroundColor: showSettings ? SURFACE : "transparent" }}>
               ЕЩЁ
             </button>
           </div>
         </div>
 
         {showSettings && (
-          <div className="px-5 pb-4 flex flex-col gap-3">
+          <div className="mx-4 mb-3 p-3.5 rounded-2xl flex flex-col gap-3 tx-pop"
+            style={{ backgroundColor: SURFACE, border: `1px solid ${HAIR}` }}>
             {marketMode !== "free" && (
               <div className="flex items-center justify-between">
                 <span className="text-[11px] tracking-[0.15em]" style={{ color: FAINT }}>СКОРОСТЬ</span>
@@ -6727,7 +6813,7 @@ function PracticeApp({ onExit }) {
                 </div>
               )}
               {leverage > 1 && !pos && (
-                <div className="mx-2 mb-1 rounded-lg px-3 py-2 text-[11px]"
+                <div className="mx-4 mb-2 rounded-xl px-3.5 py-2.5 text-[11px]"
                   style={{ backgroundColor: RAISED, color: DIM, border: `1px solid ${HAIR}` }}>
                   Вход на 100% даёт начальную маржу {(100 / leverage).toFixed(0)}%.
                   Принудительное закрытие при {(snap.maintenance * 100).toFixed(0)}% —
@@ -6737,7 +6823,7 @@ function PracticeApp({ onExit }) {
               )}
               {leverage > 1 && pos && human.marginLevel !== null
                 && human.marginLevel < snap.maintenance * 1.6 && (
-                <div className="mx-2 mb-1 rounded-lg px-3 py-2 text-[11px] tx-pop"
+                <div className="mx-4 mb-2 rounded-xl px-3.5 py-2.5 text-[11px] tx-pop"
                   style={{ backgroundColor: RAISED, color: SHORT, border: `1px solid ${SHORT}` }}>
                   Маржа {(human.marginLevel * 100).toFixed(0)}% — до принудительного
                   закрытия {(snap.maintenance * 100).toFixed(0)}%.
@@ -6746,12 +6832,12 @@ function PracticeApp({ onExit }) {
                 </div>
               )}
               {leverage > 1 && !pos && human.wasLiquidated && (
-                <div className="mx-2 mb-1 rounded-lg px-3 py-2 text-[11px]"
+                <div className="mx-4 mb-2 rounded-xl px-3.5 py-2.5 text-[11px]"
                   style={{ backgroundColor: RAISED, color: DIM, border: `1px solid ${HAIR}` }}>
                   Позиция была закрыта принудительно по маржин-коллу.
                 </div>
               )}
-              <div className="px-5 pt-1 flex items-end justify-between">
+              <div className="px-5 pt-1 flex items-end justify-between gap-4">
                 <div>
                   <div className="text-[38px] leading-none font-mono tracking-tight">
                     {fmt(state.price)}
@@ -6787,8 +6873,8 @@ function PracticeApp({ onExit }) {
                   color={(state.shortRealized ?? 0) >= 0 ? LONG : SHORT} />
               </div>
 
-              <div className="flex items-center justify-between px-5 pt-3">
-                <div className="flex gap-0.5">
+              <div className="flex items-center justify-between gap-2 px-5 pt-3">
+                <div className="flex gap-1 min-w-0">
                   {TIMEFRAMES.map((tf) => (
                     <Toggle key={tf.label} active={timeframe === tf.label} onClick={() => setTimeframe(tf.label)}>
                       {tf.label}
@@ -6796,23 +6882,26 @@ function PracticeApp({ onExit }) {
                   ))}
                 </div>
                 <button onClick={() => setChartMode(chartMode === "свечи" ? "линия" : "свечи")}
-                  className="text-[12px]" style={{ color: DIM }}>{chartMode}</button>
+                  className="ui-hit px-3 rounded-xl text-[11px] shrink-0 tap"
+                  style={{ color: DIM, backgroundColor: SURFACE, border: `1px solid ${HAIR}` }}>
+                  {chartMode === "свечи" ? "СВЕЧИ" : "ЛИНИЯ"}
+                </button>
               </div>
 
               {eyesData && (
                 <div className="flex items-center justify-between px-4 pb-1">
                   <button onClick={() => setEyesOn((v) => !v)}
-                    className="flex items-center gap-2 px-3 py-1.5 rounded-lg text-[10px] tracking-[0.2em] tap"
+                    className="ui-hit flex items-center gap-2 px-3 rounded-xl text-[10px] tracking-[0.2em] tap"
                     style={{ backgroundColor: eyesOn ? "#0E2A1B" : RAISED,
                       color: eyesOn ? LONG : DIM,
                       border: `1px solid ${eyesOn ? "#1E4A32" : HAIR}` }}>
                     <Icon name="eye" size={13} color={eyesOn ? LONG : DIM} />
                     EYES
                   </button>
-                  <div className="flex gap-1.5">
+                  <div className="flex gap-1.5 overflow-x-auto no-scrollbar max-w-[250px]">
                     {EYES_FILTERS.map((f) => (
                       <button key={f} onClick={() => setEyesFilterName(f)}
-                        className="px-2 py-1.5 rounded text-[10px] tap"
+                        className="ui-hit px-2.5 rounded-lg text-[10px] tap shrink-0"
                         style={{ backgroundColor: f === eyesFilterName ? TEXT : RAISED,
                           color: f === eyesFilterName ? BG : FAINT,
                           border: `1px solid ${HAIR}` }}>
@@ -6822,7 +6911,7 @@ function PracticeApp({ onExit }) {
                   </div>
                 </div>
               )}
-              <div className="px-2 pt-1 flex-1 min-h-0">
+              <div className="px-3 pt-1.5 flex-1 min-h-0">
                 <Chart state={state} timeframe={timeframe} mode={chartMode}
                   entryPrice={pos?.entryPrice} stopLoss={human.stopLoss} takeProfit={human.takeProfit}
                   liquidationPrice={human.liquidationPrice}
@@ -6830,7 +6919,7 @@ function PracticeApp({ onExit }) {
                   eyes={eyesData && eyesOn ? eyesFilter(eyesData.live, eyesFilterName) : null} />
               </div>
 
-              <div className="px-5 pb-2 pt-1 grid gap-3"
+              <div className="px-5 pb-3 pt-2 grid gap-3"
                 style={{ gridTemplateColumns: `repeat(${leverage > 1 ? 5 : 4}, minmax(0, 1fr))` }}>
                 <Metric label="ЭКВИТИ" value={fmt(equity)} />
                 <Metric label="СВОБОДНО" value={fmt(human.cash)} />
@@ -6922,7 +7011,7 @@ function PracticeApp({ onExit }) {
                       </div>
                     </div>
                     <button onClick={async () => { if ((await send({ type: "CANCEL_LIMIT", orderId: o.id })).ok) say("заявка снята"); }}
-                      className="text-[12px]" style={{ color: DIM }}>снять</button>
+                      className="ui-hit px-2 text-[12px] tap" style={{ color: DIM }}>снять</button>
                   </div>
                 ))}
 
@@ -6933,14 +7022,14 @@ function PracticeApp({ onExit }) {
                     <span className="text-[13px] font-mono">стоп {human.stopLoss ? fmt(human.stopLoss) : "—"}</span>
                     {human.stopLoss && (
                       <button onClick={() => send({ type: "PROTECT", clear: "sl", stopLoss: null, takeProfit: null })}
-                        className="text-[12px]" style={{ color: DIM }}>убрать</button>
+                        className="ui-hit px-2 text-[12px] tap" style={{ color: DIM }}>убрать</button>
                     )}
                   </div>
                   <div className="flex items-center justify-between py-3">
                     <span className="text-[13px] font-mono">тейк {human.takeProfit ? fmt(human.takeProfit) : "—"}</span>
                     {human.takeProfit && (
                       <button onClick={() => send({ type: "PROTECT", clear: "tp", stopLoss: null, takeProfit: null })}
-                        className="text-[12px]" style={{ color: DIM }}>убрать</button>
+                        className="ui-hit px-2 text-[12px] tap" style={{ color: DIM }}>убрать</button>
                     )}
                   </div>
                 </>
@@ -7135,126 +7224,238 @@ function PracticeApp({ onExit }) {
 
         {/* ---------------------------- панель торговли ---------------------- */}
         {tab === "Рынок" && (
-          <div className="px-4 pt-3 pb-3 border-t" style={{ borderColor: HAIR, backgroundColor: BG }}>
+          <div className="px-4 pt-3 pb-3 border-t"
+            style={{ borderColor: HAIR, backgroundColor: "#050506" }}>
+
             {sheet && snap.tradingOpen && (
               <>
-                <div className="fixed inset-0 z-10" style={{ backgroundColor: "rgba(0,0,0,0.75)" }}
+                <div className="fixed inset-0 z-10" style={{ backgroundColor: "rgba(0,0,0,0.78)" }}
                   onClick={() => setSheet(null)} />
-                <div className="relative z-20 mb-3 rounded-lg p-3"
-                  style={{ backgroundColor: SURFACE, border: `1px solid ${HAIR}` }}>
-                  <div className="flex justify-between items-center mb-3">
-                    <span className="text-[12px]">{sheet === "risk" ? "Стоп и тейк" : "Лимитная заявка"}</span>
-                    <button onClick={() => setSheet(null)} className="text-[11px]" style={{ color: DIM }}>закрыть</button>
+                <div className="relative z-20 mb-3 rounded-[22px] p-4 tx-sheet"
+                  style={{ backgroundColor: SURFACE, border: `1px solid ${HAIR}`,
+                    boxShadow: "0 18px 60px rgba(0,0,0,.45)" }}>
+                  <div className="flex justify-between items-center gap-3 mb-4">
+                    <div>
+                      <div className="text-[10px] tracking-[0.18em]" style={{ color: FAINT }}>
+                        {sheet === "risk" ? "ЗАЩИТА ПОЗИЦИИ" : "ОТЛОЖЕННЫЙ ОРДЕР"}
+                      </div>
+                      <div className="text-[16px] mt-1">
+                        {sheet === "risk" ? "Стоп / тейк" : "Лимитная заявка"}
+                      </div>
+                    </div>
+                    <button onClick={() => setSheet(null)}
+                      className="ui-hit px-3 rounded-xl text-[11px] tap"
+                      style={{ color: DIM, backgroundColor: RAISED, border: `1px solid ${HAIR}` }}>
+                      ЗАКРЫТЬ
+                    </button>
                   </div>
 
                   {sheet === "risk" ? (
-                    <div className="flex flex-col gap-2">
-                      {[["sl", "СТОП", [0.01, 0.02, 0.05], "−"], ["tp", "ТЕЙК", [0.01, 0.03, 0.06], "+"]].map(
-                        ([kind, label, steps, sign]) => (
-                          <div key={kind} className="flex items-center gap-2">
-                            <span className="text-[10px] w-10 shrink-0" style={{ color: FAINT }}>{label}</span>
-                            {steps.map((d) => (
-                              <button key={d} disabled={!pos} onClick={() => setRisk(kind, d)}
-                                className="flex-1 py-2.5 rounded text-[12px] font-mono font-semibold disabled:opacity-25"
-                                style={btnSoft(false)}>
-                                {sign}{(d * 100).toFixed(0)}%
-                              </button>
-                            ))}
-                            <span className="w-14 text-right text-[12px] font-mono" style={{ color: DIM }}>
-                              {kind === "sl"
-                                ? (human.stopLoss ? human.stopLoss.toFixed(2) : "—")
-                                : (human.takeProfit ? human.takeProfit.toFixed(2) : "—")}
-                            </span>
+                    <div className="flex flex-col gap-2.5">
+                      {[["sl", "СТОП", [0.01, 0.02, 0.05], "−", human.stopLoss],
+                        ["tp", "ТЕЙК", [0.01, 0.03, 0.06], "+", human.takeProfit]].map(
+                        ([kind, label, steps, sign, current]) => (
+                          <div key={kind} className="rounded-2xl p-3"
+                            style={{ backgroundColor: RAISED, border: `1px solid ${HAIR}` }}>
+                            <div className="flex items-center justify-between gap-3 mb-2.5">
+                              <div>
+                                <div className="text-[9px] tracking-[0.16em]" style={{ color: FAINT }}>{label}</div>
+                                <div className="text-[13px] font-mono mt-1" style={{ color: current ? TEXT : DIM }}>
+                                  {current ? fmt(current) : "не установлен"}
+                                </div>
+                              </div>
+                              {current && (
+                                <button onClick={() => send({ type: "PROTECT", clear: kind, stopLoss: null, takeProfit: null })}
+                                  className="ui-hit px-3 rounded-xl text-[11px] tap"
+                                  style={{ color: DIM, backgroundColor: SURFACE, border: `1px solid ${HAIR}` }}>
+                                  СНЯТЬ
+                                </button>
+                              )}
+                            </div>
+                            <div className="grid grid-cols-3 gap-2">
+                              {steps.map((d) => (
+                                <button key={d} disabled={!pos} onClick={() => setRisk(kind, d)}
+                                  className="min-h-[44px] rounded-xl text-[12px] font-mono font-semibold tap disabled:opacity-30"
+                                  style={btnSoft(false)}>
+                                  {sign}{(d * 100).toFixed(0)}%
+                                </button>
+                              ))}
+                            </div>
                           </div>
                         )
                       )}
-                      {!pos && <div className="text-[11px]" style={{ color: FAINT }}>
-                        Уровни считаются от цены входа — сначала откройте позицию.
-                      </div>}
+                      {!pos && (
+                        <div className="text-[11px] leading-snug" style={{ color: FAINT }}>
+                          Сначала откройте позицию — уровни рассчитываются от цены входа.
+                        </div>
+                      )}
                     </div>
                   ) : (
-                    <div className="flex items-center gap-2">
-                      <button onClick={() => setLimitSide(limitSide === "buy" ? "sell" : "buy")}
-                        className="px-3 py-2.5 rounded text-[12px] font-semibold whitespace-nowrap"
-                        style={{ backgroundColor: limitSide === "buy" ? LONG : SHORT, color: BG }}>
-                        {limitSide === "buy" ? "LONG" : "SHORT"}
-                      </button>
-                      <input value={limitPrice} onChange={(e) => setLimitPrice(e.target.value)} inputMode="decimal"
-                        placeholder={`цена · сейчас ${state.price.toFixed(2)}`}
-                        className="flex-1 min-w-0 rounded px-3 py-2.5 outline-none font-mono text-[13px]"
-                        style={{ backgroundColor: RAISED, color: TEXT }} />
-                      <button
+                    <div className="flex flex-col gap-3">
+                      <div className="grid grid-cols-2 gap-2">
+                        {["buy", "sell"].map((sideKey) => {
+                          const active = limitSide === sideKey;
+                          const color = sideKey === "buy" ? LONG : SHORT;
+                          return (
+                            <button key={sideKey} onClick={() => setLimitSide(sideKey)}
+                              className="min-h-[46px] rounded-xl text-[12px] font-semibold tap"
+                              style={{ backgroundColor: active ? `${color}20` : RAISED,
+                                color: active ? color : DIM,
+                                border: `1px solid ${active ? color : HAIR}` }}>
+                              {sideKey === "buy" ? "LONG" : "SHORT"}
+                            </button>
+                          );
+                        })}
+                      </div>
+
+                      <div>
+                        <div className="flex items-center justify-between mb-1.5">
+                          <span className="text-[9px] tracking-[0.16em]" style={{ color: FAINT }}>ЦЕНА ИСПОЛНЕНИЯ</span>
+                          <span className="text-[10px] font-mono" style={{ color: DIM }}>
+                            сейчас {state.price.toFixed(2)}
+                          </span>
+                        </div>
+                        <input value={limitPrice} onChange={(e) => setLimitPrice(e.target.value)} inputMode="decimal"
+                          placeholder={state.price.toFixed(2)}
+                          className="w-full rounded-xl px-3.5 min-h-[48px] outline-none font-mono text-[16px]"
+                          style={{ backgroundColor: RAISED, color: TEXT, border: `1px solid ${HAIR}` }} />
+                      </div>
+
+                      <div className="flex items-center justify-between text-[10px]" style={{ color: FAINT }}>
+                        <span>РАЗМЕР {fmt(notional, 0)}</span>
+                        <span>ДОСТУПНО {fmt(orderCapacity, 0)}</span>
+                      </div>
+
+                      <button disabled={!validOrderSize || !Number.isFinite(Number(limitPrice)) || Number(limitPrice) <= 0}
                         onClick={async () => {
                           const res = await send({
                             type: "LIMIT", side: limitSide, notional, limitPrice: Number(limitPrice),
                           });
                           if (res.ok) { setLimitPrice(""); setSheet(null); say("заявка выставлена"); }
                         }}
-                        className="px-4 py-2.5 rounded text-[12px] font-semibold"
-                        style={btnSoft(true)}>ОК</button>
+                        className="min-h-[48px] rounded-xl text-[12px] font-semibold tap disabled:opacity-30"
+                        style={btnSoft(true)}>
+                        ВЫСТАВИТЬ {limitSide === "buy" ? "LONG" : "SHORT"} · {fmt(notional, 0)}
+                      </button>
                     </div>
                   )}
                 </div>
               </>
             )}
 
-            <div className="flex items-center gap-1.5 mb-2.5">
-              <div className="flex-1 flex items-center rounded px-3 py-2 min-w-0"
-                style={{ backgroundColor: SURFACE }}>
-                <span className="font-mono text-[13px] mr-1.5" style={{ color: FAINT }}>$</span>
-                <input value={size} onChange={(e) => setSize(e.target.value)} inputMode="decimal"
-                  className="w-full bg-transparent outline-none font-mono text-[15px] min-w-0"
-                  style={{ color: TEXT }} />
+            <div className="flex items-center justify-between gap-3 mb-2.5">
+              <div className="text-[10px] tracking-[0.18em]" style={{ color: FAINT }}>ОРДЕР</div>
+              <div className="text-[10px] font-mono" style={{ color: DIM }}>
+                доступно {fmt(orderCapacity, 0)}
               </div>
-              {[0.25, 0.5, 1].map((f) => (
-                <button key={f}
-                  onClick={() => setSize(String(Math.round(
-                    (leverage > 1 ? human.buyingPower : human.cash) * f)))}
-                  className="px-2.5 py-2.5 rounded-lg font-mono text-[11px] font-semibold tap"
-                  style={btnSoft(false)}>
-                  {f * 100}%
-                </button>
-              ))}
-              <button onClick={() => setSheet(sheet === "risk" ? null : "risk")}
-                className="px-2.5 py-2.5 rounded-lg text-[11px] font-semibold tap"
-                style={btnSoft(sheet === "risk")}>
-                SL/TP
+            </div>
+
+            {pos && (
+              <div className="flex items-center justify-between gap-3 rounded-xl px-3 py-2 mb-2.5"
+                style={{ backgroundColor: SURFACE, border: `1px solid ${HAIR}` }}>
+                <div className="flex items-center gap-2 min-w-0">
+                  <span className="text-[10px] tracking-[0.14em]" style={{ color: FAINT }}>ПОЗИЦИЯ</span>
+                  <span className="text-[12px] font-semibold"
+                    style={{ color: pos.side === "long" ? LONG : SHORT }}>
+                    {pos.side === "long" ? "LONG" : "SHORT"}
+                  </span>
+                  <span className="text-[11px] font-mono truncate" style={{ color: DIM }}>{fmt(pos.margin, 0)}</span>
+                </div>
+                <span className="text-[12px] font-mono shrink-0" style={{ color: pnlColor }}>{fmtSigned(pnl)}</span>
+              </div>
+            )}
+
+            <div className="flex items-stretch gap-2 mb-2">
+              <div className="flex-1 min-w-0 rounded-2xl px-3.5 flex flex-col justify-center"
+                style={{ backgroundColor: SURFACE,
+                  border: `1px solid ${orderTooLarge ? SHORT : HAIR}` }}>
+                <div className="text-[8px] tracking-[0.14em] mb-0.5" style={{ color: FAINT }}>РАЗМЕР ОРДЕРА</div>
+                <div className="flex items-center min-w-0">
+                  <span className="font-mono text-[13px] mr-1.5" style={{ color: FAINT }}>$</span>
+                  <input value={size} onChange={(e) => setSize(e.target.value)} inputMode="decimal"
+                    placeholder="0" aria-label="Размер позиции"
+                    className="w-full bg-transparent outline-none font-mono text-[18px] min-w-0 h-[28px] leading-none"
+                    style={{ color: orderTooLarge ? SHORT : TEXT }} />
+                </div>
+              </div>
+
+              <div className="grid grid-cols-3 gap-1.5 shrink-0">
+                {[[0.25, "25%"], [0.5, "50%"], [1, "MAX"]].map(([f, label]) => (
+                  <button key={label}
+                    onClick={() => setSize(String(Math.round(orderCapacity * f)))}
+                    className="min-w-[50px] h-[54px] rounded-xl font-mono text-[11px] font-semibold tap"
+                    style={btnSoft(false)}>
+                    {label}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            {orderTooLarge && (
+              <div className="text-[10px] mb-2" style={{ color: SHORT }}>
+                Размер выше доступного на {fmt(notional - orderCapacity, 0)}
+              </div>
+            )}
+
+            <div className="grid grid-cols-2 gap-2 mb-2.5">
+              <button disabled={!pos}
+                onClick={() => pos && setSheet(sheet === "risk" ? null : "risk")}
+                className="min-h-[48px] rounded-xl px-3 text-left tap disabled:opacity-30"
+                style={sheet === "risk" ? btnSoft(true) : btnSoft(false)}>
+                <div className="text-[11px] font-semibold">SL / TP</div>
+                <div className="text-[9px] mt-0.5 truncate"
+                  style={{ color: sheet === "risk" ? "#555" : FAINT }}>
+                  {pos
+                    ? `${human.stopLoss ? `SL ${human.stopLoss.toFixed(2)}` : "SL —"} · ${human.takeProfit ? `TP ${human.takeProfit.toFixed(2)}` : "TP —"}`
+                    : "нужна позиция"}
+                </div>
               </button>
-              <button disabled={!snap.tradingOpen}
-                onClick={() => snap.tradingOpen && setSheet(sheet === "limit" ? null : "limit")}
-                className="px-2.5 py-2.5 rounded-lg text-[11px] font-semibold tap disabled:opacity-25"
+              <button disabled={!snap.tradingOpen || !validOrderSize}
+                onClick={() => snap.tradingOpen && validOrderSize && setSheet(sheet === "limit" ? null : "limit")}
+                className="min-h-[48px] rounded-xl px-3 text-left tap disabled:opacity-30"
                 style={sheet === "limit" ? btnSoft(true) : btnSoft(false)}>
-                лимит{myLimits.length ? ` ${myLimits.length}` : ""}
+                <div className="text-[11px] font-semibold">ЛИМИТ{myLimits.length ? ` · ${myLimits.length}` : ""}</div>
+                <div className="text-[9px] mt-0.5 truncate"
+                  style={{ color: sheet === "limit" ? "#555" : FAINT }}>
+                  {myLimits.length ? `${myLimits.length} активн.` : "заявка по цене"}
+                </div>
               </button>
             </div>
 
-            <div className="grid grid-cols-3 gap-2">
-              <button disabled={!snap.tradingOpen || (notional < 1 && !(pos && pos.side === "short"))} onClick={doBuy}
-                className="rounded-xl py-2.5 disabled:opacity-25 flex flex-col items-center tap"
+            <div className="grid grid-cols-2 gap-2.5">
+              <button disabled={!snap.tradingOpen || (!(pos && pos.side === "short") && !validOrderSize)} onClick={doBuy}
+                className="rounded-2xl min-h-[68px] px-3 disabled:opacity-25 flex flex-col items-start justify-center text-left tap"
                 style={btnAccent(LONG)}>
-                <span className="font-bold text-[16px] tracking-wide">ЛОНГ</span>
-                <span className="text-[9px] opacity-70 leading-tight">{buyHint}</span>
+                <span className="font-bold text-[17px] tracking-wide">ЛОНГ</span>
+                <span className="text-[9px] opacity-70 mt-0.5 leading-tight">
+                  {pos && pos.side === "short" ? "закрыть SHORT" : `${fmt(notional, 0)} · открыть / добавить`}
+                </span>
               </button>
-              <button disabled={!snap.tradingOpen || (notional < 1 && !(pos && pos.side === "long"))} onClick={doSell}
-                className="rounded-xl py-2.5 disabled:opacity-25 flex flex-col items-center tap"
+              <button disabled={!snap.tradingOpen || (!(pos && pos.side === "long") && !validOrderSize)} onClick={doSell}
+                className="rounded-2xl min-h-[68px] px-3 disabled:opacity-25 flex flex-col items-start justify-center text-left tap"
                 style={btnAccent(SHORT)}>
-                <span className="font-bold text-[16px] tracking-wide">ШОРТ</span>
-                <span className="text-[9px] opacity-70 leading-tight">{sellHint}</span>
-              </button>
-              <button disabled={!pos || !snap.tradingOpen} onClick={() => doClose(1, "позиция закрыта")}
-                className="rounded-xl py-2.5 disabled:opacity-25 flex flex-col items-center tap"
-                style={btnSoft(false)}>
-                <span className="font-bold text-[16px] tracking-wide">ЗАКРЫТЬ</span>
-                <span className="text-[9px] leading-tight" style={{ color: pos ? pnlColor : FAINT }}>
-                  {pos ? fmtSigned(pnl) : "нет позиции"}
+                <span className="font-bold text-[17px] tracking-wide">ШОРТ</span>
+                <span className="text-[9px] opacity-70 mt-0.5 leading-tight">
+                  {pos && pos.side === "long" ? "закрыть LONG" : `${fmt(notional, 0)} · открыть / добавить`}
                 </span>
               </button>
             </div>
+
+            {pos && (
+              <button disabled={!snap.tradingOpen} onClick={() => doClose(1, "позиция закрыта")}
+                className="w-full min-h-[46px] mt-2.5 rounded-xl px-3 flex items-center justify-between gap-3 tap disabled:opacity-30"
+                style={btnSoft(false)}>
+                <span className="text-[11px] font-semibold tracking-[0.08em]">ЗАКРЫТЬ ПОЗИЦИЮ</span>
+                <span className="text-[12px] font-mono" style={{ color: pnlColor }}>
+                  {pos.side === "long" ? "LONG" : "SHORT"} · {fmtSigned(pnl)}
+                </span>
+              </button>
+            )}
           </div>
         )}
 
         {toast && (
-          <div className="absolute left-0 right-0 flex justify-center pointer-events-none" style={{ bottom: 150 }}>
+          <div className="absolute left-0 right-0 flex justify-center pointer-events-none" style={{ bottom: tab === "Рынок" ? (pos ? 282 : 228) : 84 }}>
             <div className="px-4 py-2 rounded-full text-[12px]"
               style={{ backgroundColor: RAISED, color: toast.color, border: `1px solid ${HAIR}` }}>
               {toast.text}
@@ -7262,16 +7463,20 @@ function PracticeApp({ onExit }) {
           </div>
         )}
 
-        <div className="grid border-t" style={{ borderColor: HAIR,
+        <div className="grid border-t ui-safe-bottom" style={{ borderColor: HAIR,
           gridTemplateColumns: `repeat(${TAB_KEYS.length}, minmax(0, 1fr))` }}>
-          {TAB_KEYS.map((key) => (
-            <button key={key} onClick={() => setTab(key)}
-              className="py-3 text-[11px] font-semibold tap"
-              style={{ color: tab === key ? BG : DIM,
-                backgroundColor: tab === key ? TEXT : "transparent" }}>
-              {key}
-            </button>
-          ))}
+          {TAB_KEYS.map((key) => {
+            const active = tab === key;
+            return (
+              <button key={key} onClick={() => setTab(key)}
+                className="relative min-h-[48px] px-1 text-[10px] font-semibold tap"
+                style={{ color: active ? TEXT : FAINT, backgroundColor: "transparent" }}>
+                {active && <span className="absolute top-0 left-[22%] right-[22%] h-[2px] rounded-full"
+                  style={{ backgroundColor: TEXT }} />}
+                {key}
+              </button>
+            );
+          })}
         </div>
       </div>
     </div>
@@ -7279,8 +7484,7 @@ function PracticeApp({ onExit }) {
 }
 
 // ==== ТОЧКА ВХОДА ====
-// ВРЕМЕННО: ловушка ошибок отрисовки. Показывает текст ошибки на экране
-// с переносом строк, чтобы ничего не обрезалось. Убрать после починки.
+// Защитный boundary: вместо белого экрана показывает диагностическую ошибку.
 class ErrBoundary extends React.Component {
   constructor(p) { super(p); this.state = { err: null, info: null }; }
   static getDerivedStateFromError(err) { return { err }; }
