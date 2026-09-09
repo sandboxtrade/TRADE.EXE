@@ -285,7 +285,6 @@ class Market {
       invested: 0, basis: 0,
       realizedPnL: 0, tradeCount: 0,
       stopLoss: null, takeProfit: null,
-      limits: [],
       liquidatedAt: null,
       npc: null,
     }));
@@ -497,8 +496,8 @@ class Market {
    */
   clear(orders) {
     /* Защитные действия НЕ суммируются с обычными. Если на одном тике
-       сработал margin-call/stop/take/leave, он полностью подавляет рыночные,
-       лимитные и NPC-намерения этого же участника. Иначе CLOSE мог случайно
+       сработал margin-call/stop/take/leave, он полностью подавляет рыночные
+       и NPC-намерения этого же участника. Иначе CLOSE мог случайно
        превратиться в разворот позиции. */
     const PRIORITY = { leave: 5, "free-retire": 5, liquidation: 4, stop: 3, take: 3 };
     const merged = new Map();
@@ -506,14 +505,13 @@ class Market {
       if (!Number.isFinite(o.du) || o.du === 0) continue;
       const reason = o.reason || null;
       const prio = PRIORITY[reason] || 0;
-      const source = { du: o.du, reason, orderId: o.orderId || null };
       const cur = merged.get(o.i);
       if (!cur) {
-        merged.set(o.i, { i: o.i, du: o.du, reason, priority: prio, sources: [source] });
+        merged.set(o.i, { i: o.i, du: o.du, reason, priority: prio });
         continue;
       }
       if (prio > cur.priority) {
-        cur.du = o.du; cur.reason = reason; cur.priority = prio; cur.sources = [source];
+        cur.du = o.du; cur.reason = reason; cur.priority = prio;
         continue;
       }
       if (prio < cur.priority) continue;
@@ -521,7 +519,6 @@ class Market {
          Для обычных заявок сохраняем прежнюю симметрию: они неттятся. */
       if (prio > 0) continue;
       cur.du += o.du;
-      cur.sources.push(source);
     }
     const work = [...merged.values()].filter((o) => Math.abs(o.du) > 1e-12);
     if (!work.length) { this.tick++; return { price: this.P, executed: [], iters: 0 }; }
@@ -624,20 +621,9 @@ class Market {
       if (o.reason === "liquidation") {
         pl.liquidatedAt = this.tick;
         this.liquidations++;
-        pl.limits = [];
-      } else if (o.reason === "leave") {
-        pl.limits = [];
       }
       const actualDu = after - before;
-      /* Источники нужны для корректного partial fill лимиток. Если общий
-         du был обрезан по покупательной способности, каждый источник
-         получает ту же долю исполнения; остаток лимитки остаётся активным. */
-      const ratio = Math.abs(o.du) > 1e-12 ? actualDu / o.du : 0;
-      const fills = (o.sources || []).map((src) => ({
-        reason: src.reason, orderId: src.orderId,
-        du: src.du * ratio,
-      }));
-      executed.push({ i: o.i, du: actualDu, price: Pn, reason: o.reason, fills });
+      executed.push({ i: o.i, du: actualDu, price: Pn, reason: o.reason });
     }
     this.tick++;
     return { price: Pn, executed, iters: 0 };
@@ -1345,29 +1331,10 @@ function npcIntents(m, history, fromIdx) {
  * Никакой ордер не исполняется здесь — только в Market.clear(), по единой цене.
  * Поэтому массовое срабатывание стопов не даёт преимущества по порядку.
  */
-function limitReserveNeed(pl, extra = null) {
-  const limits = [...(pl.limits || []).filter((l) => !l.filled)];
-  if (extra) limits.push(extra);
-  let buy = 0, sell = 0;
-  for (const l of limits) {
-    const side = String(l.side || "").toLowerCase();
-    const n = Math.max(0, Number(l.notional) || 0);
-    if (side === "buy") buy += n;
-    else if (side === "sell") sell += n;
-  }
-  const base = Math.abs(pl.u);
-  const needBuy = Math.max(0, Math.abs(pl.u + buy) - base);
-  const needSell = Math.max(0, Math.abs(pl.u - sell) - base);
-  /* Берём худший сценарий по каждой стороне отдельно: противоположные
-     лимитки не считаются взаимным обеспечением, потому что могут сработать
-     в разные моменты. */
-  return needBuy + needSell;
-}
-
 function availableBuyingPower(m, i) {
   const pl = m.players[i];
   if (!pl) return 0;
-  return Math.max(0, m.buyingPower(i) - limitReserveNeed(pl));
+  return Math.max(0, m.buyingPower(i));
 }
 
 function exposureNeed(pl, action, notional) {
@@ -1393,40 +1360,11 @@ function validateCommand(m, i, cmd) {
       if (!Number.isFinite(n) || n <= 0) return { ok: false, reason: "неверный объём" };
       const need = exposureNeed(pl, cmd.action, n);
       if (need > availableBuyingPower(m, i) + 1e-9)
-        return { ok: false, reason: "средства зарезервированы под лимитные заявки" };
+        return { ok: false, reason: "недостаточно свободных средств" };
       return { ok: true };
     }
     case "PROTECT": {
       if (pl.u === 0) return { ok: false, reason: "нет открытой позиции" };
-      return { ok: true };
-    }
-    case "LIMIT": {
-      const n = cmd.notional;
-      const side = String(cmd.side || "").toLowerCase();
-      if (!Number.isFinite(n) || n <= 0) return { ok: false, reason: "неверный объём" };
-      if (!Number.isFinite(cmd.limitPrice) || cmd.limitPrice <= 0)
-        return { ok: false, reason: "неверная цена" };
-      if (!['buy', 'sell'].includes(side)) return { ok: false, reason: "неверная сторона" };
-      if ((pl.limits || []).filter((l) => !l.filled).length >= 10)
-        return { ok: false, reason: "слишком много заявок" };
-      /* Пересекающиеся собственные buy/sell могут сработать одновременно
-         и взаимно обнулиться до клиринга. На реальной бирже это self-cross,
-         поэтому не разрешаем такую пару. */
-      for (const l of (pl.limits || []).filter((x) => !x.filled)) {
-        const ls = String(l.side || "").toLowerCase();
-        if (side === "buy" && ls === "sell" && cmd.limitPrice >= l.limitPrice)
-          return { ok: false, reason: "лимитные заявки пересекаются" };
-        if (side === "sell" && ls === "buy" && cmd.limitPrice <= l.limitPrice)
-          return { ok: false, reason: "лимитные заявки пересекаются" };
-      }
-      const candidate = { side, notional: n, limitPrice: cmd.limitPrice, filled: false };
-      if (limitReserveNeed(pl, candidate) > m.buyingPower(i) + 1e-9)
-        return { ok: false, reason: "недостаточно свободных средств под все лимитки" };
-      return { ok: true };
-    }
-    case "CANCEL_LIMIT": {
-      if (!(pl.limits || []).some((l) => l.id === cmd.orderId))
-        return { ok: false, reason: "заявка уже снята или не существует" };
       return { ok: true };
     }
     default: return { ok: false, reason: "неизвестная команда" };
@@ -1448,11 +1386,11 @@ function commandToIntent(m, i, cmd) {
   return null;
 }
 
-/** Отложенные: стоп/тейк/лимит -> намерения. Проверяются по mark ПЕРЕД клирингом. */
+/** Защитные уровни: стоп/тейк -> намерения. Проверяются по mark ПЕРЕД клирингом. */
 function pendingIntents(m) {
   const out = [];
   const P = m.mark;
-  // В свободном рынке этот проход всё равно нужен для SL/TP/лимиток всех
+  // В свободном рынке этот проход всё равно нужен для SL/TP всех
   // 5 000 ботов. Заодно собираем агрегаты книги и переиспользуем их в
   // depth/crowd, чтобы не сканировать весь массив ещё 2–3 раза за тик.
   let freeL = 0, freeS = 0, freeLBasis = 0, freeSBasis = 0, freeEscrow = 0;
@@ -1481,21 +1419,6 @@ function pendingIntents(m) {
           ((long && P >= pl.takeProfit) || (!long && P <= pl.takeProfit)))
         out.push({ i: pl.id, du: -pl.u, reason: "take" });
     }
-    if (pl.limits && pl.limits.length) {
-      for (const lo of pl.limits) {
-        if (lo.filled || lo.notional <= 1e-9) continue;
-        const side = String(lo.side || "").toLowerCase();
-        const hit = side === "buy" ? P <= lo.limitPrice : P >= lo.limitPrice;
-        if (!hit) continue;
-        const units = m.curve.unitsFor(lo.notional, P);
-        out.push({
-          i: pl.id,
-          du: (side === "buy" ? 1 : -1) * units,
-          reason: "limit",
-          orderId: lo.id,
-        });
-      }
-    }
   }
   if (m.freeMarket) {
     m._freePreStats = {
@@ -1507,27 +1430,6 @@ function pendingIntents(m) {
   return out;
 }
 
-function reconcileLimitFills(m, executed) {
-  const filled = new Map();
-  for (const e of executed || []) {
-    for (const f of e.fills || []) {
-      if (f.reason !== "limit" || !f.orderId) continue;
-      filled.set(f.orderId, (filled.get(f.orderId) || 0) + Math.abs(f.du));
-    }
-  }
-  if (!filled.size) return;
-  for (const pl of m.players) {
-    if (!pl.limits || !pl.limits.length) continue;
-    const keep = [];
-    for (const lo of pl.limits) {
-      const done = filled.get(lo.id) || 0;
-      if (done <= 1e-9) { keep.push(lo); continue; }
-      const left = Math.max(0, lo.notional - done);
-      if (left > 1e-6) keep.push({ ...lo, notional: left });
-    }
-    pl.limits = keep;
-  }
-}
 
 // ---- snapshot.js ----
 /**
@@ -1554,8 +1456,7 @@ function projectPlayer(m, pl, { viewer, devMode }) {
       entryPrice: pl.entryPrice,
     },
   };
-  if (viewer) { out.stopLoss = pl.stopLoss; out.takeProfit = pl.takeProfit;
-    out.limits = (pl.limits || []).filter((l) => !l.filled); }
+  if (viewer) { out.stopLoss = pl.stopLoss; out.takeProfit = pl.takeProfit; }
   if (devMode && pl.npc) out.debug = { type: pl.npc.type, lag: pl.npc.lag,
     size: pl.npc.size, act: pl.npc.act };
   return out;
@@ -1588,7 +1489,7 @@ function createSnapshot(m, viewerId, { level = "full", devMode = false } = {}) {
 
 /**
  * ROOM — цикл тика. Порядок фиксирован и одинаков для всех:
- *   1. собрать отложенные (стоп/тейк/лимит)
+ *   1. собрать защитные уровни (стоп/тейк)
  *   2. собрать намерения NPC
  *   3. собрать команды людей, поступившие с прошлого тика
  *   4. ОДИН клиринг: единая цена для всех
@@ -1606,7 +1507,6 @@ class RoomV4 {
     this.market.warmupTicks = warmupTicks;
     this.history = [this.market.mark];
     this.pendingCommands = [];
-    this._limitSeq = 0;
     this.humanSlots = new Set();
     this.halted = null;
     this._inPreroll = false;
@@ -1694,7 +1594,6 @@ class RoomV4 {
     slot.stopLoss = null;
     slot.takeProfit = null;
     slot.liquidatedAt = null;
-    slot.limits = [];
     slot.npc = null;
     slot.isHuman = true;
     slot.name = name;
@@ -1724,11 +1623,10 @@ class RoomV4 {
   }
 
   send(playerId, cmd) {
-    /* До открытия рынок полностью закрыт: нельзя ни торговать по рынку,
-       ни заранее ставить лимитные заявки. Это правило проверяется в движке,
-       а не только в интерфейсе, поэтому одинаково для любого клиента. */
+    /* До открытия рынок полностью закрыт для торговли. Это правило
+       проверяется в движке, а не только в интерфейсе. */
     const m = this.market;
-    if (m.tick < m.warmupTicks && (cmd?.type === "TRADE" || cmd?.type === "LIMIT")) {
+    if (m.tick < m.warmupTicks && cmd?.type === "TRADE") {
       return { ok: false, reason: "рынок ещё не открыт" };
     }
     const v = validateCommand(this.market, playerId, cmd);
@@ -1742,19 +1640,6 @@ class RoomV4 {
       }
       if (Number.isFinite(cmd.stopLoss)) pl.stopLoss = cmd.stopLoss;
       if (Number.isFinite(cmd.takeProfit)) pl.takeProfit = cmd.takeProfit;
-      return { ok: true };
-    }
-    if (cmd.type === "LIMIT") {
-      const pl = this.market.players[playerId];
-      pl.limits = pl.limits || [];
-      const side = String(cmd.side).toLowerCase();
-      pl.limits.push({ id: `L${playerId}-${this.market.tick}-${this._limitSeq++}`,
-        side, notional: cmd.notional, limitPrice: cmd.limitPrice, filled: false });
-      return { ok: true };
-    }
-    if (cmd.type === "CANCEL_LIMIT") {
-      const pl = this.market.players[playerId];
-      pl.limits = (pl.limits || []).filter((l) => l.id !== cmd.orderId);
       return { ok: true };
     }
     this.pendingCommands.push({ i: playerId, cmd });
@@ -1772,8 +1657,8 @@ class RoomV4 {
       ? clamp((m.tick - m.warmupTicks) / m.totalTicks, 0, 1) : null;
 
     /* ------------------------- ПРЕДТОРГОВЫЙ ПЕРИОД ----------------------
-       Клиринга нет, Q не меняется, цена стоит. Никакие заявки — ни рыночные,
-       ни лимитные — до открытия не принимаются и не создаются. */
+       Клиринга нет, Q не меняется, цена стоит. Рыночные сделки до открытия
+       не принимаются. */
     if (m.tick < m.warmupTicks) {
       this.pendingCommands = [];
       m.tick++;
@@ -1802,7 +1687,6 @@ class RoomV4 {
     this.pendingCommands = [];
 
     const result = m.clear(intents);
-    reconcileLimitFills(m, result.executed);
     // Для 5 000 NPC повторный полный обход после клиринга слишком дорог.
     // pendingIntents уже собрал состояние книги перед этим тиком; задержка
     // crowd-сигнала на один тик = 100 мс и не даёт ботам дополнительной
@@ -1839,8 +1723,8 @@ class RoomV4 {
   snapshot(viewerId, opts) { return createSnapshot(this.market, viewerId, opts); }
 
   /** Закрыть позицию и выйти из комнаты со штрафом.
-      Закрытие проходит полноценным тиком комнаты: tick, history, NPC,
-      лимитки и инварианты остаются синхронными. */
+      Закрытие проходит полноценным тиком комнаты: tick, history, NPC
+      и инварианты остаются синхронными. */
   leave(playerId, penaltyFraction) {
     const m = this.market;
     if (m.players[playerId].u !== 0) {
@@ -1879,7 +1763,10 @@ const RU_LABELS = {
   aggressive: "агрессивный", conservative: "консервативный", momentum: "моментум",
   contrarian: "контрариан", random: "случайный", scared: "пугливый",
   greedy: "жадный", scalper: "скальпер", longterm: "долгосрочный",
-  panic: "паникёр", inactive: "пассивный",
+  panic: "паникёр", inactive: "пассивный", crowdfade: "против толпы",
+  meanrev: "возврат к среднему", range: "диапазон", squeeze: "сжатие",
+  spike: "импульс", maker: "мейкер", copycat: "копирующий", sniper: "снайпер",
+  pullback: "откат", flow: "поток", accel: "ускорение", chase: "преследование",
 };
 const STRATEGY_LABELS = Object.fromEntries(TYPES.map((t) => [t, RU_LABELS[t] || t]));
 
@@ -2170,13 +2057,9 @@ class LegacyRoom {
          у каждой сессии своя и игроку не сообщается. */
       initialPrice: this._openPrice ?? this._room.market.mark,
       rank: this._rank(viewerId, base.participants || []),
-      yourOrders: base.you ? (base.you.limits || []) : [],
       // v4 не хранит историю отдельных сделок игрока (только счётчик tradeCount) —
       // список остаётся пустым, вкладка "сделки" будет пока без записей.
       yourTrades: [],
-      // Заявки других участников намеренно не передаются клиенту — так задумано
-      // в архитектуре v4 (приватность, см. ARCHITECTURE.md), а не баг переходника.
-      orders: [],
       // "ликвидность" старого движка ~ параметр глубины кривой Q нового
       liquidity: base.Q,
       phase: this._phase(base),
@@ -2374,7 +2257,7 @@ function resetFreeBot(m, p) {
 
   p.cash = fresh; p.startingCapital = fresh; p.u = 0;
   p.entryPrice = null; p.invested = 0; p.basis = 0; p.realizedPnL = 0;
-  p.tradeCount = 0; p.stopLoss = null; p.takeProfit = null; p.limits = [];
+  p.tradeCount = 0; p.stopLoss = null; p.takeProfit = null;
   p.liquidatedAt = null; p.isHuman = false; p.name = `${type}-${p.id}-g${generation}`;
   p.npc = makeNPCState(type, spec, r, m.seed + generation * 131, ordinal);
   applyFreePersonality(p, r, m.tick, generation);
@@ -2531,7 +2414,7 @@ class FreeMarketLegacyRoom extends LegacyRoom {
     p.cash = amount;
     p.u = 0; p.startingCapital = amount; p.entryPrice = null;
     p.invested = 0; p.basis = 0; p.realizedPnL = 0; p.tradeCount = 0;
-    p.stopLoss = null; p.takeProfit = null; p.limits = []; p.liquidatedAt = null;
+    p.stopLoss = null; p.takeProfit = null; p.liquidatedAt = null;
     m.C += amount;
     m.startingCapital = m.C / m.players.length;
     m.curve = makeCurve(m);
@@ -2557,7 +2440,7 @@ class FreeMarketLegacyRoom extends LegacyRoom {
     p.cash = 0; p.u = 0; p.startingCapital = 0;
     p.entryPrice = null; p.invested = 0; p.basis = 0;
     p.realizedPnL = 0; p.tradeCount = 0; p.liquidatedAt = null;
-    p.stopLoss = null; p.takeProfit = null; p.limits = [];
+    p.stopLoss = null; p.takeProfit = null;
     m.C = Math.max(1e-9, m.C - equity);
     m.startingCapital = m.C / m.players.length;
     m.curve = makeCurve(m);
@@ -2702,7 +2585,7 @@ class FreeMarketLegacyRoom extends LegacyRoom {
         ? this._priceHistory[this._priceHistory.length - 2].price : m.mark,
       initialPrice: this._openPrice ?? m.mark,
       rank: this._humanAttached ? agg.rank : null,
-      yourOrders: raw.limits || [], yourTrades: [], orders: [],
+      yourTrades: [],
       liquidity: agg.q, phase: this._phase(contextBase), context,
     };
   }
@@ -2879,36 +2762,40 @@ function buildCandles(points, bucketMs, maxCandles) {
    неоновые цвета: на чёрном фоне они светятся, тянут на себя всё внимание
    и делают экран «кислотным». Новые сохраняют то же значение (зелёное
    вверх, красное вниз), но по светлоте близки к тексту, поэтому цифра
-   читается как цифра, а не как подсветка. Белый тоже смягчён до #F2F2F5:
+   читается как цифра, а не как подсветка. Белый тоже смягчён до #F2EFE9:
    чистый #FFFFFF на чистом чёрном даёт заметный ореол на OLED. */
-const BG = "#000000";
-const SURFACE = "#09090B";
-const RAISED = "#111115";
-const HAIR = "#1D1D22";
-const TEXT = "#F4F1EB";
-const DIM = "#918D86";
-const FAINT = "#5E5A55";
-/* Боевые цвета оставлены, но специально приглушены: это уже не кислотные
-   биржевые кнопки, а спокойные глубокие оттенки. */
-const LONG = "#4E866D";
-const SHORT = "#8B5762";
-const GOLD = "#B68D4A";   // кубки
-/* Главный декоративный акцент — тёплый почти-белый, чтобы интерфейс был
-   чёрно-белым и дорогим по вайбу, а не неоновым. */
-const ACCENT = "#DED8CF";
+const BG = "#020203";
+const SURFACE = "#060608";
+const RAISED = "#101013";
+const HAIR = "#1B1B1F";
+const TEXT = "#F2EFE9";
+const DIM = "#9A958E";
+const FAINT = "#625E58";
+/* Цвет в интерфейсе используется только как семантика результата/стороны.
+   Он заметный, но не становится фоном всего приложения. */
+const LONG = "#31D083";
+const SHORT = "#E85D6C";
+const GOLD = "#B99559";
+const ACCENT = "#D8D2C8";
+
+const CARD_BG = "linear-gradient(180deg, rgba(17,17,20,.94) 0%, rgba(8,8,10,.98) 100%)";
+const CARD_BG_SOFT = "linear-gradient(180deg, rgba(13,13,16,.96) 0%, rgba(7,7,9,.99) 100%)";
+const CARD = { background: CARD_BG, border: `1px solid ${HAIR}`,
+  boxShadow: "inset 0 1px 0 rgba(255,255,255,.025)" };
+const CARD_SOFT = { background: CARD_BG_SOFT, border: `1px solid ${HAIR}` };
 
 /* Цвета именно для графика: он должен выглядеть как на референсе — белые /
    серые свечи на глубоком чёрном фоне, а не зелёно-красная лента. */
-const CHART_UP_FILL = "#F1EEE8";
-const CHART_UP_STROKE = "#ECE7DD";
+const CHART_UP_FILL = "#F2EFE9";
+const CHART_UP_STROKE = "#D8D3CA";
 const CHART_DOWN_FILL = "rgba(0,0,0,0)";
-const CHART_DOWN_STROKE = "#6D6A73";
-const CHART_WICK = "#8A8690";
-const CHART_LINE = "#D9D3CA";
+const CHART_DOWN_STROKE = "#74717A";
+const CHART_WICK = "#85818A";
+const CHART_LINE = "#D8D2C8";
 const CHART_LINE_FAINT = "rgba(217,211,202,.16)";
 const CHART_VOL_UP = "rgba(241,238,232,.18)";
 const CHART_VOL_DOWN = "rgba(125,121,131,.26)";
-const CHART_PRICE_BG = "#08080A";
+const CHART_PRICE_BG = "#060608";
 const CHART_PRICE_STROKE = "#F1EEE8";
 
 /** Затемнение цвета — для нижней точки градиента кнопки и её рамки. */
@@ -2923,16 +2810,22 @@ const shade = (hex, k) => {
    экране, поэтому у всех кнопок мягкий вертикальный градиент и волосяная
    светлая рамка. Свечения (boxShadow с неоновым цветом) убраны. */
 const btnAccent = (c) => ({
-  backgroundImage: `linear-gradient(180deg, ${c}, ${shade(c, 0.78)})`,
-  color: TEXT,
-  border: `1px solid ${shade(c, 0.68)}`,
-  boxShadow: "inset 0 1px 0 rgba(255,255,255,.04), 0 8px 18px rgba(0,0,0,.28)",
+  backgroundImage: `linear-gradient(180deg, ${c}, ${shade(c, 0.72)})`,
+  color: "#060807",
+  border: `1px solid ${shade(c, 0.70)}`,
+  boxShadow: "inset 0 1px 0 rgba(255,255,255,.08), 0 8px 20px rgba(0,0,0,.24)",
 });
 const btnSoft = (on) => on
-  ? { backgroundImage: "linear-gradient(180deg,#F3EEE5,#D8D2C7)", color: "#09090A",
-      border: "1px solid rgba(255,255,255,0.12)" }
-  : { backgroundImage: "linear-gradient(180deg,#16161A,#0B0B0D)", color: TEXT,
-      border: "1px solid rgba(255,255,255,0.07)" };
+  ? { backgroundImage: "linear-gradient(180deg,#F1EDE6,#D8D2C8)", color: "#080809",
+      border: "1px solid rgba(255,255,255,0.10)", boxShadow: "inset 0 1px 0 rgba(255,255,255,.2)" }
+  : { backgroundImage: "linear-gradient(180deg,#151518,#0B0B0D)", color: TEXT,
+      border: `1px solid ${HAIR}`, boxShadow: "inset 0 1px 0 rgba(255,255,255,.018)" };
+const choiceStyle = (active, disabled = false) => ({
+  background: active && !disabled ? "linear-gradient(180deg,#1A1A1E,#0F0F12)" : CARD_BG_SOFT,
+  color: disabled ? FAINT : active ? TEXT : DIM,
+  border: `1px solid ${active && !disabled ? "#3B393F" : HAIR}`,
+  boxShadow: active && !disabled ? "inset 0 1px 0 rgba(255,255,255,.055)" : "none",
+});
 
 const fmt = (v, d = 2) => {
   const digits = Math.abs(v) >= 1000 ? 0 : d;
@@ -3309,7 +3202,6 @@ function Chart({ state, timeframe, mode, entryPrice, stopLoss, takeProfit,
 
   const digits = step < 0.1 ? 3 : step < 1 ? 2 : 1;
   const priceY = clamp(toY(state.price), PAD_T, PAD_T + plotH);
-  const up = state.price >= state.previousPrice;
 
   /** Уровень с подписью и меткой на ценовой шкале. */
   const level = (value, label, dash, color, strong) =>
@@ -3532,19 +3424,19 @@ function eyesFilter(list, f) {
 function EyesPanel({ eyes, filter, onFilter, view, onView }) {
   const t = eyes.totals;
   const list = eyesFilter(view === "LIVE" ? eyes.live : eyes.history, filter);
-  const card = { backgroundColor: SURFACE, border: `1px solid ${HAIR}` };
+  const card = CARD;
 
   return (
     <div className="px-4 pb-4">
       <div className="rounded-2xl px-4 py-3.5 mt-2" style={card}>
         <div className="flex items-center justify-between">
-          <span className="text-[11px] tracking-[0.3em]" style={{ color: LONG }}>EYES</span>
+          <span className="text-[11px] tracking-[0.11em]" style={{ color: LONG }}>EYES</span>
           <div className="flex gap-1">
             {["LIVE", "HISTORY"].map((v) => (
               <button key={v} onClick={() => onView(v)}
                 className="px-2.5 py-1 rounded text-[10px] tracking-[0.1em] tap"
-                style={{ backgroundColor: v === view ? TEXT : RAISED,
-                  color: v === view ? BG : DIM, border: `1px solid ${HAIR}` }}>
+                style={{ backgroundColor: v === view ? "#1B1B1F" : RAISED,
+                  color: v === view ? TEXT : DIM, border: `1px solid ${v === view ? "#3A393D" : HAIR}` }}>
                 {v}
               </button>
             ))}
@@ -3553,19 +3445,19 @@ function EyesPanel({ eyes, filter, onFilter, view, onView }) {
 
         <div className="grid grid-cols-3 gap-3 mt-3">
           <div>
-            <div className="text-[9px] tracking-[0.15em]" style={{ color: FAINT }}>STOP FLOW</div>
+            <div className="text-[9px] tracking-[0.10em]" style={{ color: FAINT }}>STOP FLOW</div>
             <div className="text-[15px] font-mono mt-1" style={{ color: SHORT }}>
               {fmt(t.stopFlow, 0)}
             </div>
           </div>
           <div>
-            <div className="text-[9px] tracking-[0.15em]" style={{ color: FAINT }}>TAKE FLOW</div>
+            <div className="text-[9px] tracking-[0.10em]" style={{ color: FAINT }}>TAKE FLOW</div>
             <div className="text-[15px] font-mono mt-1" style={{ color: LONG }}>
               {fmt(t.takeFlow, 0)}
             </div>
           </div>
           <div>
-            <div className="text-[9px] tracking-[0.15em]" style={{ color: FAINT }}>КЛАСТЕРОВ</div>
+            <div className="text-[9px] tracking-[0.10em]" style={{ color: FAINT }}>КЛАСТЕРОВ</div>
             <div className="text-[15px] font-mono mt-1">
               {t.stopClusters} / {t.takeClusters}
             </div>
@@ -3576,8 +3468,8 @@ function EyesPanel({ eyes, filter, onFilter, view, onView }) {
           {EYES_FILTERS.map((f) => (
             <button key={f} onClick={() => onFilter(f)}
               className="px-3 py-1.5 rounded-lg text-[10px] tracking-[0.1em] shrink-0 tap"
-              style={{ backgroundColor: f === filter ? TEXT : RAISED,
-                color: f === filter ? BG : DIM, border: `1px solid ${HAIR}` }}>
+              style={{ backgroundColor: f === filter ? "#1B1B1F" : RAISED,
+                color: f === filter ? TEXT : DIM, border: `1px solid ${f === filter ? "#3A393D" : HAIR}` }}>
               {f}
             </button>
           ))}
@@ -3657,10 +3549,11 @@ const Blank = ({ children }) => (
 function Toggle({ active, onClick, children }) {
   return (
     <button onClick={onClick}
-      className="ui-hit min-w-[44px] px-3 rounded-xl text-[12px] font-semibold tap"
-      style={{ color: active ? BG : DIM,
-        backgroundColor: active ? TEXT : SURFACE,
-        border: `1px solid ${active ? TEXT : HAIR}` }}>
+      className="ui-hit min-w-[44px] px-3 rounded-[13px] text-[12px] font-medium tap"
+      style={{ color: active ? TEXT : DIM,
+        background: active ? "linear-gradient(180deg,#1C1C20,#111114)" : CARD_BG_SOFT,
+        border: `1px solid ${active ? "#3A393D" : HAIR}`,
+        boxShadow: active ? "inset 0 1px 0 rgba(255,255,255,.05)" : "none" }}>
       {children}
     </button>
   );
@@ -3753,133 +3646,122 @@ function profileStats(profile) {
    не вызывать перерасчёт вёрстки на каждом кадре.
    ========================================================================== */
 const GLOBAL_CSS = `
-/* Единая кривая и три длительности на всё приложение: 200 мс на отклик
-   элемента, 320 мс на появление блока, 480 мс на смену экрана. Раньше в
-   разных местах стояли 120, 150, 260, 340, 600 и 700 мс с четырьмя разными
-   кривыми — движения выглядели вразнобой. */
 :root {
   --tx-ease: cubic-bezier(.22,.9,.3,1);
-  --tx-fast: 200ms;
-  --tx-mid: 320ms;
-  --tx-slow: 480ms;
+  --tx-fast: 170ms;
+  --tx-mid: 280ms;
+  --tx-slow: 420ms;
   --tx-safe-top: env(safe-area-inset-top, 0px);
   --tx-safe-bottom: env(safe-area-inset-bottom, 0px);
+  --tx-bg: #020203;
+  --tx-surface: #060608;
+  --tx-raised: #101013;
+  --tx-hair: #1B1B1F;
+  --tx-text: #F2EFE9;
+  --tx-dim: #9A958E;
+  --tx-faint: #625E58;
 }
 * { box-sizing: border-box; }
-html, body, #root { width: 100%; min-height: 100%; }
+html, body, #root { width: 100%; min-height: 100%; background: var(--tx-bg); }
 body {
   -webkit-font-smoothing: antialiased;
   text-rendering: optimizeLegibility;
   -webkit-text-size-adjust: 100%;
+  font-synthesis-weight: none;
 }
 button, input, textarea, select { font: inherit; }
 button { -webkit-tap-highlight-color: transparent; touch-action: manipulation; }
 button:disabled { cursor: default; }
-input, textarea { caret-color: #F2F2F5; }
-input::placeholder, textarea::placeholder { color: #5A5A63; opacity: 1; }
+input, textarea { caret-color: var(--tx-text); }
+input::placeholder, textarea::placeholder { color: var(--tx-faint); opacity: .85; }
 button:focus-visible, select:focus-visible {
-  outline: 2px solid rgba(220,220,226,.52);
-  outline-offset: 2px;
+  outline: 1px solid rgba(242,239,233,.48);
+  outline-offset: 3px;
 }
 input:focus-visible, textarea:focus-visible { outline: none; }
 .ui-field {
-  transition: border-color var(--tx-fast) var(--tx-ease), box-shadow var(--tx-fast) var(--tx-ease);
+  transition: border-color var(--tx-fast) var(--tx-ease), box-shadow var(--tx-fast) var(--tx-ease),
+              background-color var(--tx-fast) var(--tx-ease);
 }
 .ui-field:focus-within {
-  border-color: rgba(220,220,226,.34) !important;
-  box-shadow: 0 0 0 1px rgba(220,220,226,.08) inset;
+  border-color: rgba(242,239,233,.30) !important;
+  box-shadow: inset 0 0 0 1px rgba(242,239,233,.04);
 }
-.ui-safe-top { padding-top: max(16px, var(--tx-safe-top)); }
-.ui-safe-bottom { padding-bottom: max(14px, var(--tx-safe-bottom)); }
+.ui-safe-top { padding-top: max(18px, var(--tx-safe-top)); }
+.ui-safe-bottom { padding-bottom: max(13px, var(--tx-safe-bottom)); }
 .ui-hit { min-height: 44px; }
-.ui-section-title { color: #5A5A63; font-size: 10px; letter-spacing: .22em; line-height: 1.2; }
+.ui-section-title, .ui-label {
+  color: var(--tx-faint); font-size: 10px; letter-spacing: .14em; line-height: 1.25;
+  font-weight: 500;
+}
+.ui-screen-title { color: var(--tx-dim); font-size: 11px; letter-spacing: .14em; line-height: 1.2; }
 .ui-back {
   width: 44px; height: 44px; display: inline-flex; align-items: center; justify-content: center;
-  border-radius: 14px; color: #F2F2F5; background: #0C0C0E; border: 1px solid #232326;
+  border-radius: 15px; color: var(--tx-text);
+  background: linear-gradient(180deg,#121215,#09090B); border: 1px solid var(--tx-hair);
+  box-shadow: inset 0 1px 0 rgba(255,255,255,.025);
 }
+.ui-card {
+  background: linear-gradient(180deg,rgba(17,17,20,.94),rgba(8,8,10,.98));
+  border: 1px solid var(--tx-hair);
+  box-shadow: inset 0 1px 0 rgba(255,255,255,.025);
+}
+.ui-card-soft {
+  background: linear-gradient(180deg,rgba(13,13,16,.96),rgba(7,7,9,.99));
+  border: 1px solid var(--tx-hair);
+}
+.ui-chip {
+  background: #0D0D10; border: 1px solid var(--tx-hair); color: var(--tx-dim);
+}
+.ui-divider { height: 1px; background: var(--tx-hair); opacity: .86; }
 .ui-bottom-surface {
-  background: linear-gradient(180deg, rgba(0,0,0,.86), #000 28%);
-  border-top: 1px solid #232326;
+  background: linear-gradient(180deg, rgba(2,2,3,.84), var(--tx-bg) 24%);
+  border-top: 1px solid var(--tx-hair);
+  backdrop-filter: blur(14px); -webkit-backdrop-filter: blur(14px);
 }
-.ui-scroll-pad { padding-bottom: calc(24px + var(--tx-safe-bottom)); }
-@keyframes tx-fade-up { from { opacity: 0; transform: translateY(14px); }
-                          to { opacity: 1; transform: none; } }
-@keyframes tx-fade    { from { opacity: 0; } to { opacity: 1; } }
-@keyframes tx-pop     { 0% { opacity: 0; transform: scale(.94); }
-                        60% { transform: scale(1.01); }
-                        100% { opacity: 1; transform: scale(1); } }
-@keyframes tx-pulse   { 0%,100% { opacity: 1; transform: scale(1); }
-                        50% { opacity: .45; transform: scale(.82); } }
-@keyframes tx-draw    { from { stroke-dashoffset: var(--len); }
-                          to { stroke-dashoffset: 0; } }
-@keyframes tx-sheet   { from { opacity: 0; transform: translateY(28px); }
-                          to { opacity: 1; transform: none; } }
-@keyframes tx-spin    { to { transform: rotate(360deg); } }
-@keyframes tx-dome-spin { from { transform: rotateZ(0deg) scaleX(1); }
-                          50%  { transform: scaleX(.86); }
-                          to   { transform: scaleX(1); } }
-@keyframes tx-twinkle { 0%,100% { opacity: .18; } 50% { opacity: .9; } }
-@keyframes tx-wave    { 0%,100% { transform: translateY(0); }
-                        50% { transform: translateY(-4px); } }
-                        50% { transform: translateY(-5px) rotate(1.5deg); } }
-                        50% { opacity: 1; transform: translateY(-2.5px); } }
-@keyframes tx-breathe { 0%,100% { transform: scale(1); opacity: .85; }
-                        50% { transform: scale(1.06); opacity: 1; } }
-/* Живой логотип на стартовом экране: медленное всплытие с почти
-   незаметным покачиванием и дыханием яркости. Три параметра в одном
-   ключевом кадре, чтобы браузер анимировал одним слоем. */
-@keyframes tx-logo-live {
-  0%   { transform: translateY(0)      rotate(0deg)      scale(1);     opacity: .92; }
-  25%  { transform: translateY(-5px)   rotate(-0.7deg)   scale(1.015); opacity: 1;   }
-  50%  { transform: translateY(-7px)   rotate(0deg)      scale(1.02);  opacity: .97; }
-  75%  { transform: translateY(-3px)   rotate(0.7deg)    scale(1.01);  opacity: 1;   }
-  100% { transform: translateY(0)      rotate(0deg)      scale(1);     opacity: .92; }
-}
-/* Смена слайда: содержимое приходит со сдвигом по горизонтали и лёгким
-   приближением. Прежний tx-in двигал всё снизу вверх — для листания вбок
-   это читалось как «страница дёрнулась», а не «перелистнулась». */
-@keyframes tx-slide-in {
-  from { opacity: 0; transform: translateX(26px) scale(.985); }
-  to   { opacity: 1; transform: translateX(0)    scale(1);    }
-}
-@keyframes tx-slide-back {
-  from { opacity: 0; transform: translateX(-26px) scale(.985); }
-  to   { opacity: 1; transform: translateX(0)     scale(1);    }
-}
-@keyframes tx-pulsedot{ 0%,100% { transform: scale(.7); opacity: .5; }
-                        50% { transform: scale(1); opacity: 1; } }
-
+.ui-scroll-pad { padding-bottom: calc(26px + var(--tx-safe-bottom)); }
+.no-scrollbar { scrollbar-width: none; }
+.no-scrollbar::-webkit-scrollbar { display: none; }
+@keyframes tx-fade-up { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: none; } }
+@keyframes tx-fade { from { opacity: 0; } to { opacity: 1; } }
+@keyframes tx-pop { from { opacity: 0; transform: scale(.975); } to { opacity: 1; transform: scale(1); } }
+@keyframes tx-pulse { 0%,100% { opacity: 1; transform: scale(1); } 50% { opacity: .5; transform: scale(.86); } }
+@keyframes tx-draw { from { stroke-dashoffset: var(--len); } to { stroke-dashoffset: 0; } }
+@keyframes tx-sheet { from { opacity: 0; transform: translateY(18px); } to { opacity: 1; transform: none; } }
+@keyframes tx-spin { to { transform: rotate(360deg); } }
+@keyframes tx-dome-spin { from { transform: rotateZ(0deg) scaleX(1); } 50% { transform: scaleX(.9); } to { transform: scaleX(1); } }
+@keyframes tx-twinkle { 0%,100% { opacity: .16; } 50% { opacity: .7; } }
+@keyframes tx-wave { 0%,100% { transform: translateY(0); } 50% { transform: translateY(-3px); } }
+@keyframes tx-breathe { 0%,100% { transform: scale(1); opacity: .80; } 50% { transform: scale(1.035); opacity: 1; } }
+@keyframes tx-logo-live { 0%,100% { transform: translateY(0); opacity: .94; } 50% { transform: translateY(-4px); opacity: 1; } }
+@keyframes tx-slide-in { from { opacity: 0; transform: translateX(18px); } to { opacity: 1; transform: none; } }
+@keyframes tx-slide-back { from { opacity: 0; transform: translateX(-18px); } to { opacity: 1; transform: none; } }
+@keyframes tx-pulsedot { 0%,100% { transform: scale(.72); opacity: .45; } 50% { transform: scale(1); opacity: 1; } }
 .tx-screen { animation: tx-fade-up var(--tx-slow) var(--tx-ease) both; }
-.tx-in     { animation: tx-fade-up var(--tx-mid) var(--tx-ease) both; }
-.tx-fade   { animation: tx-fade var(--tx-mid) var(--tx-ease) both; }
-.tx-pop    { animation: tx-pop var(--tx-mid) var(--tx-ease) both; }
-.tx-sheet  { animation: tx-sheet var(--tx-mid) var(--tx-ease) both; }
-.tx-dot    { animation: tx-pulse 2s ease-in-out infinite; }
-.tx-spin   { animation: tx-spin 1.1s linear infinite; }
-.tx-line   { stroke-dasharray: var(--len); animation: tx-draw .7s ease-out both; }
-.tx-dome    { transform-origin: 80px 70px; animation: tx-dome-spin 7s var(--tx-ease) infinite; }
-.tx-twinkle { animation: tx-twinkle 2.6s ease-in-out infinite; }
-.tx-wave    { animation: tx-wave 4.2s ease-in-out infinite; }
-.tx-breathe { animation: tx-breathe 2.4s var(--tx-ease) infinite; }
-.tx-pulse-dot { animation: tx-pulsedot 1s var(--tx-ease) infinite; }
-.tx-logo-live  { animation: tx-logo-live 6.5s cubic-bezier(.45,0,.25,1) infinite; }
-.tx-slide      { animation: tx-slide-in .52s cubic-bezier(.22,.9,.28,1) both; }
-.tx-slide-back { animation: tx-slide-back .52s cubic-bezier(.22,.9,.28,1) both; }
-
-/* Нажатие: лёгкое сжатие. Работает и на тач-устройствах. */
-.tap { transition: transform var(--tx-fast) var(--tx-ease),
-                     opacity var(--tx-fast) var(--tx-ease),
-                     background-color var(--tx-fast) var(--tx-ease),
-                     color var(--tx-fast) var(--tx-ease),
+.tx-in { animation: tx-fade-up var(--tx-mid) var(--tx-ease) both; }
+.tx-fade { animation: tx-fade var(--tx-mid) var(--tx-ease) both; }
+.tx-pop { animation: tx-pop var(--tx-mid) var(--tx-ease) both; }
+.tx-sheet { animation: tx-sheet var(--tx-mid) var(--tx-ease) both; }
+.tx-dot { animation: tx-pulse 2.2s ease-in-out infinite; }
+.tx-spin { animation: tx-spin 8s linear infinite; }
+.tx-line { stroke-dasharray: var(--len); animation: tx-draw .65s ease-out both; }
+.tx-dome { transform-origin: 80px 70px; animation: tx-dome-spin 8s var(--tx-ease) infinite; }
+.tx-twinkle { animation: tx-twinkle 3.2s ease-in-out infinite; }
+.tx-wave { animation: tx-wave 5s ease-in-out infinite; }
+.tx-breathe { animation: tx-breathe 3.4s var(--tx-ease) infinite; }
+.tx-pulse-dot { animation: tx-pulsedot 1.2s var(--tx-ease) infinite; }
+.tx-logo-live { animation: tx-logo-live 5.8s cubic-bezier(.45,0,.25,1) infinite; }
+.tx-slide { animation: tx-slide-in .42s var(--tx-ease) both; }
+.tx-slide-back { animation: tx-slide-back .42s var(--tx-ease) both; }
+.tap { transition: transform var(--tx-fast) var(--tx-ease), opacity var(--tx-fast) var(--tx-ease),
+                     background-color var(--tx-fast) var(--tx-ease), color var(--tx-fast) var(--tx-ease),
                      border-color var(--tx-fast) var(--tx-ease); }
-.tap:active { transform: scale(.975); opacity: .92; }
-button:not(:disabled):active { transform: scale(.985); }
-button:disabled { opacity: .32; }
-
+.tap:active { transform: scale(.985); opacity: .93; }
+button:not(:disabled):active { transform: scale(.988); }
+button:disabled { opacity: .30; }
 @media (prefers-reduced-motion: reduce) {
-  .tx-screen, .tx-in, .tx-fade, .tx-pop, .tx-sheet, .tx-dot, .tx-line, .tx-spin,
-  .tx-dome, .tx-twinkle, .tx-wave,
-  .tx-logo-live, .tx-slide, .tx-slide-back { animation: none !important; }
+  .tx-screen,.tx-in,.tx-fade,.tx-pop,.tx-sheet,.tx-dot,.tx-line,.tx-spin,.tx-dome,.tx-twinkle,
+  .tx-wave,.tx-logo-live,.tx-slide,.tx-slide-back { animation: none !important; }
 }
 `;
 
@@ -3970,127 +3852,40 @@ function Boot({ done }) {
   const total = BOOT_STEPS.length;
   const progress = clamp(done / total, 0, 1);
   const current = Math.min(Math.max(done, 0), total - 1);
-  const ACCENT = "#D9DCE6";
-  const ACCENT_SOFT = "#8B91A5";
-  const ACCENT_FAINT = "rgba(217,220,230,.14)";
-  const TRACK = "rgba(255,255,255,.07)";
-
   return (
-    <div className="w-full overflow-hidden flex flex-col items-center justify-center px-8 tx-fade relative"
-      style={{ height: "100dvh", backgroundColor: BG }}>
-
-      <div className="absolute inset-0 pointer-events-none">
-        <div className="absolute left-1/2 top-[18%] -translate-x-1/2 w-[300px] h-[300px] rounded-full tx-breathe"
-          style={{ background: "radial-gradient(circle, rgba(160,170,192,.08) 0%, rgba(160,170,192,.03) 38%, rgba(0,0,0,0) 74%)" }} />
-        <div className="absolute left-1/2 top-[18%] -translate-x-1/2 w-[348px] h-[348px] rounded-full tx-spin"
-          style={{ border: "1px solid rgba(255,255,255,.05)", opacity: .5 }} />
-        <div className="absolute left-1/2 top-[18%] -translate-x-1/2 w-[238px] h-[238px] rounded-full tx-spin"
-          style={{ border: "1px solid rgba(160,170,192,.12)", animationDirection: "reverse", animationDuration: "14s" }} />
-        <div className="absolute inset-x-0 top-[32%] h-px" style={{ backgroundColor: HAIR, opacity: .22 }} />
-        <div className="absolute inset-x-0 bottom-[24%] h-px" style={{ backgroundColor: HAIR, opacity: .16 }} />
-      </div>
-
-      <div className="relative z-10 w-full max-w-[330px] rounded-[28px] px-6 py-7 tx-pop"
-        style={{
-          background: "linear-gradient(180deg, rgba(16,17,22,.96) 0%, rgba(6,7,10,.98) 100%)",
-          border: `1px solid rgba(255,255,255,.09)`,
-          boxShadow: "0 24px 80px rgba(0,0,0,.5)",
-        }}>
-
-        <div className="flex items-center justify-between text-[10px] tracking-[0.34em]" style={{ color: FAINT }}>
-          <span>TRADE.EXE</span>
-          <span style={{ color: ACCENT_SOFT }}>{String(Math.round(progress * 100)).padStart(2, "0")}%</span>
+    <div className="w-full flex items-center justify-center px-8 tx-fade relative overflow-hidden"
+      style={{ height: "100dvh", backgroundColor: BG, color: TEXT }}>
+      <div className="absolute inset-0 pointer-events-none"
+        style={{ background: "radial-gradient(circle at 50% 38%, rgba(216,210,200,.055), transparent 34%)" }} />
+      <div className="relative z-10 w-full max-w-[300px]">
+        <div className="flex items-center justify-center">
+          <div className="w-[96px] h-[96px] rounded-[30px] flex items-center justify-center tx-logo-live"
+            style={{ ...CARD, background: "linear-gradient(180deg,#111114,#060608)" }}>
+            <Logo size={62} live />
+          </div>
         </div>
-
-        <div className="relative mt-5 mx-auto w-[148px] h-[148px]">
-          <svg width="148" height="148" viewBox="0 0 148 148" className="absolute inset-0">
-            <circle cx="74" cy="74" r="68" fill="none" stroke="rgba(255,255,255,.06)" strokeWidth="1.2" />
-            <circle cx="74" cy="74" r="56" fill="none" stroke={TRACK} strokeWidth="12" />
-            <circle cx="74" cy="74" r="56" fill="none" stroke={ACCENT} strokeWidth="12"
-              strokeLinecap="round" strokeDasharray={2 * Math.PI * 56}
-              strokeDashoffset={2 * Math.PI * 56 * (1 - progress)}
-              transform="rotate(-90 74 74)"
-              style={{ transition: "stroke-dashoffset 320ms var(--tx-ease)" }} />
-            {[0, 1, 2, 3].map((i) => {
-              const a = (-90 + i * 90) * Math.PI / 180;
+        <div className="text-center mt-7">
+          <div className="text-[24px] tracking-tight">trade.exe</div>
+          <div className="text-[10px] tracking-[0.14em] mt-2" style={{ color: FAINT }}>
+            ПОДГОТОВКА СРЕДЫ
+          </div>
+        </div>
+        <div className="mt-8">
+          <div className="flex justify-between text-[10px] mb-2" style={{ color: FAINT }}>
+            <span>{done >= total ? "готово" : BOOT_STEPS[current]?.label}</span>
+            <span className="font-mono">{Math.round(progress * 100)}%</span>
+          </div>
+          <div className="h-[3px] rounded-full overflow-hidden" style={{ backgroundColor: HAIR }}>
+            <div className="h-full rounded-full" style={{ width: `${progress * 100}%`, backgroundColor: ACCENT,
+              transition: "width 320ms var(--tx-ease)" }} />
+          </div>
+          <div className="grid grid-cols-4 gap-2 mt-4">
+            {BOOT_STEPS.map((s, i) => {
               const active = done > i;
-              return (
-                <circle key={i} cx={74 + Math.cos(a) * 68} cy={74 + Math.sin(a) * 68} r="2.8"
-                  fill={active ? ACCENT : "rgba(255,255,255,.08)"}
-                  style={{ transition: "fill var(--tx-mid) var(--tx-ease)" }} />
-              );
+              return <div key={s.key} className="h-[2px] rounded-full"
+                style={{ backgroundColor: active ? TEXT : HAIR, opacity: active ? .8 : 1 }} />;
             })}
-          </svg>
-
-          <div className="absolute inset-[22px] rounded-full flex items-center justify-center tx-logo-live"
-            style={{
-              background: "radial-gradient(circle at 50% 38%, rgba(18,20,27,1) 0%, rgba(6,7,10,1) 72%)",
-              border: "1px solid rgba(255,255,255,.08)",
-              boxShadow: "inset 0 0 0 1px rgba(255,255,255,.03)",
-            }}>
-            <Logo size={70} live />
           </div>
-        </div>
-
-        <div className="text-center mt-5">
-          <div className="text-[25px] tracking-tight" style={{ color: TEXT }}>trade.exe</div>
-          <div className="text-[11px] tracking-[0.28em] mt-2" style={{ color: ACCENT_SOFT }}>
-            ЗАГРУЗКА ТОРГОВОЙ СРЕДЫ
-          </div>
-          <div className="text-[12px] mt-3 leading-relaxed" style={{ color: DIM }}>
-            Инициализируем профиль, движок рынка и
-            визуальный интерфейс, чтобы первая сессия
-            запускалась плавно, без рывков.
-          </div>
-        </div>
-
-        <div className="mt-6 rounded-full p-1"
-          style={{ backgroundColor: "rgba(255,255,255,.03)", border: "1px solid rgba(255,255,255,.08)" }}>
-          <div className="h-1.5 rounded-full overflow-hidden" style={{ backgroundColor: TRACK }}>
-            <div style={{
-              width: `${progress * 100}%`,
-              height: "100%",
-              background: "linear-gradient(90deg, rgba(217,220,230,.82) 0%, rgba(139,145,165,.95) 100%)",
-              transition: "width 320ms var(--tx-ease)",
-            }} />
-          </div>
-        </div>
-
-        <div className="text-[11px] mt-3" style={{ color: done >= total ? TEXT : ACCENT_SOFT }}>
-          {done >= total ? "среда готова" : BOOT_STEPS[current]?.label}
-        </div>
-
-        <div className="w-full mt-4">
-          {BOOT_STEPS.map((s, i) => {
-            const state = done > i ? "done" : done === i ? "run" : "wait";
-            return (
-              <div key={s.key} className="flex items-center gap-3 py-2.5"
-                style={{ opacity: state === "wait" ? 0.34 : 1, transition: "opacity var(--tx-mid) var(--tx-ease)" }}>
-                <span className="w-6 text-[9px] tracking-[0.22em] shrink-0" style={{ color: FAINT }}>
-                  {String(i + 1).padStart(2, "0")}
-                </span>
-                <span className="w-3.5 h-3.5 rounded-full flex items-center justify-center shrink-0"
-                  style={{
-                    border: `1px solid ${state === "done" ? ACCENT : state === "run" ? TEXT : FAINT}`,
-                    backgroundColor: state === "done" ? ACCENT_FAINT : "transparent",
-                    transition: "background-color var(--tx-mid) var(--tx-ease), border-color var(--tx-mid) var(--tx-ease)",
-                  }}>
-                  {state === "done" && <Icon name="check" size={9} color={ACCENT} />}
-                  {state === "run" && (
-                    <span className="w-1.5 h-1.5 rounded-full tx-pulse-dot" style={{ backgroundColor: ACCENT }} />
-                  )}
-                </span>
-                <span className="text-[12px] flex-1"
-                  style={{ color: state === "done" ? TEXT : state === "run" ? TEXT : FAINT }}>
-                  {s.label}
-                </span>
-                <span className="text-[10px] tracking-[0.18em]"
-                  style={{ color: state === "done" ? ACCENT_SOFT : state === "run" ? ACCENT_SOFT : FAINT }}>
-                  {state === "done" ? "OK" : state === "run" ? "RUN" : "···"}
-                </span>
-              </div>
-            );
-          })}
         </div>
       </div>
     </div>
@@ -4151,7 +3946,7 @@ function Onboarding({ onSignIn, onSignUp }) {
           <div key="s0" className={`flex flex-col items-center ${anim}`}>
             <Logo size={112} live />
             <div className="text-[30px] tracking-tight mt-5">trade.exe</div>
-            <div className="text-[12px] tracking-[0.35em] text-center mt-10 leading-loose"
+            <div className="text-[12px] tracking-[0.19em] text-center mt-10 leading-loose"
               style={{ color: DIM }}>
               ЗАКРЫТЫЙ РЫНОК<br />ДЛЯ ПРАКТИКИ
             </div>
@@ -4169,7 +3964,7 @@ function Onboarding({ onSignIn, onSignUp }) {
                   style={{ borderColor: HAIR, ...stagger(i + 1) }}>
                   <div className="shrink-0 mt-0.5"><FeatureIcon name={f.icon} /></div>
                   <div className="min-w-0">
-                    <div className="text-[13px] tracking-[0.2em] font-semibold">{f.title}</div>
+                    <div className="text-[13px] tracking-[0.13em] font-semibold">{f.title}</div>
                     <div className="text-[13px] mt-1.5 leading-snug" style={{ color: DIM }}>
                       {f.text}
                     </div>
@@ -4205,12 +4000,12 @@ function Onboarding({ onSignIn, onSignUp }) {
         </div>
 
         <button onClick={() => (last ? onSignIn() : go(slide + 1))}
-          className="w-full rounded-2xl py-5 text-[14px] tracking-[0.25em] font-bold tap"
+          className="w-full rounded-2xl py-5 text-[14px] tracking-[0.10em] font-bold tap"
           style={btnSoft(true)}>
           {last ? "ВОЙТИ" : "ДАЛЕЕ"}
         </button>
         <button onClick={last ? onSignUp : () => onSignIn()}
-          className="w-full py-4 text-[12px] tracking-[0.25em] tap" style={{ color: DIM }}>
+          className="w-full py-4 text-[12px] tracking-[0.10em] tap" style={{ color: DIM }}>
           {last ? "СОЗДАТЬ АККАУНТ" : "ПРОПУСТИТЬ"}
         </button>
       </div>
@@ -4223,9 +4018,9 @@ function Field({ label, value, onChange, placeholder, secret, type = "text" }) {
   const [shown, setShown] = useState(false);
   return (
     <div className="mb-4 tx-in">
-      <div className="text-[10px] tracking-[0.2em] mb-2" style={{ color: FAINT }}>{label}</div>
+      <div className="text-[10px] tracking-[0.13em] mb-2" style={{ color: FAINT }}>{label}</div>
       <div className="flex items-center rounded-2xl px-4"
-        style={{ backgroundColor: SURFACE, border: `1px solid ${HAIR}` }}>
+        style={CARD}>
         <input value={value} onChange={(e) => onChange(e.target.value)}
           placeholder={placeholder} type={secret && !shown ? "password" : type}
           autoCapitalize="none" autoCorrect="off" spellCheck="false"
@@ -4280,10 +4075,10 @@ function AuthScreen({ mode, onMode, onBack, onDone }) {
 
   const tab = (key, label) => (
     <button onClick={() => { onMode(key); setError(null); }}
-      className="flex-1 rounded-xl py-3.5 text-[12px] tracking-[0.2em] font-semibold tap"
+      className="flex-1 rounded-xl py-3.5 text-[12px] tracking-[0.13em] font-semibold tap"
       style={{ backgroundColor: mode === key ? RAISED : "transparent",
         color: mode === key ? TEXT : FAINT,
-        border: `1px solid ${mode === key ? "#3A3A40" : "transparent"}` }}>
+        border: `1px solid ${mode === key ? "#35343A" : "transparent"}` }}>
       {label}
     </button>
   );
@@ -4295,7 +4090,7 @@ function AuthScreen({ mode, onMode, onBack, onDone }) {
         <BackButton onClick={onBack} />
 
         <div className="text-center mt-6">
-          <div className="text-[13px] tracking-[0.3em]" style={{ color: DIM }}>
+          <div className="text-[13px] tracking-[0.11em]" style={{ color: DIM }}>
             {signup ? "СОЗДАЙТЕ АККАУНТ" : "ДОБРО ПОЖАЛОВАТЬ"}
           </div>
           <div className="text-[14px] mt-2" style={{ color: DIM }}>
@@ -4304,7 +4099,7 @@ function AuthScreen({ mode, onMode, onBack, onDone }) {
         </div>
 
         <div className="flex gap-1 p-1 rounded-2xl mt-7 mb-7"
-          style={{ backgroundColor: SURFACE, border: `1px solid ${HAIR}` }}>
+          style={CARD}>
           {tab("signin", "ВОЙТИ")}
           {tab("signup", "РЕГИСТРАЦИЯ")}
         </div>
@@ -4339,7 +4134,7 @@ function AuthScreen({ mode, onMode, onBack, onDone }) {
         )}
 
         <button onClick={submit} disabled={busy}
-          className="w-full rounded-2xl py-5 text-[14px] tracking-[0.25em] font-bold disabled:opacity-40 tap"
+          className="w-full rounded-2xl min-h-[54px] py-4 text-[14px] tracking-[0.08em] font-semibold disabled:opacity-40 tap"
           style={btnSoft(true)}>
           {busy ? "ПОДОЖДИТЕ…" : signup ? "СОЗДАТЬ АККАУНТ" : "ВОЙТИ"}
         </button>
@@ -4348,7 +4143,7 @@ function AuthScreen({ mode, onMode, onBack, onDone }) {
           <>
             <div className="flex items-center gap-4 my-6">
               <div className="flex-1 h-px" style={{ backgroundColor: HAIR }} />
-              <span className="text-[11px] tracking-[0.2em]" style={{ color: FAINT }}>ИЛИ</span>
+              <span className="text-[11px] tracking-[0.13em]" style={{ color: FAINT }}>ИЛИ</span>
               <div className="flex-1 h-px" style={{ backgroundColor: HAIR }} />
             </div>
             <div className="grid grid-cols-2 gap-3">
@@ -4468,13 +4263,12 @@ const Icon = ({ name, size = 16, color = TEXT }) => {
 /** Круглая кнопка действий в шапке кошелька. */
 const RoundButton = ({ name, onClick, dot }) => (
   <button onClick={onClick}
-    className="relative w-12 h-12 rounded-full flex items-center justify-center shrink-0 tap"
-    style={{ backgroundImage: "linear-gradient(180deg,#181819,#0D0D0E)",
-      border: "1px solid rgba(255,255,255,0.09)" }}>
-    <Icon name={name} size={19} color="#EDEDF0" />
+    className="relative w-11 h-11 rounded-[15px] flex items-center justify-center shrink-0 tap"
+    style={CARD_SOFT}>
+    <Icon name={name} size={18} color={TEXT} />
     {dot && (
       <span className="absolute rounded-full"
-        style={{ width: 7, height: 7, top: 3, right: 3, backgroundColor: ACCENT,
+        style={{ width: 6, height: 6, top: 5, right: 5, backgroundColor: ACCENT,
           border: `2px solid ${BG}` }} />
     )}
   </button>
@@ -4487,11 +4281,10 @@ const RoundButton = ({ name, onClick, dot }) => (
  */
 const WalletAction = ({ icon, label, onClick }) => (
   <button onClick={onClick}
-    className="flex flex-col items-center justify-center gap-2 rounded-[20px] tap ui-hit"
-    style={{ height: 82, backgroundImage: "linear-gradient(180deg,#1A1A1C,#0E0E10)",
-      border: "1px solid rgba(255,255,255,0.08)" }}>
-    <Icon name={icon} size={21} color="#EDEDF0" />
-    <span className="text-[12.5px]" style={{ color: "#EDEDF0" }}>{label}</span>
+    className="flex items-center justify-center gap-2.5 rounded-[16px] tap ui-hit px-2"
+    style={{ height: 58, ...CARD_SOFT }}>
+    <Icon name={icon} size={18} color={TEXT} />
+    <span className="text-[12px] font-medium truncate" style={{ color: TEXT }}>{label}</span>
   </button>
 );
 
@@ -4673,10 +4466,10 @@ function ProfileScreen({ profile, account, onClose, onSettings }) {
   });
   const maxB = Math.max(1, ...buckets);
 
-  const card = { backgroundColor: SURFACE, border: `1px solid ${HAIR}` };
+  const card = CARD;
   const Cell = ({ label, value, color = TEXT }) => (
     <div className="min-w-0">
-      <div className="text-[9px] tracking-[0.15em] mb-1.5 truncate" style={{ color: FAINT }}>
+      <div className="text-[9px] tracking-[0.10em] mb-1.5 truncate" style={{ color: FAINT }}>
         {label}
       </div>
       <div className="text-[17px] font-mono truncate" style={{ color }}>{value}</div>
@@ -4690,7 +4483,7 @@ function ProfileScreen({ profile, account, onClose, onSettings }) {
 
         <div className="flex items-center justify-between">
           <BackButton onClick={onClose} />
-          <div className="text-[10px] tracking-[0.3em]" style={{ color: DIM }}>ПРОФИЛЬ</div>
+          <div className="text-[10px] tracking-[0.11em]" style={{ color: DIM }}>ПРОФИЛЬ</div>
           <button onClick={onSettings}
             className="w-11 h-11 rounded-xl flex items-center justify-center tap"
             style={{ backgroundColor: RAISED, border: `1px solid ${HAIR}` }}>
@@ -4751,7 +4544,7 @@ function ProfileScreen({ profile, account, onClose, onSettings }) {
                 color={grossLoss < 0 ? SHORT : TEXT} />
             </div>
 
-            <div className="text-[10px] tracking-[0.3em] mt-7 mb-2.5" style={{ color: FAINT }}>
+            <div className="text-[10px] tracking-[0.11em] mt-7 mb-2.5" style={{ color: FAINT }}>
               РАСПРЕДЕЛЕНИЕ МЕСТ
             </div>
             <div className="rounded-2xl px-4 py-4 tx-in" style={{ ...card, ...stagger(2) }}>
@@ -4771,7 +4564,7 @@ function ProfileScreen({ profile, account, onClose, onSettings }) {
               ))}
             </div>
 
-            <div className="text-[10px] tracking-[0.3em] mt-7 mb-2.5" style={{ color: FAINT }}>
+            <div className="text-[10px] tracking-[0.11em] mt-7 mb-2.5" style={{ color: FAINT }}>
               ВСЕ СЕССИИ
             </div>
             <div className="flex flex-col gap-2">
@@ -4883,73 +4676,49 @@ function ModeArt({ kind }) {
 /** Карточка выбора режима. */
 function ModeCard({ kind, title, text, cta, primary, onClick, disabled }) {
   return (
-    <div className="rounded-2xl p-3.5 flex flex-col flex-1 min-w-0"
-      style={{ backgroundColor: SURFACE, border: `1px solid ${HAIR}` }}>
-      <div className="text-[11px] tracking-[0.18em] font-semibold h-[16px] leading-4 truncate">
-        {title}
+    <button onClick={onClick} disabled={disabled}
+      className="w-full rounded-[18px] p-3 text-left tap disabled:opacity-35 flex items-center gap-3"
+      style={CARD}>
+      <div className="w-[88px] h-[64px] shrink-0 rounded-[14px] overflow-hidden flex items-center"
+        style={{ backgroundColor: "#050506", border: `1px solid ${HAIR}` }}>
+        <div className="w-full -my-4 scale-[.82]"><ModeArt kind={kind} /></div>
       </div>
-      <div className="my-2.5 overflow-hidden rounded-xl"
-        style={{ backgroundColor: "#08080A" }}>
-        <ModeArt kind={kind} />
+      <div className="flex-1 min-w-0">
+        <div className="flex items-center gap-2">
+          <div className="text-[12px] font-semibold truncate">{title}</div>
+          {primary && <span className="text-[8px] px-1.5 py-0.5 rounded-full ui-chip shrink-0">MAIN</span>}
+        </div>
+        <div className="text-[11px] leading-snug mt-1 line-clamp-2" style={{ color: DIM }}>{text}</div>
+        <div className="text-[9px] mt-1.5 tracking-[0.08em]" style={{ color: FAINT }}>{cta}</div>
       </div>
-      {/* Тексты разной длины раньше сдвигали кнопки на разную высоту.
-          Фиксированные три строки и прижатая книзу кнопка выравнивают
-          карточки независимо от подписи. */}
-      <div className="text-[11px] leading-snug h-[48px] overflow-hidden" style={{ color: DIM }}>
-        {text}
-      </div>
-      <button onClick={onClick} disabled={disabled}
-        className="w-full rounded-xl py-3 mt-auto text-[11px] tracking-[0.15em] font-bold tap disabled:opacity-45"
-        style={primary
-          ? btnSoft(true)
-          : btnSoft(false)}>
-        {cta}
-      </button>
-    </div>
+      <Icon name="chevron" size={15} color={FAINT} />
+    </button>
   );
 }
 
 function FreeMarketMiniCard({ onClick }) {
   const fm = FREE_MARKET;
   return (
-    <button onClick={onClick}
-      className="w-full rounded-[26px] p-3.5 text-left tap"
-      style={{ backgroundColor: SURFACE, border: `1px solid ${HAIR}` }}>
-      <div className="flex items-start justify-between gap-3">
+    <button onClick={onClick} className="w-full rounded-[20px] p-4 text-left tap" style={CARD}>
+      <div className="flex items-center gap-4">
         <div className="min-w-0 flex-1">
-          <div className="flex items-center gap-2 flex-wrap">
-            <div className="text-[10px] tracking-[0.22em] leading-none" style={{ color: FAINT }}>
-              СВОБОДНЫЙ РЫНОК
-            </div>
-            <span className="text-[9px] px-2 py-1 rounded-full"
-              style={{ color: ACCENT, backgroundColor: RAISED, border: `1px solid ${HAIR}` }}>LIVE</span>
+          <div className="flex items-center gap-2">
+            <span className="text-[10px] tracking-[0.12em]" style={{ color: FAINT }}>СВОБОДНЫЙ РЫНОК</span>
+            <span className="w-1.5 h-1.5 rounded-full" style={{ backgroundColor: LONG }} />
           </div>
-          <div className="text-[20px] leading-none mt-3" style={{ color: TEXT }}>всегда открыт</div>
-          <div className="text-[11px] leading-snug mt-2.5 max-w-[240px]" style={{ color: DIM }}>
-            {fm.botCount.toLocaleString("ru-RU")} ботов с разными балансами и стратегиями. Войти можно в любой момент.
+          <div className="text-[19px] leading-tight mt-2">Всегда открыт</div>
+          <div className="text-[11px] leading-snug mt-1.5" style={{ color: DIM }}>
+            {fm.botCount.toLocaleString("ru-RU")} автономных участников · вход {fmt(fm.minCapital,0)}–{fmt(fm.maxCapital,0)}
           </div>
         </div>
-
-        <div className="w-[132px] shrink-0 rounded-[20px] overflow-hidden"
-          style={{ backgroundColor: "#08080A", border: `1px solid ${HAIR}` }}>
-          <ModeArt kind="free" />
+        <div className="w-[94px] h-[70px] shrink-0 rounded-[14px] overflow-hidden flex items-center"
+          style={{ backgroundColor: "#050506", border: `1px solid ${HAIR}` }}>
+          <div className="w-full -my-3 scale-[.82]"><ModeArt kind="free" /></div>
         </div>
       </div>
-
-      <div className="grid grid-cols-3 gap-2 mt-3.5 pt-3"
-        style={{ borderTop: `1px solid ${HAIR}` }}>
-        <div>
-          <div className="text-[8px] tracking-[0.16em]" style={{ color: FAINT }}>УЧАСТНИКИ</div>
-          <div className="text-[13px] font-mono mt-1">{fm.botCount.toLocaleString("ru-RU")} BOT</div>
-        </div>
-        <div>
-          <div className="text-[8px] tracking-[0.16em]" style={{ color: FAINT }}>ВХОД</div>
-          <div className="text-[13px] font-mono mt-1">{fmt(fm.minCapital, 0)}–{fmt(fm.maxCapital, 0)}</div>
-        </div>
-        <div>
-          <div className="text-[8px] tracking-[0.16em]" style={{ color: FAINT }}>РЕЖИМ</div>
-          <div className="text-[13px] font-mono mt-1">24/7</div>
-        </div>
+      <div className="flex items-center justify-between mt-3 pt-3" style={{ borderTop: `1px solid ${HAIR}` }}>
+        <span className="text-[10px]" style={{ color: FAINT }}>24 / 7 · без фиксированной сессии</span>
+        <span className="text-[11px] font-medium">ОТКРЫТЬ →</span>
       </div>
     </button>
   );
@@ -4989,12 +4758,11 @@ function TrophyScreen({ profile, onBack, onRedeem }) {
       <div className="max-w-md w-full mx-auto flex-1 min-h-0 overflow-y-auto no-scrollbar px-5 pb-6 ui-safe-top ui-scroll-pad">
         <div className="flex items-center gap-4">
           <BackButton onClick={onBack} />
-          <div className="text-[11px] tracking-[0.25em]" style={{ color: DIM }}>ТРОФЕИ</div>
+          <div className="text-[11px] tracking-[0.10em]" style={{ color: DIM }}>ТРОФЕИ</div>
         </div>
 
         <div className="rounded-2xl px-4 py-5 mt-6 flex items-center gap-4"
-          style={{ backgroundImage: "linear-gradient(180deg,#141416,#0B0B0C)",
-            border: "1px solid rgba(255,255,255,0.07)" }}>
+          style={CARD}>
           <span className="w-14 h-14 rounded-2xl flex items-center justify-center shrink-0"
             style={{ backgroundImage: "linear-gradient(180deg,#211C10,#141210)",
               border: `1px solid ${shade(GOLD, 0.45)}` }}>
@@ -5016,7 +4784,7 @@ function TrophyScreen({ profile, onBack, onRedeem }) {
             : " Серия прерывается на первой убыточной сессии."}
         </div>
 
-        <div className="text-[10px] tracking-[0.25em] mt-7 mb-2.5" style={{ color: FAINT }}>
+        <div className="text-[10px] tracking-[0.10em] mt-7 mb-2.5" style={{ color: FAINT }}>
           ОБМЕН НА БОНУС
         </div>
         <div className="flex flex-col gap-2.5">
@@ -5031,7 +4799,7 @@ function TrophyScreen({ profile, onBack, onRedeem }) {
                 className="flex items-center gap-3.5 rounded-2xl px-4 py-3.5 text-left tap disabled:opacity-35"
                 style={btnSoft(false)}>
                 <span className="w-10 h-10 rounded-xl flex items-center justify-center shrink-0"
-                  style={{ backgroundColor: "#0C0C0E",
+                  style={{ backgroundColor: "#060608",
                     border: `1px solid ${can ? shade(GOLD, 0.5) : "rgba(255,255,255,0.07)"}` }}>
                   <Icon name="trophy" size={17} color={can ? GOLD : FAINT} />
                 </span>
@@ -5044,7 +4812,7 @@ function TrophyScreen({ profile, onBack, onRedeem }) {
                     {" · "}{fmt(t.bonus / t.cups, t.bonus / t.cups % 1 ? 2 : 0)} за кубок
                   </span>
                 </span>
-                <span className="text-[12px] shrink-0 tracking-[0.15em]"
+                <span className="text-[12px] shrink-0 tracking-[0.10em]"
                   style={{ color: can ? TEXT : FAINT }}>
                   {can ? "ОБМЕНЯТЬ" : "НЕ ХВАТАЕТ"}
                 </span>
@@ -5080,21 +4848,21 @@ function DepositScreen({ profile, onBack, onDemoTopUp }) {
       <div className="max-w-md w-full mx-auto flex-1 min-h-0 overflow-y-auto no-scrollbar px-5 pb-6 ui-safe-top ui-scroll-pad">
         <div className="flex items-center gap-4">
           <BackButton onClick={onBack} />
-          <div className="text-[11px] tracking-[0.25em]" style={{ color: DIM }}>
+          <div className="text-[11px] tracking-[0.10em]" style={{ color: DIM }}>
             ПОПОЛНЕНИЕ БАЛАНСА
           </div>
         </div>
 
-        <div className="text-[10px] tracking-[0.25em] mt-6" style={{ color: FAINT }}>
+        <div className="text-[10px] tracking-[0.10em] mt-6" style={{ color: FAINT }}>
           ТЕКУЩИЙ БАЛАНС
         </div>
         <div className="text-[30px] font-mono leading-none mt-2 tx-pop">{fmt(profile.wallet, 0)}</div>
 
-        <div className="text-[10px] tracking-[0.25em] mt-6 mb-2" style={{ color: FAINT }}>
+        <div className="text-[10px] tracking-[0.10em] mt-6 mb-2" style={{ color: FAINT }}>
           СУММА ПОПОЛНЕНИЯ
         </div>
         <div className="ui-field flex items-center rounded-2xl px-4"
-          style={{ backgroundColor: SURFACE, border: `1px solid ${HAIR}` }}>
+          style={CARD}>
           <span className="text-[16px] font-mono" style={{ color: DIM }}>$</span>
           <input value={amount} onChange={(e) => setAmount(e.target.value)}
             inputMode="decimal" autoComplete="off" spellCheck="false"
@@ -5106,26 +4874,26 @@ function DepositScreen({ profile, onBack, onDemoTopUp }) {
           {[50, 100, 250, 500].map((v) => (
             <button key={v} onClick={() => setAmount(String(v))}
               className="rounded-xl min-h-[44px] px-2 text-[12px] font-mono font-semibold tap"
-              style={{ backgroundColor: String(v) === amount ? TEXT : RAISED,
-                color: String(v) === amount ? BG : TEXT,
-                border: `1px solid ${String(v) === amount ? TEXT : HAIR}` }}>
+              style={{ background: String(v) === amount ? "linear-gradient(180deg,#1B1B1F,#101013)" : CARD_BG_SOFT,
+                color: String(v) === amount ? TEXT : DIM,
+                border: `1px solid ${String(v) === amount ? "#3A393D" : HAIR}` }}>
               ${v}
             </button>
           ))}
         </div>
 
-        <div className="text-[10px] tracking-[0.25em] mt-7 mb-2" style={{ color: FAINT }}>
+        <div className="text-[10px] tracking-[0.10em] mt-7 mb-2" style={{ color: FAINT }}>
           СПОСОБ ОПЛАТЫ
         </div>
         <div className="rounded-2xl overflow-hidden"
-          style={{ backgroundColor: SURFACE, border: `1px solid ${HAIR}` }}>
+          style={CARD}>
           {PAY_METHODS.map((m, i) => (
             <button key={m.id} onClick={() => setMethod(m.id)}
               className={`w-full flex items-center gap-3 px-4 py-3.5 text-left tap ${i ? "border-t" : ""}`}
               style={{ borderColor: HAIR,
                 backgroundColor: method === m.id ? RAISED : "transparent" }}>
               <span className="w-8 h-8 rounded-lg flex items-center justify-center shrink-0"
-                style={{ backgroundColor: "#0E0E11" }}>
+                style={{ backgroundColor: "#0D0D10" }}>
                 <Icon name={m.icon} size={16} color={m.tint} />
               </span>
               <span className="flex-1 min-w-0">
@@ -5154,12 +4922,12 @@ function DepositScreen({ profile, onBack, onDemoTopUp }) {
       <div className="max-w-md w-full mx-auto px-5 pt-3 shrink-0 ui-bottom-surface ui-safe-bottom">
         <button disabled={!ok}
           onClick={() => setNote("Приём оплат ещё не подключён. Пока баланс можно пополнить только в демо-режиме.")}
-          className="w-full rounded-2xl py-4 text-[13px] tracking-[0.25em] font-bold tap disabled:opacity-40"
+          className="w-full rounded-2xl py-4 text-[13px] tracking-[0.10em] font-bold tap disabled:opacity-40"
           style={btnSoft(true)}>
           ПОПОЛНИТЬ
         </button>
         <button disabled={!ok} onClick={() => { onDemoTopUp(value); onBack(); }}
-          className="w-full py-3 mt-2 text-[11px] tracking-[0.2em] tap disabled:opacity-40"
+          className="w-full py-3 mt-2 text-[11px] tracking-[0.13em] tap disabled:opacity-40"
           style={{ color: DIM }}>
           НАЧИСЛИТЬ {fmt(value, 0)} В ДЕМО-РЕЖИМЕ
         </button>
@@ -5191,19 +4959,19 @@ function WithdrawScreen({ profile, onBack }) {
       <div className="max-w-md w-full mx-auto flex-1 min-h-0 overflow-y-auto no-scrollbar px-5 pb-6 ui-safe-top ui-scroll-pad">
         <div className="flex items-center gap-4">
           <BackButton onClick={onBack} />
-          <div className="text-[11px] tracking-[0.25em]" style={{ color: DIM }}>ВЫВОД СРЕДСТВ</div>
+          <div className="text-[11px] tracking-[0.10em]" style={{ color: DIM }}>ВЫВОД СРЕДСТВ</div>
         </div>
 
-        <div className="text-[10px] tracking-[0.25em] mt-6" style={{ color: FAINT }}>
+        <div className="text-[10px] tracking-[0.10em] mt-6" style={{ color: FAINT }}>
           ДОСТУПНО К ВЫВОДУ
         </div>
         <div className="text-[30px] font-mono leading-none mt-2 tx-pop">{fmt(profile.wallet, 0)}</div>
 
-        <div className="text-[10px] tracking-[0.25em] mt-6 mb-2" style={{ color: FAINT }}>
+        <div className="text-[10px] tracking-[0.10em] mt-6 mb-2" style={{ color: FAINT }}>
           СУММА ВЫВОДА
         </div>
         <div className="ui-field flex items-center rounded-2xl px-4"
-          style={{ backgroundColor: SURFACE, border: `1px solid ${HAIR}` }}>
+          style={CARD}>
           <span className="text-[16px] font-mono" style={{ color: DIM }}>$</span>
           <input value={amount} onChange={(e) => setAmount(e.target.value)}
             placeholder="0" inputMode="decimal"
@@ -5225,18 +4993,18 @@ function WithdrawScreen({ profile, onBack }) {
           ))}
         </div>
 
-        <div className="text-[10px] tracking-[0.25em] mt-7 mb-2" style={{ color: FAINT }}>
+        <div className="text-[10px] tracking-[0.10em] mt-7 mb-2" style={{ color: FAINT }}>
           КУДА ВЫВЕСТИ
         </div>
         <div className="rounded-2xl overflow-hidden"
-          style={{ backgroundColor: SURFACE, border: `1px solid ${HAIR}` }}>
+          style={CARD}>
           {PAY_METHODS.filter((m) => m.id !== "other").map((m, i) => (
             <button key={m.id} onClick={() => setMethod(m.id)}
               className={`w-full flex items-center gap-3 px-4 py-3.5 text-left tap ${i ? "border-t" : ""}`}
               style={{ borderColor: HAIR,
                 backgroundColor: method === m.id ? RAISED : "transparent" }}>
               <span className="w-8 h-8 rounded-lg flex items-center justify-center shrink-0"
-                style={{ backgroundColor: "#0E0E11" }}>
+                style={{ backgroundColor: "#0D0D10" }}>
                 <Icon name={m.icon} size={16} color={m.tint} />
               </span>
               <span className="flex-1 min-w-0">
@@ -5265,7 +5033,7 @@ function WithdrawScreen({ profile, onBack }) {
       <div className="max-w-md w-full mx-auto px-5 pt-3 shrink-0 ui-bottom-surface ui-safe-bottom">
         <button disabled={!enough}
           onClick={() => setNote("Выплаты ещё не подключены. Баланс остаётся на месте.")}
-          className="w-full rounded-2xl py-4 text-[13px] tracking-[0.25em] font-bold tap disabled:opacity-40"
+          className="w-full rounded-2xl py-4 text-[13px] tracking-[0.10em] font-bold tap disabled:opacity-40"
           style={btnSoft(true)}>
           ВЫВЕСТИ
         </button>
@@ -5305,58 +5073,48 @@ function RankingTab({ profile, period, onPeriod }) {
 
   return (
     <div className="px-5 ui-safe-top">
-      <div className="text-[11px] tracking-[0.25em] text-center" style={{ color: DIM }}>
+      <div className="text-[11px] tracking-[0.10em] text-center" style={{ color: DIM }}>
         РЕЙТИНГ ИГРОКОВ
       </div>
 
       <div className="flex gap-1 p-1 rounded-2xl mt-5"
-        style={{ backgroundColor: SURFACE, border: `1px solid ${HAIR}` }}>
+        style={CARD}>
         {["ДЕНЬ", "НЕДЕЛЯ", "МЕСЯЦ", "ВСЁ ВРЕМЯ"].map((p) => (
           <button key={p} onClick={() => onPeriod(p)}
             className="flex-1 rounded-xl py-2.5 text-[10px] tracking-[0.12em] font-semibold tap"
             style={{ backgroundColor: p === period ? RAISED : "transparent",
               color: p === period ? TEXT : FAINT,
-              border: `1px solid ${p === period ? "#3A3A40" : "transparent"}` }}>
+              border: `1px solid ${p === period ? "#35343A" : "transparent"}` }}>
             {p}
           </button>
         ))}
       </div>
 
-      <div className="flex items-end gap-2 mt-5">
+      <div className="grid grid-cols-3 gap-2 mt-5">
         {podium.map((r, i) => {
           const first = i === 1;
           return (
-            <div key={r.name}
-              className="flex-1 min-w-0 rounded-2xl px-2 py-3 text-center tx-in"
-              style={{ backgroundColor: first ? RAISED : SURFACE,
-                border: `1px solid ${first ? "#3A3A40" : HAIR}`,
-                marginBottom: first ? 0 : 8, ...stagger(i) }}>
-              {first && (
-                <div className="flex justify-center mb-1">
-                  <Icon name="trophy" size={14} color={GOLD} />
-                </div>
-              )}
-              <div className="text-[15px] font-mono">{r.place}</div>
-              <div className="w-7 h-7 rounded-full mx-auto my-2"
-                style={{ backgroundColor: first ? TEXT : "#26262B" }} />
-              <div className="text-[11px] truncate" style={{ color: r.me ? TEXT : DIM }}>
-                {r.name}
+            <div key={r.name} className="min-w-0 rounded-[18px] px-3 py-3.5 tx-in"
+              style={{ ...(first ? CARD : CARD_SOFT), ...stagger(i) }}>
+              <div className="flex items-center justify-between">
+                <span className="text-[18px] font-mono" style={{ color: first ? TEXT : FAINT }}>{String(r.place).padStart(2, "0")}</span>
+                {first && <Icon name="trophy" size={13} color={GOLD} />}
               </div>
-              <div className="text-[11px] font-mono mt-0.5"
-                style={{ color: r.pnl >= 0 ? LONG : SHORT }}>{fmtSigned(r.pnl, 0)}</div>
+              <div className="text-[11px] truncate mt-5" style={{ color: r.me ? TEXT : DIM }}>{r.name}</div>
+              <div className="text-[12px] font-mono mt-1" style={{ color: r.pnl >= 0 ? LONG : SHORT }}>{fmtSigned(r.pnl, 0)}</div>
             </div>
           );
         })}
       </div>
 
-      <div className="flex items-center px-4 mt-6 mb-1 text-[9px] tracking-[0.15em]"
+      <div className="flex items-center px-4 mt-6 mb-1 text-[9px] tracking-[0.10em]"
         style={{ color: FAINT }}>
         <span className="w-7">#</span>
         <span className="flex-1">ИГРОК</span>
         <span>РЕЗУЛЬТАТ</span>
       </div>
       <div className="rounded-2xl overflow-hidden"
-        style={{ backgroundColor: SURFACE, border: `1px solid ${HAIR}` }}>
+        style={CARD}>
         {rows.slice(3).map((r, i) => (
           <div key={r.name}
             className={`flex items-center px-4 py-3 ${i ? "border-t" : ""}`}
@@ -5381,100 +5139,67 @@ function RankingTab({ profile, period, onPeriod }) {
 /* --------------------------------- РЫНКИ --------------------------------- */
 function MarketsTab({ onPlay, onFree }) {
   const m = CONFIG.market;
-  const row = (label, value) => (
-    <div className="flex justify-between py-2 text-[12px]" style={{ borderColor: HAIR }}>
-      <span style={{ color: DIM }}>{label}</span>
-      <span className="font-mono">{value}</span>
-    </div>
+  const MarketItem = ({ kind, title, sub, status, rows, note, onClick, disabled }) => (
+    <button onClick={onClick} disabled={disabled}
+      className="w-full rounded-[20px] p-4 text-left tap disabled:opacity-35 tx-in"
+      style={CARD}>
+      <div className="flex items-start gap-3.5">
+        <div className="flex-1 min-w-0">
+          <div className="flex items-center gap-2 min-w-0">
+            <div className="text-[16px] font-mono truncate">{title}</div>
+            {status && <span className="text-[8px] px-2 py-1 rounded-full ui-chip shrink-0">{status}</span>}
+          </div>
+          <div className="text-[11px] mt-1" style={{ color: DIM }}>{sub}</div>
+          <div className="flex flex-wrap gap-x-3 gap-y-1 mt-3">
+            {rows.map(([k, v]) => (
+              <span key={k} className="text-[10px]" style={{ color: FAINT }}>
+                {k} <span className="font-mono" style={{ color: TEXT }}>{v}</span>
+              </span>
+            ))}
+          </div>
+          {note && <div className="text-[10px] leading-snug mt-2.5" style={{ color: FAINT }}>{note}</div>}
+        </div>
+        <div className="w-[88px] h-[68px] shrink-0 rounded-[14px] overflow-hidden flex items-center"
+          style={{ backgroundColor: "#050506", border: `1px solid ${HAIR}` }}>
+          <div className="w-full -my-4 scale-[.82]"><ModeArt kind={kind} /></div>
+        </div>
+      </div>
+      <div className="flex items-center justify-between mt-3 pt-3" style={{ borderTop: `1px solid ${HAIR}` }}>
+        <span className="text-[10px]" style={{ color: DIM }}>{disabled ? "недоступно сейчас" : "открыть рынок"}</span>
+        <Icon name="chevron" size={15} color={disabled ? FAINT : TEXT} />
+      </div>
+    </button>
   );
+
   return (
-    <div className="px-5 ui-safe-top">
-      <div className="text-[11px] tracking-[0.25em] text-center" style={{ color: DIM }}>
-        ДОСТУПНЫЕ РЫНКИ
+    <div className="px-5 ui-safe-top pb-6">
+      <div className="mb-5">
+        <div className="text-[22px] tracking-tight">Рынки</div>
+        <div className="text-[11px] mt-1.5" style={{ color: DIM }}>
+          Разные режимы одной рыночной модели.
+        </div>
       </div>
 
-      <div className="rounded-2xl p-4 mt-5 tx-in"
-        style={{ backgroundColor: SURFACE, border: `1px solid ${HAIR}`, ...stagger(0) }}>
-        <div className="flex items-start justify-between gap-3">
-          <div>
-            <div className="text-[17px] font-mono">{m.assetSymbol}</div>
-            <div className="text-[11px] mt-1" style={{ color: DIM }}>закрытый рынок · практика</div>
-          </div>
-        </div>
-        <div className="my-3 rounded-xl overflow-hidden" style={{ backgroundColor: "#08080A" }}>
-          <ModeArt kind="offline" />
-        </div>
-        {row("Участников в комнате", m.playerOptions.join(" / "))}
-        {row("Взнос", m.capitalOptions.map((c) => fmt(c, 0)).join(" · "))}
-        {row("Тик", `${m.tickMs} мс`)}
-        <button onClick={() => onPlay(false)}
-          className="w-full rounded-xl py-3.5 mt-3 text-[12px] tracking-[0.2em] font-bold tap"
-          style={btnSoft(true)}>
-          ТОРГОВАТЬ
-        </button>
-      </div>
+      <div className="grid gap-2.5">
+        <MarketItem kind="free" title={`${m.assetSymbol} · FREE`} status="LIVE"
+          sub="Свободный рынок без конца сессии"
+          rows={[["ботов", m.freeMarket.botCount.toLocaleString("ru-RU")],
+            ["вход", `${fmt(m.freeMarket.minCapital,0)}–${fmt(m.freeMarket.maxCapital,0)}`], ["режим", "24/7"]]}
+          note="Участники с разными балансами и стратегиями. Войти и выйти можно в любой момент."
+          onClick={onFree} />
 
-      <div className="rounded-2xl p-4 mt-2 tx-in"
-        style={{ backgroundColor: SURFACE, border: `1px solid ${HAIR}`, ...stagger(1) }}>
-        <div className="flex items-start justify-between gap-3">
-          <div>
-            <div className="text-[17px] font-mono">{m.assetSymbol} · FREE</div>
-            <div className="text-[11px] mt-1" style={{ color: DIM }}>
-              всегда открыт · без лимита по размеру комнаты
-            </div>
-          </div>
-          <span className="text-[10px] px-2 py-1 rounded-full shrink-0"
-            style={{ color: ACCENT, backgroundColor: RAISED, border: `1px solid ${HAIR}` }}>5000 BOT</span>
-        </div>
-        <div className="my-3 rounded-xl overflow-hidden" style={{ backgroundColor: "#08080A" }}>
-          <ModeArt kind="free" />
-        </div>
-        {row("Диапазон входа", `${fmt(m.freeMarket.minCapital, 0)} · ${fmt(m.freeMarket.maxCapital, 0)}`)}
-        {row("Торгуют сейчас", `${m.freeMarket.botCount.toLocaleString("en-US")} ботов`)}
-        {row("Формат", "свободный рынок · всегда открыт")}
-        <div className="text-[11px] leading-snug mt-2" style={{ color: FAINT }}>
-          Отдельный бессрочный движок: 5 000 ботов с разными балансами и стратегиями.
-          В локальной версии рынок создаётся с историей перед вашим входом.
-        </div>
-        <button onClick={onFree}
-          className="w-full rounded-xl py-3.5 mt-3 text-[12px] tracking-[0.2em] font-bold tap"
-          style={btnSoft(true)}>
-          ВОЙТИ В СВОБОДНЫЙ РЫНОК
-        </button>
-      </div>
+        <MarketItem kind="offline" title={`${m.assetSymbol} · SESSION`} status="LOCAL"
+          sub="Закрытая сессия с одинаковым капиталом участников"
+          rows={[["участники", m.playerOptions.join("/")],
+            ["взнос", m.capitalOptions.map((c) => fmt(c,0)).join(" · ")], ["тик", `${m.tickMs}мс`]]}
+          note="Подходит для коротких соревновательных сессий и проверки стратегий."
+          onClick={() => onPlay(false)} />
 
-      <div className="rounded-2xl p-4 mt-2 tx-in"
-        style={{ backgroundColor: SURFACE, border: `1px solid ${HAIR}`, ...stagger(2) }}>
-        <div className="flex items-start justify-between gap-3">
-          <div className="flex items-center gap-2">
-            <Icon name="eye" size={17} color={DIM} />
-            <div>
-              <div className="text-[17px] font-mono">
-                {m.assetSymbol} · EYES
-              </div>
-              <div className="text-[11px] mt-1" style={{ color: DIM }}>
-                видно чужие стопы и тейки
-              </div>
-            </div>
-          </div>
-        </div>
-        <div className="my-3 rounded-xl overflow-hidden" style={{ backgroundColor: "#08080A" }}>
-          <ModeArt kind="online" />
-        </div>
-        <div className="text-[12px] leading-snug" style={{ color: DIM }}>
-          Тот же рынок и та же математика. Сверху — обезличенные зоны, куда
-          другие участники поставили стопы и тейки: диапазон цены, суммарный
-          объём и число участников. Имён не видно.
-        </div>
-        <div className="text-[11px] leading-snug mt-2" style={{ color: FAINT }}>
-          Боты в этом режиме почти все выставляют настоящие заявки, а охотники
-          целятся в самые крупные скопления.
-        </div>
-        <button onClick={() => onPlay(true)}
-          className="w-full rounded-xl py-3.5 mt-3 text-[12px] tracking-[0.2em] font-bold tap"
-          style={btnSoft(true)}>
-          ТОРГОВАТЬ В EYES
-        </button>
+        <MarketItem kind="online" title={`${m.assetSymbol} · EYES`} status="DATA"
+          sub="Тот же рынок с обезличенными зонами SL / TP"
+          rows={[["данные", "стопы / тейки"], ["имена", "скрыты"], ["математика", "та же"]]}
+          note="Дополнительный информационный слой без изменения базовой цены рынка."
+          onClick={() => onPlay(true)} />
       </div>
     </div>
   );
@@ -5575,85 +5300,38 @@ function profileProgress(profile) {
 /** Верхний блок главного экрана: уровень, прогресс, кубки, серия. */
 function LevelBar({ profile }) {
   const p = profileProgress(profile);
-  const inner = { backgroundColor: RAISED, border: `1px solid ${HAIR}` };
-
   return (
-    <div className="rounded-2xl p-3 mt-4 tx-in"
-      style={{ backgroundColor: SURFACE, border: `1px solid ${HAIR}`, ...stagger(1) }}>
-
-      {/* ------------------------- верхняя строка ------------------------- */}
-      <div className="flex items-start justify-between gap-2">
-        <div className="min-w-0">
-          <div className="text-[9px] tracking-[0.25em]" style={{ color: FAINT }}>УРОВЕНЬ</div>
-          <div className="text-[38px] leading-none font-mono mt-0.5">{p.level}</div>
-          <div className="text-[11px] mt-2.5" style={{ color: FAINT }}>до уровня {p.level + 1}</div>
+    <div className="rounded-[20px] p-4 mt-4 tx-in" style={{ ...CARD, ...stagger(1) }}>
+      <div className="flex items-start justify-between gap-4">
+        <div>
+          <div className="ui-label">УРОВЕНЬ</div>
+          <div className="text-[34px] leading-none font-mono mt-1">{p.level}</div>
         </div>
-
-        <div className="rounded-xl px-3 py-2.5 shrink-0 text-right" style={inner}>
+        <div className="text-right">
           <div className="flex items-center justify-end gap-1.5">
-            <Icon name="trophy" size={16} color={p.trophies > 0 ? GOLD : FAINT} />
-            <span className="text-[20px] font-mono leading-none"
-              style={{ color: p.trophies > 0 ? GOLD : TEXT }}>{p.trophies}</span>
+            <Icon name="trophy" size={15} color={p.trophies > 0 ? GOLD : FAINT} />
+            <span className="text-[18px] font-mono" style={{ color: p.trophies > 0 ? GOLD : TEXT }}>{p.trophies}</span>
           </div>
-          <div className="text-[9px] tracking-[0.15em] mt-1" style={{ color: FAINT }}>КУБКОВ</div>
-          <div className="text-[10px] mt-1.5 leading-tight" style={{ color: FAINT }}>
-            {p.trophies === 0
-              ? (p.streak > 0 ? `до кубка ${p.toTrophy}` : "кубков пока нет")
-              : `серия ${p.streak}`}
-          </div>
+          <div className="text-[9px] mt-1" style={{ color: FAINT }}>кубков</div>
         </div>
       </div>
-
-      {/* --------------------------- прогресс ---------------------------- */}
-      <div className="rounded-xl px-3.5 py-3 mt-3" style={inner}>
-        <div className="flex items-center justify-between">
-          <span className="text-[9px] tracking-[0.2em]" style={{ color: FAINT }}>
-            ПРОГРЕСС УРОВНЯ
-          </span>
-          <span className="text-[12px] font-mono" style={{ color: DIM }}>
-            {Math.round(p.progress * 100)}%
-          </span>
-        </div>
-        <div className="h-2 w-full rounded-full mt-2 overflow-hidden" style={{ backgroundColor: HAIR }}>
-          <div style={{ width: `${Math.min(1, p.progress) * 100}%`, height: "100%",
-            backgroundColor: ACCENT,
-            transition: "width var(--tx-slow) var(--tx-ease)" }} />
-        </div>
-        <div className="flex items-start justify-between gap-3 mt-2.5">
-          <div className="min-w-0">
-            <div className="text-[13px]">{p.done} / {p.need} прибыльных сессий</div>
-            <div className="text-[11px] mt-0.5" style={{ color: FAINT }}>
-              {p.done === 0 ? "начни с первой" : p.done >= p.need ? "уровень взят" : "ты на верном пути"}
-            </div>
-          </div>
-          <div className="text-right shrink-0">
-            <div className="text-[11px]" style={{ color: DIM }}>
-              ещё {Math.max(0, p.need - p.done)} до уровня {p.level + 1}
-            </div>
-          </div>
-        </div>
+      <div className="flex items-center justify-between mt-4">
+        <span className="text-[11px]" style={{ color: DIM }}>{p.done} из {p.need} прибыльных сессий</span>
+        <span className="text-[11px] font-mono" style={{ color: DIM }}>{Math.round(p.progress*100)}%</span>
       </div>
-
-      {/* ---------------------------- нижняя ----------------------------- */}
-      <div className="rounded-xl px-3.5 py-3 mt-2 flex items-center gap-3" style={inner}>
-        <div className="flex items-center gap-2.5 flex-1 min-w-0">
-          <Icon name="calendar" size={17} color={DIM} />
-          <div className="min-w-0">
-            <div className="text-[9px] tracking-[0.15em]" style={{ color: FAINT }}>СЕРИЯ УСПЕХА</div>
-            <div className="text-[13px] mt-0.5">
-              {p.dayStreak > 0 ? `${p.dayStreak} ${plural(p.dayStreak, "день", "дня", "дней")} подряд` : "—"}
-            </div>
-          </div>
+      <div className="h-[3px] w-full rounded-full mt-2 overflow-hidden" style={{ backgroundColor: HAIR }}>
+        <div className="h-full rounded-full" style={{ width: `${Math.min(1,p.progress)*100}%`, backgroundColor: ACCENT,
+          transition: "width var(--tx-slow) var(--tx-ease)" }} />
+      </div>
+      <div className="grid grid-cols-2 gap-0 mt-4 pt-3" style={{ borderTop: `1px solid ${HAIR}` }}>
+        <div className="pr-3">
+          <div className="ui-label">СЕРИЯ</div>
+          <div className="text-[12px] mt-1">{p.dayStreak > 0 ? `${p.dayStreak} ${plural(p.dayStreak,"день","дня","дней")} подряд` : "—"}</div>
         </div>
-        <div className="w-px self-stretch" style={{ backgroundColor: HAIR }} />
-        <div className="flex items-center gap-2.5 flex-1 min-w-0">
-          <Icon name="trend" size={17} color={DIM} />
-          <div className="min-w-0">
-            <div className="text-[9px] tracking-[0.15em]" style={{ color: FAINT }}>ЛУЧШАЯ СЕССИЯ</div>
-            <div className="text-[13px] mt-0.5 font-mono"
-              style={{ color: p.bestPct > 0 ? TEXT : DIM }}>
-              {p.wins || p.bestPct ? signedPct(p.bestPct) : "—"}
-            </div>
+        <div className="pl-3" style={{ borderLeft: `1px solid ${HAIR}` }}>
+          <div className="ui-label">ЛУЧШАЯ СЕССИЯ</div>
+          <div className="text-[12px] font-mono mt-1" style={{ color: p.bestPct > 0 ? TEXT : DIM }}>
+            {p.wins || p.bestPct ? signedPct(p.bestPct) : "—"}
           </div>
         </div>
       </div>
@@ -5683,7 +5361,7 @@ const LANGS = [
 function SettingsScreen({ account, onClose, onReset, onExit, onSignOut }) {
   const [lang, setLang] = useState("ru");
   const [confirmReset, setConfirmReset] = useState(false);
-  const card = { backgroundColor: SURFACE, border: `1px solid ${HAIR}` };
+  const card = CARD;
 
   const Row = ({ label, sub, onClick, color = TEXT, last }) => (
     <button onClick={onClick}
@@ -5700,17 +5378,17 @@ function SettingsScreen({ account, onClose, onReset, onExit, onSignOut }) {
       <div className="max-w-md w-full mx-auto flex-1 min-h-0 overflow-y-auto no-scrollbar px-5 pb-7 ui-safe-top ui-scroll-pad">
         <div className="flex items-center gap-4">
           <BackButton onClick={onClose} />
-          <div className="text-[11px] tracking-[0.25em]" style={{ color: DIM }}>НАСТРОЙКИ</div>
+          <div className="text-[11px] tracking-[0.10em]" style={{ color: DIM }}>НАСТРОЙКИ</div>
         </div>
 
-        <div className="text-[10px] tracking-[0.25em] mt-7 mb-2" style={{ color: FAINT }}>ЯЗЫК</div>
+        <div className="text-[10px] tracking-[0.10em] mt-7 mb-2" style={{ color: FAINT }}>ЯЗЫК</div>
         <div className="grid grid-cols-2 gap-2">
           {LANGS.map((l) => (
             <button key={l.code} onClick={() => setLang(l.code)}
               className="rounded-xl py-3.5 text-[13px] font-semibold tap"
-              style={{ backgroundColor: lang === l.code ? TEXT : SURFACE,
-                color: lang === l.code ? BG : TEXT,
-                border: `1px solid ${lang === l.code ? TEXT : HAIR}` }}>
+              style={{ background: lang === l.code ? "linear-gradient(180deg,#1B1B1F,#101013)" : CARD_BG_SOFT,
+                color: lang === l.code ? TEXT : DIM,
+                border: `1px solid ${lang === l.code ? "#3A393D" : HAIR}` }}>
               {l.label}
             </button>
           ))}
@@ -5719,14 +5397,14 @@ function SettingsScreen({ account, onClose, onReset, onExit, onSignOut }) {
           Перевод интерфейса ещё не сделан — переключатель пока ничего не меняет.
         </div>
 
-        <div className="text-[10px] tracking-[0.25em] mt-7 mb-2" style={{ color: FAINT }}>АККАУНТ</div>
+        <div className="text-[10px] tracking-[0.10em] mt-7 mb-2" style={{ color: FAINT }}>АККАУНТ</div>
         <div className="rounded-2xl overflow-hidden" style={card}>
           <Row label={account?.email || "гость"} sub="почта аккаунта" />
           {onExit && <Row label="Сменить режим" onClick={onExit} color={DIM} />}
           <Row label="Выйти из аккаунта" onClick={onSignOut} color={SHORT} last />
         </div>
 
-        <div className="text-[10px] tracking-[0.25em] mt-7 mb-2" style={{ color: FAINT }}>БАЛАНС</div>
+        <div className="text-[10px] tracking-[0.10em] mt-7 mb-2" style={{ color: FAINT }}>БАЛАНС</div>
         <div className="rounded-2xl overflow-hidden" style={card}>
           {confirmReset ? (
             <div className="px-4 py-3.5">
@@ -5779,7 +5457,7 @@ function Lobby({ profile, account, onNew, onFree, onReset, onExit, onSignOut, on
     (x) => Number.isFinite(x.at) && now - x.at <= range.ms);
   const rangeTotal = inRange.reduce((sum, x) => sum + x.pnl, 0);
   const affordable = CONFIG.market.capitalOptions.some((c) => c <= profile.wallet);
-  const card = { backgroundColor: SURFACE, border: `1px solid ${HAIR}` };
+  const card = CARD;
 
   if (profileOpen) {
     return <ProfileScreen profile={profile} account={account}
@@ -5832,10 +5510,10 @@ function Lobby({ profile, account, onNew, onFree, onReset, onExit, onSignOut, on
                  Сумма набрана обычным шрифтом, а не моноширинным:
                  моноширинный на большом кегле читается как терминал. */}
               <div className="mt-6">
-                <div className="text-[11px] tracking-[0.18em]" style={{ color: "#6E6E76" }}>
+                <div className="text-[11px] tracking-[0.12em]" style={{ color: FAINT }}>
                   БАЛАНС
                 </div>
-                <div className="text-[38px] leading-[1.05] font-semibold tracking-tight truncate tx-pop mt-1">
+                <div className="text-[36px] leading-[1.05] font-semibold tracking-tight truncate tx-pop mt-1">
                   {fmt(profile.wallet, 0)}
                 </div>
                 <div className="text-[13px] mt-1.5"
@@ -5849,7 +5527,7 @@ function Lobby({ profile, account, onNew, onFree, onReset, onExit, onSignOut, on
                 <FreeMarketMiniCard onClick={onFree} />
               </div>
 
-              <div className="grid grid-cols-3 gap-2.5 mt-4">
+              <div className="grid grid-cols-3 gap-2 mt-4">
                 <WalletAction icon="plus" label="Пополнить" onClick={() => setDeposit(true)} />
                 <WalletAction icon="arrowUpRight" label="Вывести" onClick={() => setWithdraw(true)} />
                 <WalletAction icon="trophy" label="Трофеи" onClick={() => setTrophy(true)} />
@@ -5858,14 +5536,14 @@ function Lobby({ profile, account, onNew, onFree, onReset, onExit, onSignOut, on
               <LevelBar profile={profile} />
 
               {/* --------------------------- режимы -------------------------- */}
-              <div className="flex items-stretch gap-2.5 mt-5 tx-in" style={stagger(1)}>
+              <div className="grid grid-cols-1 gap-2 mt-5 tx-in" style={stagger(1)}>
                 <ModeCard kind="online" title="ОНЛАЙН РЫНОК"
-                  text="Торгуй против реальных участников в реальном времени"
-                  cta="ТОРГОВАТЬ ОНЛАЙН" primary
+                  text="Реальные участники и единая сессия в реальном времени"
+                  cta="СЕРВЕРНАЯ ВЕРСИЯ" primary
                   onClick={() => setNotice("Онлайн-комнаты появятся после подключения сервера. Пока доступна офлайн-практика.")} />
                 <ModeCard kind="offline" title="ОФЛАЙН ПРАКТИКА"
-                  text="Отрабатывай стратегии без риска для баланса"
-                  cta="ТОРГОВАТЬ ОФЛАЙН" onClick={() => onNew(false)} disabled={!affordable} />
+                  text="Та же рыночная модель локально — для тестов и практики"
+                  cta="ОТКРЫТЬ ПРАКТИКУ" onClick={() => onNew(false)} disabled={!affordable} />
               </div>
 
               {notice && (
@@ -5901,7 +5579,7 @@ function Lobby({ profile, account, onNew, onFree, onReset, onExit, onSignOut, on
               </div>
 
               {/* ---------------------- дневная динамика --------------------- */}
-              <div className="text-[10px] tracking-[0.3em] mt-6 mb-2.5" style={{ color: FAINT }}>
+              <div className="text-[10px] tracking-[0.11em] mt-6 mb-2.5" style={{ color: FAINT }}>
                 ДНЕВНАЯ ДИНАМИКА
               </div>
               <div className="rounded-2xl px-4 py-3.5 tx-in" style={{ ...card, ...stagger(3) }}>
@@ -5915,7 +5593,7 @@ function Lobby({ profile, account, onNew, onFree, onReset, onExit, onSignOut, on
                   </div>
                   <div className="relative shrink-0">
                     <button onClick={() => setRangeOpen((v) => !v)}
-                      className="flex items-center gap-2 px-3 py-2 rounded-xl text-[11px] tracking-[0.15em] tap"
+                      className="flex items-center gap-2 px-3 py-2 rounded-xl text-[11px] tracking-[0.10em] tap"
                       style={btnSoft(false)}>
                       {range.key}<Icon name="caret" size={13} color={DIM} />
                     </button>
@@ -5924,7 +5602,7 @@ function Lobby({ profile, account, onNew, onFree, onReset, onExit, onSignOut, on
                         style={{ ...card, backgroundColor: RAISED }}>
                         {LOBBY_RANGES.map((r) => (
                           <button key={r.key} onClick={() => { setRange(r); setRangeOpen(false); }}
-                            className="block w-full text-left px-4 py-2.5 text-[11px] tracking-[0.15em] whitespace-nowrap tap"
+                            className="block w-full text-left px-4 py-2.5 text-[11px] tracking-[0.10em] whitespace-nowrap tap"
                             style={{ color: r.key === range.key ? TEXT : DIM }}>
                             {r.key}
                           </button>
@@ -5940,12 +5618,12 @@ function Lobby({ profile, account, onNew, onFree, onReset, onExit, onSignOut, on
 
               {/* ------------------------ последние сессии ------------------- */}
               <div className="flex items-center justify-between mt-6 mb-2.5">
-                <span className="text-[10px] tracking-[0.3em]" style={{ color: FAINT }}>
+                <span className="text-[10px] tracking-[0.11em]" style={{ color: FAINT }}>
                   ПОСЛЕДНИЕ СЕССИИ
                 </span>
                 {profile.sessions.length > 0 && (
                   <button onClick={() => setProfileOpen(true)}
-                    className="text-[10px] tracking-[0.2em] tap" style={{ color: DIM }}>
+                    className="text-[10px] tracking-[0.13em] tap" style={{ color: DIM }}>
                     СМОТРЕТЬ ВСЕ
                   </button>
                 )}
@@ -5999,9 +5677,6 @@ function FreeMarketSetup({ wallet, onStart, onBack }) {
   const value = Math.max(0, Number(amount) || 0);
   const valid = value >= FREE_MARKET.minCapital && value <= max && value <= FREE_MARKET.maxCapital;
 
-  // Начинаем поднимать 5 000 ботов, пока пользователь выбирает сумму. Так
-  // тяжёлый первый preroll обычно заканчивается ДО нажатия «Войти». После
-  // первого запуска singleton уже живёт сам и повторных прогревов нет.
   useEffect(() => {
     if (FREE_MARKET_HUB) return undefined;
     let cancelled = false;
@@ -6013,60 +5688,69 @@ function FreeMarketSetup({ wallet, onStart, onBack }) {
     const id = setTimeout(warm, 350);
     return () => { cancelled = true; clearTimeout(id); };
   }, []);
+
   return (
-    <div className="w-full flex flex-col" style={{ height: "100dvh", backgroundColor: BG, color: TEXT }}>
+    <div className="w-full flex flex-col tx-screen" style={{ height: "100dvh", backgroundColor: BG, color: TEXT }}>
       <div className="max-w-md w-full mx-auto flex-1 min-h-0 overflow-y-auto no-scrollbar px-5 pb-8 ui-safe-top ui-scroll-pad">
-        <BackButton onClick={onBack} />
-        <div className="flex items-center justify-between mt-5">
-          <div>
-            <div className="text-[10px] tracking-[0.28em]" style={{ color: FAINT }}>FREE MARKET</div>
-            <div className="text-[28px] mt-1">Свободный рынок</div>
-          </div>
-          <span className="text-[10px] px-2.5 py-1.5 rounded-full"
-            style={{ color: ACCENT, backgroundColor: RAISED, border: `1px solid ${HAIR}` }}>24 / 7</span>
+        <div className="flex items-center justify-between">
+          <BackButton onClick={onBack} />
+          <span className="ui-chip text-[9px] font-mono">24/7 · LIVE</span>
         </div>
 
-        <div className="rounded-2xl overflow-hidden mt-5" style={{ backgroundColor: SURFACE, border: `1px solid ${HAIR}` }}>
-          <ModeArt kind="free" />
-        </div>
-
-        <div className="grid grid-cols-2 gap-2 mt-3">
-          <div className="rounded-xl px-4 py-3" style={{ backgroundColor: SURFACE, border: `1px solid ${HAIR}` }}>
-            <div className="text-[9px] tracking-[0.16em]" style={{ color: FAINT }}>БОТОВ В РЫНКЕ</div>
-            <div className="text-[18px] font-mono mt-1">{FREE_MARKET.botCount.toLocaleString("en-US")}</div>
-          </div>
-          <div className="rounded-xl px-4 py-3" style={{ backgroundColor: SURFACE, border: `1px solid ${HAIR}` }}>
-            <div className="text-[9px] tracking-[0.16em]" style={{ color: FAINT }}>ВХОД</div>
-            <div className="text-[18px] font-mono mt-1">{fmt(FREE_MARKET.minCapital, 0)}–{fmt(FREE_MARKET.maxCapital, 0)}</div>
+        <div className="mt-6">
+          <div className="text-[28px] tracking-tight">Свободный рынок</div>
+          <div className="text-[12px] mt-2 leading-relaxed max-w-[330px]" style={{ color: DIM }}>
+            Непрерывный рынок из 5 000 автономных участников. Вход и выход — в любой момент.
           </div>
         </div>
 
-        <div className="text-[10px] tracking-[0.22em] mt-7 mb-2" style={{ color: FAINT }}>СКОЛЬКО ВВЕСТИ В РЫНОК</div>
-        <div className="rounded-xl flex items-center px-4" style={{ backgroundColor: RAISED, border: `1px solid ${valid ? HAIR : SHORT}` }}>
-          <span className="text-[20px] mr-2" style={{ color: DIM }}>$</span>
-          <input value={amount} onChange={(e) => setAmount(e.target.value.replace(/[^0-9.]/g, ""))}
-            inputMode="decimal" className="flex-1 bg-transparent outline-none py-4 text-[24px] font-mono min-w-0"
-            style={{ color: TEXT }} />
-          <span className="text-[11px]" style={{ color: FAINT }}>макс. {fmt(max, 0)}</span>
+        <div className="rounded-[20px] mt-5 px-4 py-3.5" style={CARD}>
+          <div className="grid grid-cols-3">
+            {[
+              ["БОТЫ", FREE_MARKET.botCount.toLocaleString("ru-RU")],
+              ["МИН. ВХОД", fmt(FREE_MARKET.minCapital, 0)],
+              ["МАКС. ВХОД", fmt(FREE_MARKET.maxCapital, 0)],
+            ].map(([k, v], i) => (
+              <div key={k} className={`${i ? "pl-3 border-l" : ""} ${i < 2 ? "pr-3" : ""}`} style={{ borderColor: HAIR }}>
+                <div className="text-[8px] tracking-[0.08em]" style={{ color: FAINT }}>{k}</div>
+                <div className="text-[14px] font-mono mt-1.5 truncate">{v}</div>
+              </div>
+            ))}
+          </div>
         </div>
-        {!valid && <div className="text-[11px] mt-2" style={{ color: SHORT }}>
-          Сумма должна быть от $10 до {fmt(Math.min(FREE_MARKET.maxCapital, max), 0)}.
-        </div>}
 
-        <div className="rounded-2xl px-4 py-4 mt-5 text-[12px] leading-relaxed"
-          style={{ backgroundColor: SURFACE, border: `1px solid ${HAIR}`, color: DIM }}>
-          Рынок не заканчивается по таймеру. Можно войти и выйти в любой момент без штрафа.
-          У 5 000 ботов разные капиталы, горизонты, частота действий, риск и стратегии.
-          После первого запуска локальное ядро продолжает жить между вашими входами, поэтому
-          повторный вход возвращает в тот же рынок и ту же историю. Перезагрузка приложения
-          пока создаёт новое ядро — постоянство между устройствами будет серверным этапом.
+        <div className="mt-7">
+          <div className="flex items-end justify-between gap-3 mb-2.5">
+            <div className="text-[10px] tracking-[0.08em]" style={{ color: FAINT }}>КАПИТАЛ ДЛЯ ВХОДА</div>
+            <div className="text-[10px] font-mono" style={{ color: DIM }}>доступно {fmt(max, 0)}</div>
+          </div>
+          <div className="ui-field flex items-center rounded-[18px] px-4"
+            style={{ ...CARD, border: `1px solid ${valid ? HAIR : SHORT}` }}>
+            <span className="text-[18px] font-mono mr-2" style={{ color: FAINT }}>$</span>
+            <input value={amount} onChange={(e) => setAmount(e.target.value.replace(/[^0-9.]/g, ""))}
+              inputMode="decimal" autoComplete="off" spellCheck="false"
+              className="flex-1 bg-transparent outline-none py-4 text-[24px] font-mono min-w-0"
+              style={{ color: valid ? TEXT : SHORT }} />
+          </div>
+          {!valid && <div className="text-[10px] mt-2" style={{ color: SHORT }}>
+            Доступный диапазон: {fmt(FREE_MARKET.minCapital, 0)}–{fmt(Math.min(FREE_MARKET.maxCapital, max), 0)}
+          </div>}
+        </div>
+
+        <div className="mt-5 rounded-[18px] px-4 py-3.5" style={CARD_SOFT}>
+          <div className="flex items-center justify-between py-1.5"><span className="text-[11px]" style={{ color: DIM }}>Таймер</span><span className="text-[11px] font-mono">нет</span></div>
+          <div className="flex items-center justify-between py-1.5"><span className="text-[11px]" style={{ color: DIM }}>Штраф за выход</span><span className="text-[11px] font-mono">нет</span></div>
+          <div className="flex items-center justify-between py-1.5"><span className="text-[11px]" style={{ color: DIM }}>Баланс участников</span><span className="text-[11px]">разный</span></div>
+        </div>
+
+        <div className="text-[10px] mt-4 leading-relaxed" style={{ color: FAINT }}>
+          Пока приложение открыто, повторный вход возвращает в тот же локальный рынок. После полной перезагрузки создаётся новое ядро.
         </div>
       </div>
       <div className="max-w-md w-full mx-auto px-5 pt-3 ui-bottom-surface ui-safe-bottom">
         <button disabled={!valid} onClick={() => onStart(value)}
-          className="w-full rounded-2xl min-h-[54px] px-4 text-[14px] tracking-[0.14em] font-semibold tap"
-          style={btnSoft(true)}>
-          ВОЙТИ В РЫНОК · {valid ? fmt(value, 0) : "—"}
+          className="w-full rounded-[18px] min-h-[54px] px-4 text-[13px] font-semibold tap disabled:opacity-30" style={btnSoft(true)}>
+          ВОЙТИ · {valid ? fmt(value, 0) : "—"}
         </button>
       </div>
     </div>
@@ -6076,9 +5760,8 @@ function FreeMarketSetup({ wallet, onStart, onBack }) {
 /* ---------------------------- ВЫБОР РАЗМЕРА СЕССИИ ------------------------ */
 function SessionSetup({ wallet, onStart, onBack, eyes = false }) {
   const options = CONFIG.market.capitalOptions;
-  const [capital, setCapital] = useState(
-    options.filter((c) => c <= wallet).slice(-1)[0] ?? options[0]
-  );
+  const affordableOptions = options.filter((c) => c <= wallet);
+  const [capital, setCapital] = useState(affordableOptions.slice(-1)[0] ?? null);
   const [leverage, setLeverage] = useState(1);
   const [minutes, setMinutes] = useState(CONFIG.market.durationOptions[1]);
   const [players, setPlayers] = useState(CONFIG.market.playerOptions[0]);
@@ -6087,9 +5770,13 @@ function SessionSetup({ wallet, onStart, onBack, eyes = false }) {
     <div className="w-full flex flex-col" style={{ height: "100dvh", backgroundColor: BG, color: TEXT }}>
       <div className="max-w-md w-full mx-auto flex-1 min-h-0 overflow-y-auto no-scrollbar px-5 pb-8 ui-safe-top ui-scroll-pad">
         <BackButton onClick={onBack} />
-        <div className="mt-5">
+        <div className="mt-6">
+          <div className="text-[28px] tracking-tight">{eyes ? "EYES-сессия" : "Новая сессия"}</div>
+          <div className="text-[12px] mt-2 leading-relaxed" style={{ color: DIM }}>
+            Настройте капитал, размер комнаты и время. Все участники начинают на равных условиях.
+          </div>
 
-        <div className="text-[11px] tracking-[0.15em] mb-3" style={{ color: FAINT }}>ВЗНОС В СЕССИЮ</div>
+        <div className="text-[10px] tracking-[0.08em] mt-7 mb-2.5" style={{ color: FAINT }}>ВЗНОС</div>
         <div className="grid grid-cols-2 gap-2">
           {options.map((value) => {
             const active = capital === value;
@@ -6097,13 +5784,9 @@ function SessionSetup({ wallet, onStart, onBack, eyes = false }) {
             return (
               <button key={value} disabled={locked} onClick={() => setCapital(value)}
                 className="rounded-2xl min-h-[82px] py-4 text-left px-4 tap"
-                style={{
-                  backgroundColor: active && !locked ? TEXT : SURFACE,
-                  color: active && !locked ? BG : TEXT,
-                  border: `1px solid ${active && !locked ? TEXT : HAIR}`,
-                }}>
+                style={choiceStyle(active, locked)}>
                 <div className="text-[22px] font-mono">${value.toLocaleString("en-US")}</div>
-                <div className="text-[11px] mt-1" style={{ color: active && !locked ? "#555" : FAINT }}>
+                <div className="text-[11px] mt-1" style={{ color: active && !locked ? DIM : FAINT }}>
                   {locked ? "не хватает баланса" : `рынок $${(value * players).toLocaleString("en-US")}`}
                 </div>
               </button>
@@ -6111,83 +5794,72 @@ function SessionSetup({ wallet, onStart, onBack, eyes = false }) {
           })}
         </div>
 
-        <div className="text-[11px] tracking-[0.15em] mt-7 mb-3" style={{ color: FAINT }}>
-          УЧАСТНИКОВ В КОМНАТЕ
-        </div>
+        <div className="text-[10px] tracking-[0.08em] mt-7 mb-2.5" style={{ color: FAINT }}>УЧАСТНИКИ</div>
         <div className="grid grid-cols-3 gap-2">
           {CONFIG.market.playerOptions.map((n) => {
             const active = players === n;
             return (
               <button key={n} onClick={() => setPlayers(n)}
                 className="rounded-xl min-h-[48px] px-2 text-[13px] font-mono font-semibold tap"
-                style={{ backgroundColor: active ? TEXT : SURFACE, color: active ? BG : TEXT,
-                  border: `1px solid ${active ? TEXT : HAIR}` }}>
+                style={choiceStyle(active)}>
                 {n}
               </button>
             );
           })}
         </div>
 
-        <div className="text-[11px] tracking-[0.15em] mt-7 mb-3" style={{ color: FAINT }}>
-          ПЛЕЧО
-        </div>
+        <div className="text-[10px] tracking-[0.08em] mt-7 mb-2.5" style={{ color: FAINT }}>ПЛЕЧО</div>
         <div className="grid grid-cols-3 gap-2">
           {CONFIG.market.leverageOptions.map((lv) => {
             const active = leverage === lv;
             return (
               <button key={lv} onClick={() => setLeverage(lv)}
                 className="rounded-xl min-h-[48px] px-2 text-[13px] font-mono font-semibold tap"
-                style={{ backgroundColor: active ? TEXT : SURFACE, color: active ? BG : TEXT,
-                  border: `1px solid ${active ? TEXT : HAIR}` }}>
+                style={choiceStyle(active)}>
                 {lv === 1 ? "без плеча" : `x${lv}`}
               </button>
             );
           })}
         </div>
         {leverage > 1 && (
-          <div className="text-[12px] mt-3 leading-relaxed" style={{ color: FAINT }}>
-            Позиция до x{leverage} от ваших денег. Заём берётся из кассы комнаты,
-            за него идёт плата остальным участникам. Если запас упадёт ниже{" "}
-            {(CONFIG.LEV_MAINTENANCE / leverage * 100).toFixed(1)}% от размера позиции,
-            она закрывается принудительно.
+          <div className="rounded-[16px] px-3.5 py-3 mt-3 text-[11px] leading-relaxed" style={{ ...CARD_SOFT, color: DIM }}>
+            Максимальная позиция — x{leverage}. Заём оплачивается из кассы комнаты; при падении запаса ниже{" "}
+            <span className="font-mono" style={{ color: TEXT }}>{(CONFIG.LEV_MAINTENANCE / leverage * 100).toFixed(1)}%</span> позиция закрывается автоматически.
           </div>
         )}
 
-        <div className="text-[11px] tracking-[0.15em] mt-7 mb-3" style={{ color: FAINT }}>
-          ДЛИТЕЛЬНОСТЬ
-        </div>
+        <div className="text-[10px] tracking-[0.08em] mt-7 mb-2.5" style={{ color: FAINT }}>ДЛИТЕЛЬНОСТЬ</div>
         <div className="grid grid-cols-4 gap-2">
           {CONFIG.market.durationOptions.map((mm) => {
             const active = minutes === mm;
             return (
               <button key={mm} onClick={() => setMinutes(mm)}
                 className="rounded-xl min-h-[48px] px-2 text-[13px] font-mono font-semibold tap"
-                style={{ backgroundColor: active ? TEXT : SURFACE, color: active ? BG : TEXT,
-                  border: `1px solid ${active ? TEXT : HAIR}` }}>
+                style={choiceStyle(active)}>
                 {mm} мин
               </button>
             );
           })}
         </div>
 
-        <div className="text-[12px] mt-5 leading-relaxed" style={{ color: FAINT }}>
-          Столько же получает каждый из {players - 1} ботов. Позиция работает ровно настолько,
-          насколько её перекрыла противоположная сторона, поэтому потерять
-          больше вложенного невозможно.{" "}
-          Если выйти раньше срока, с остатка списывается{" "}
-          {Math.round(CONFIG.market.earlyExitPenalty * 100)}% и поровну
-          распределяется между остальными участниками.{" "} Взнос списывается с баланса,
-          а в конце сессии на баланс возвращается ваш итоговый капитал.
-          Размер сессии меняет только масштаб денег — поведение рынка от него не зависит.
+        <div className="rounded-[18px] px-4 py-3.5 mt-6" style={CARD_SOFT}>
+          <div className="flex items-center justify-between py-1.5"><span className="text-[11px]" style={{ color: DIM }}>Капитал комнаты</span><span className="text-[11px] font-mono">{capital ? fmt(capital * players, 0) : "—"}</span></div>
+          <div className="flex items-center justify-between py-1.5"><span className="text-[11px]" style={{ color: DIM }}>Равный старт</span><span className="text-[11px]">{players} участников</span></div>
+          <div className="flex items-center justify-between py-1.5"><span className="text-[11px]" style={{ color: DIM }}>Досрочный выход</span><span className="text-[11px] font-mono">−{Math.round(CONFIG.market.earlyExitPenalty * 100)}%</span></div>
+        </div>
+        <div className="text-[10px] mt-3 leading-relaxed" style={{ color: FAINT }}>
+          В конце сессии на баланс возвращается итоговый капитал. Размер взноса меняет масштаб денег, но не поведение модели.
         </div>
         </div>
       </div>
 
       <div className="max-w-md w-full mx-auto px-5 pt-3 ui-bottom-surface ui-safe-bottom">
-        <button onClick={() => onStart(capital, leverage, minutes, eyes, players)}
-          className="w-full rounded-2xl min-h-[54px] px-4 text-[14px] tracking-[0.13em] font-semibold tap"
+        <button disabled={!capital || capital > wallet}
+          onClick={() => capital && capital <= wallet && onStart(capital, leverage, minutes, eyes, players)}
+          className="w-full rounded-2xl min-h-[54px] px-4 text-[14px] tracking-[0.09em] font-semibold tap disabled:opacity-30"
           style={btnSoft(true)}>
-          ВОЙТИ В {eyes ? "EYES" : "РЫНОК"} · {fmt(capital, 0)} · {minutes} МИН · {players}
+          {capital ? `ВОЙТИ В ${eyes ? "EYES" : "РЫНОК"} · ${fmt(capital, 0)} · ${minutes} МИН · ${players}`
+            : "НЕДОСТАТОЧНО СРЕДСТВ ДЛЯ ВХОДА"}
         </button>
       </div>
     </div>
@@ -6239,8 +5911,8 @@ function Matchmaking({ capital, leverage = 1, total: totalProp, onReady, onCance
     <div className="w-full flex flex-col tx-screen"
       style={{ height: "100dvh", backgroundColor: BG, color: TEXT }}>
       <div className="max-w-md w-full mx-auto flex-1 flex flex-col justify-center px-5 ui-safe-top">
-        <div className="text-[11px] tracking-[0.3em]" style={{ color: FAINT }}>ПОДБОР УЧАСТНИКОВ</div>
-        <div className="text-[64px] leading-none font-mono tracking-tight mt-3">
+        <div className="text-[11px] tracking-[0.11em]" style={{ color: FAINT }}>ПОДБОР УЧАСТНИКОВ</div>
+        <div className="text-[56px] leading-none font-mono tracking-tight mt-3">
           {joined}<span className="text-[24px]" style={{ color: FAINT }}> / {total}</span>
         </div>
 
@@ -6280,65 +5952,42 @@ function Matchmaking({ capital, leverage = 1, total: totalProp, onReady, onCance
 /* ------------------------------ ИТОГ СЕССИИ ------------------------------- */
 function SessionResult({ result, onDone }) {
   const good = result.pnl >= 0;
+  const pct = result.capital ? (result.pnl / result.capital) * 100 : 0;
   return (
-    <div className="w-full flex flex-col" style={{ height: "100dvh", backgroundColor: BG, color: TEXT }}>
+    <div className="w-full flex flex-col tx-screen" style={{ height: "100dvh", backgroundColor: BG, color: TEXT }}>
       <div className="max-w-md w-full mx-auto flex-1 min-h-0 overflow-y-auto no-scrollbar px-5 pb-8 ui-safe-top ui-scroll-pad">
-        <div className="text-[11px] tracking-[0.4em] mb-3" style={{ color: FAINT }}>
-          {result.mode === "free" ? "ВЫХОД ИЗ СВОБОДНОГО РЫНКА"
-            : result.early ? "ДОСРОЧНЫЙ ВЫХОД" : "СЕССИЯ ЗАВЕРШЕНА"}
+        <div className="text-[10px] tracking-[0.08em]" style={{ color: FAINT }}>
+          {result.mode === "free" ? "ВЫХОД ИЗ FREE MARKET" : result.early ? "ДОСРОЧНЫЙ ВЫХОД" : "СЕССИЯ ЗАВЕРШЕНА"}
         </div>
-        <div className="text-[52px] leading-none font-mono tracking-tight" style={{ color: good ? LONG : SHORT }}>
-          {fmtSigned(result.pnl)}
+        <div className="mt-5 flex items-end justify-between gap-4">
+          <div className="text-[44px] leading-none font-mono tracking-tight" style={{ color: good ? LONG : SHORT }}>{fmtSigned(result.pnl)}</div>
+          <div className="text-[14px] font-mono pb-1" style={{ color: good ? LONG : SHORT }}>{pct >= 0 ? "+" : ""}{pct.toFixed(2)}%</div>
         </div>
-        <div className="text-[15px] font-mono mt-2" style={{ color: DIM }}>
-          {((result.pnl / result.capital) * 100).toFixed(2)}% {result.mode === "free" ? "от введённого капитала" : "от взноса"}
-        </div>
+        <div className="text-[12px] mt-2" style={{ color: DIM }}>{result.mode === "free" ? "результат от введённого капитала" : "результат сессии"}</div>
 
-        <div className="mt-10">
-          <Line left={result.mode === "free" ? "Введено в рынок" : "Взнос"} right={fmt(result.capital)} />
+        <div className="rounded-[20px] px-4 mt-7" style={CARD}>
+          <Line left={result.mode === "free" ? "Введено" : "Взнос"} right={fmt(result.capital)} />
           <Line left="Итоговый капитал" right={fmt(result.equity)} />
-          <Line left="Место в рейтинге" right={`${result.rank} из ${result.totalPlayers || CONFIG.market.totalPlayers}`} />
-          <Line left="Сделок" right={String(result.trades)} />
+          <Line left="Место" right={`${result.rank} из ${result.totalPlayers || CONFIG.market.totalPlayers}`} />
+          <Line left="Сделки" right={String(result.trades)} />
           <Line left="Время в рынке" right={clock(result.ticks * CONFIG.market.tickMs)} />
-          <Line left="Цена на выходе" right={fmt(result.price)} />
-          {result.early && (
-            <Line left="Штраф за досрочный выход" right={`−${fmt(result.penalty || 0)}`}
-              color={SHORT} />
-          )}
+          <div className="flex items-center justify-between gap-3 min-h-[42px] py-2.5"><span className="text-[12px]" style={{ color: DIM }}>Цена выхода</span><span className="text-[12px] font-mono">{fmt(result.price)}</span></div>
         </div>
 
-        {result.top && result.top.length > 0 && (
-          <>
-            <div className="text-[10px] tracking-[0.3em] mt-8 mb-2.5" style={{ color: FAINT }}>
-              ЛУЧШИЕ В КОМНАТЕ
-            </div>
-            <div className="flex flex-col gap-2">
-              {result.top.map((p, i) => (
-                <div key={i}
-                  className="rounded-xl px-4 py-3 flex items-center gap-3 tx-in"
-                  style={{ backgroundColor: p.you ? RAISED : SURFACE,
-                    border: `1px solid ${p.you ? "#3A3A40" : HAIR}`, ...stagger(i) }}>
-                  <span className="text-[13px] font-mono w-4 shrink-0"
-                    style={{ color: i === 0 ? GOLD : FAINT }}>{i + 1}</span>
-                  {i === 0 && <Icon name="trophy" size={14} color={GOLD} />}
-                  <span className="flex-1 min-w-0 text-[13px] truncate"
-                    style={{ color: p.you ? TEXT : DIM }}>
-                    {p.you ? "вы" : (STRATEGY_LABELS[String(p.name).split("-")[0]] || p.name)}
-                  </span>
-                  <span className="text-[13px] font-mono shrink-0"
-                    style={{ color: p.pnl >= 0 ? LONG : SHORT }}>{fmtSigned(p.pnl)}</span>
-                </div>
-              ))}
-            </div>
-          </>
-        )}
+        {result.early && <div className="rounded-[16px] px-4 py-3 mt-3 flex items-center justify-between" style={CARD_SOFT}><span className="text-[11px]" style={{ color: DIM }}>Штраф за досрочный выход</span><span className="text-[12px] font-mono" style={{ color: SHORT }}>−{fmt(result.penalty || 0)}</span></div>}
+
+        {result.top && result.top.length > 0 && <>
+          <div className="text-[10px] tracking-[0.08em] mt-8 mb-2.5" style={{ color: FAINT }}>ЛУЧШИЕ В КОМНАТЕ</div>
+          <div className="rounded-[20px] overflow-hidden" style={CARD}>
+            {result.top.map((p, i) => <div key={i} className={`px-4 py-3 flex items-center gap-3 tx-in ${i ? "border-t" : ""}`} style={{ borderColor: HAIR, backgroundColor: p.you ? RAISED : "transparent", ...stagger(i) }}>
+              <span className="text-[12px] font-mono w-6 shrink-0" style={{ color: i === 0 ? GOLD : FAINT }}>{String(i + 1).padStart(2, "0")}</span>
+              <span className="flex-1 min-w-0 text-[12px] truncate" style={{ color: p.you ? TEXT : DIM }}>{p.you ? "вы" : (STRATEGY_LABELS[String(p.name).split("-")[0]] || p.name)}</span>
+              <span className="text-[12px] font-mono shrink-0" style={{ color: p.pnl >= 0 ? LONG : SHORT }}>{fmtSigned(p.pnl)}</span>
+            </div>)}
+          </div>
+        </>}
       </div>
-      <div className="max-w-md w-full mx-auto px-5 pt-3 ui-bottom-surface ui-safe-bottom">
-        <button onClick={onDone} className="w-full rounded-2xl min-h-[54px] px-4 text-[14px] tracking-[0.14em] font-semibold tap"
-          style={btnSoft(true)}>
-          НА ГЛАВНУЮ
-        </button>
-      </div>
+      <div className="max-w-md w-full mx-auto px-5 pt-3 ui-bottom-surface ui-safe-bottom"><button onClick={onDone} className="w-full rounded-[18px] min-h-[54px] px-4 text-[13px] font-semibold tap" style={btnSoft(true)}>НА ГЛАВНУЮ</button></div>
     </div>
   );
 }
@@ -6364,7 +6013,6 @@ function PracticeApp({ onExit }) {
   const engineRef = useRef(null);
 
   const [snapshot, setSnapshot] = useState(null);
-  const [paused, setPaused] = useState(false);
   const [speed, setSpeed] = useState(1);
   const [tab, setTab] = useState("Рынок");
   const [timeframe, setTimeframe] = useState("1с");
@@ -6372,10 +6020,7 @@ function PracticeApp({ onExit }) {
   const [showSettings, setShowSettings] = useState(false);
   const [size, setSize] = useState("0");
   const [sheet, setSheet] = useState(null);
-  const [limitPrice, setLimitPrice] = useState("");
-  const [limitSide, setLimitSide] = useState("buy");
   const [playerFilter, setPlayerFilter] = useState("Все");
-  const [npcMode, setNpcMode] = useState("активные");
   const [toast, setToast] = useState(null);
   const [confirmingEnd, setConfirmingEnd] = useState(false);
   const [eyesOn, setEyesOn] = useState(true);
@@ -6455,12 +6100,13 @@ function PracticeApp({ onExit }) {
   };
 
   const startSession = ({ capital, leverage, minutes, eyes, players }) => {
+    if (!Number.isFinite(capital) || capital <= 0 || capital > profile.wallet) return;
     setMarketMode("session");
-    // Приложение больше не создаёт движок напрямую — только транспорт.
-    // При переезде на сервер здесь меняется одна строка на RemoteTransport.
+    setConfirmingEnd(false);
     const durationTicks = Math.round(minutes * 60000 / CONFIG.market.tickMs);
+    const seed = ((Date.now() ^ Math.floor(Math.random() * 0xffffffff)) >>> 0) || 1;
     engineRef.current = new LocalTransport({
-      startingCapital: capital, leverage, eyes,
+      startingCapital: capital, leverage, eyes, seed, devMode: false,
       playerCount: players || CONFIG.market.playerOptions[0],
       // Боты видят тот же таймер, что и игрок: старт, середина и концовка
       // сессии влияют на их поведение.
@@ -6468,8 +6114,6 @@ function PracticeApp({ onExit }) {
     });
     setSize(String(Math.round(capital * 0.3)));
     setSheet(null);
-    setLimitPrice("");
-    setPaused(false);
     setTab("Рынок");
     setSession(capital);
     setLeverage(leverage);
@@ -6488,14 +6132,13 @@ function PracticeApp({ onExit }) {
     engineRef.current?.stop?.();
     engineRef.current = new FreeMarketTransport({ startingCapital: amount });
     setMarketMode("free");
+    setConfirmingEnd(false);
     setSession(amount);
     setLeverage(1);
     setSessionDurationTicks(null);
     setLeft(0);
     setSize(String(Math.max(10, Math.round(amount * 0.3))));
     setSheet(null);
-    setLimitPrice("");
-    setPaused(false);
     setSpeed(1);
     setTab("Рынок");
     setSnapshot(engineRef.current.snapshot());
@@ -6550,7 +6193,7 @@ function PracticeApp({ onExit }) {
     persist({
       ...profile,
       wallet: profile.wallet + record.equity,
-      sessions: [record, ...profile.sessions].slice(0, 40),
+      sessions: [record, ...profile.sessions],
     });
 
     transport.stop();
@@ -6639,7 +6282,6 @@ function PracticeApp({ onExit }) {
   const orderCapacity = Math.max(0, Number(leverage > 1 ? human.buyingPower : human.cash) || 0);
   const orderTooLarge = notional > orderCapacity + 1e-9;
   const validOrderSize = notional >= 1 && !orderTooLarge;
-  const myLimits = snap.yourOrders;
   const changeAbs = snap.price - snap.initialPrice;
   const changePct = changeAbs / snap.initialPrice;
   const pos = human.position;
@@ -6649,12 +6291,6 @@ function PracticeApp({ onExit }) {
   const pnlColor = pnl > 0 ? LONG : pnl < 0 ? SHORT : TEXT;
 
   const refresh = () => setSnapshot(transport.snapshot());
-  // Пауза осталась только во вкладке «Отладка»: с торгового экрана
-  // переключатель LIVE убран.
-  const togglePause = () => {
-    transport.setPaused(!transport.paused);
-    setPaused(transport.paused);
-  };
   /** Все действия игрока идут одним путём — через команду транспорту.
    *  transport.send() асинхронный (в онлайн-режиме это сетевой вызов),
    *  поэтому и весь путь команды — от кнопки до тоста — асинхронный. */
@@ -6665,8 +6301,6 @@ function PracticeApp({ onExit }) {
     return res;
   };
 
-  const buyHint = pos && pos.side === "short" ? "закроет Short" : "открыть / увеличить Long";
-  const sellHint = pos && pos.side === "long" ? "закроет Long" : "открыть / увеличить Short";
 
   const doBuy = async () => {
     const closingShort = pos && pos.side === "short";
@@ -6718,8 +6352,8 @@ function PracticeApp({ onExit }) {
 
   const eyesData = snap.eyes;
   const TAB_KEYS = eyesData
-    ? ["Рынок", "EYES", "Позиции", "Ордера", "Участники", "Отладка"]
-    : ["Рынок", "Позиции", "Ордера", "Участники", "Отладка"];
+    ? ["Рынок", "EYES", "Позиции", "Защита", "Участники"]
+    : ["Рынок", "Позиции", "Защита", "Участники"];
 
   return (
     <div className="w-full flex flex-col" style={{ height: "100dvh", backgroundColor: BG, color: TEXT }}>
@@ -6727,7 +6361,7 @@ function PracticeApp({ onExit }) {
 
         {/* --------------------------------- шапка --------------------------- */}
         <div className="flex items-center justify-between px-5 pb-3 ui-safe-top">
-          <span className="text-[11px] tracking-[0.3em]" style={{ color: FAINT }}>
+          <span className="text-[11px] tracking-[0.11em]" style={{ color: FAINT }}>
             {CONFIG.market.assetSymbol} · {marketMode === "free" ? "FREE · " : ""}{fmt(session, 0)}
             {leverage > 1 && (
               <span className="ml-2 px-1.5 py-0.5 rounded font-semibold"
@@ -6735,7 +6369,7 @@ function PracticeApp({ onExit }) {
             )}
             {eyesData && (
               <span className="ml-2 px-1.5 py-0.5 rounded font-semibold"
-                style={{ backgroundColor: "#0E2A1B", color: LONG }}>EYES</span>
+                style={{ backgroundColor: RAISED, color: LONG, border: `1px solid ${HAIR}` }}>EYES</span>
             )}
           </span>
           <div className="flex items-center gap-4">
@@ -6748,7 +6382,7 @@ function PracticeApp({ onExit }) {
               </span>
             )}
             <button onClick={() => setShowSettings((v) => !v)}
-              className="ui-hit px-2.5 rounded-xl text-[11px] tracking-[0.15em] tap"
+              className="ui-hit px-2.5 rounded-xl text-[11px] tracking-[0.10em] tap"
               style={{ color: showSettings ? TEXT : FAINT, backgroundColor: showSettings ? SURFACE : "transparent" }}>
               ЕЩЁ
             </button>
@@ -6757,10 +6391,10 @@ function PracticeApp({ onExit }) {
 
         {showSettings && (
           <div className="mx-4 mb-3 p-3.5 rounded-2xl flex flex-col gap-3 tx-pop"
-            style={{ backgroundColor: SURFACE, border: `1px solid ${HAIR}` }}>
+            style={CARD}>
             {marketMode !== "free" && (
               <div className="flex items-center justify-between">
-                <span className="text-[11px] tracking-[0.15em]" style={{ color: FAINT }}>СКОРОСТЬ</span>
+                <span className="text-[11px] tracking-[0.10em]" style={{ color: FAINT }}>СКОРОСТЬ</span>
                 <div className="flex gap-1">
                   {[1, 2, 5, 10].map((s) => (
                     <Toggle key={s} active={speed === s} onClick={() => setSpeed(s)}>{s}x</Toggle>
@@ -6815,7 +6449,7 @@ function PracticeApp({ onExit }) {
                 <div className="absolute inset-0 z-30 flex flex-col items-center justify-center
                   backdrop-blur-[2px] tx-fade"
                   style={{ backgroundColor: "rgba(0,0,0,0.62)" }}>
-                  <div className="text-[10px] tracking-[0.35em]" style={{ color: FAINT }}>
+                  <div className="text-[10px] tracking-[0.19em]" style={{ color: FAINT }}>
                     РЫНОК ОТКРОЕТСЯ ЧЕРЕЗ
                   </div>
                   <div className="text-[72px] leading-none font-mono mt-3 tabular-nums tx-pop"
@@ -6888,11 +6522,11 @@ function PracticeApp({ onExit }) {
                 {/* Суммы ставок по сторонам НЕ показываем: вместе с числом
                     участников они позволяют вычислить скрытую точку
                     равновесия сессии. Показываем только количество. */}
-                <Metric label="В ЛОНГЕ" value={String(stats.longPlayers)} color={LONG} />
-                <Metric label="В ШОРТЕ" value={String(stats.shortPlayers)} color={SHORT} />
-                <Metric label="ЗАРАБОТАЛИ ЛОНГИ" value={fmtSigned(state.longRealized ?? 0, 0)}
+                <Metric label="ЛОНГИ" value={String(stats.longPlayers)} color={LONG} />
+                <Metric label="ШОРТЫ" value={String(stats.shortPlayers)} color={SHORT} />
+                <Metric label="PNL ЛОНГОВ" value={fmtSigned(state.longRealized ?? 0, 0)}
                   color={(state.longRealized ?? 0) >= 0 ? LONG : SHORT} />
-                <Metric label="ЗАРАБОТАЛИ ШОРТЫ" value={fmtSigned(state.shortRealized ?? 0, 0)}
+                <Metric label="PNL ШОРТОВ" value={fmtSigned(state.shortRealized ?? 0, 0)}
                   color={(state.shortRealized ?? 0) >= 0 ? LONG : SHORT} />
               </div>
 
@@ -6914,10 +6548,10 @@ function PracticeApp({ onExit }) {
               {eyesData && (
                 <div className="flex items-center justify-between px-4 pb-1">
                   <button onClick={() => setEyesOn((v) => !v)}
-                    className="ui-hit flex items-center gap-2 px-3 rounded-xl text-[10px] tracking-[0.2em] tap"
-                    style={{ backgroundColor: eyesOn ? "#0E2A1B" : RAISED,
+                    className="ui-hit flex items-center gap-2 px-3 rounded-xl text-[10px] tracking-[0.13em] tap"
+                    style={{ backgroundColor: RAISED,
                       color: eyesOn ? LONG : DIM,
-                      border: `1px solid ${eyesOn ? shade(LONG, 0.9) : HAIR}` }}>
+                      border: `1px solid ${eyesOn ? "#315A48" : HAIR}` }}>
                     <Icon name="eye" size={13} color={eyesOn ? LONG : DIM} />
                     EYES
                   </button>
@@ -6925,9 +6559,9 @@ function PracticeApp({ onExit }) {
                     {EYES_FILTERS.map((f) => (
                       <button key={f} onClick={() => setEyesFilterName(f)}
                         className="ui-hit px-2.5 rounded-lg text-[10px] tap shrink-0"
-                        style={{ backgroundColor: f === eyesFilterName ? TEXT : RAISED,
-                          color: f === eyesFilterName ? BG : FAINT,
-                          border: `1px solid ${HAIR}` }}>
+                        style={{ backgroundColor: f === eyesFilterName ? "#1B1B1F" : RAISED,
+                          color: f === eyesFilterName ? TEXT : FAINT,
+                          border: `1px solid ${f === eyesFilterName ? "#3A393D" : HAIR}` }}>
                         {f}
                       </button>
                     ))}
@@ -6969,7 +6603,7 @@ function PracticeApp({ onExit }) {
 
           {tab === "Позиции" && (
             <div className="px-5 pt-2 pb-6">
-              <div className="text-[11px] tracking-[0.15em] mb-3" style={{ color: FAINT }}>ПОЗИЦИЯ</div>
+              <div className="text-[11px] tracking-[0.10em] mb-3" style={{ color: FAINT }}>ПОЗИЦИЯ</div>
               {pos ? (
                 <>
                   <div className="flex items-baseline justify-between mb-4">
@@ -6997,7 +6631,7 @@ function PracticeApp({ onExit }) {
                 </>
               ) : <Blank>Позиции нет</Blank>}
 
-              <div className="text-[11px] tracking-[0.15em] mt-8 mb-3" style={{ color: FAINT }}>ИТОГИ</div>
+              <div className="text-[11px] tracking-[0.10em] mt-8 mb-3" style={{ color: FAINT }}>ИТОГИ</div>
               <Line left="Стартовый капитал" right={fmt(human.startingCapital)} />
               <Line left="Эквити" right={fmt(equity)} />
               <Line left="Всего заработано" right={fmtSigned(equity - human.startingCapital)}
@@ -7005,81 +6639,60 @@ function PracticeApp({ onExit }) {
               <Line left="Реализованный PnL" right={fmtSigned(human.realizedPnL)}
                 color={human.realizedPnL >= 0 ? LONG : SHORT} />
               <Line left="Место в рейтинге" right={`${snap.rank} из ${snap.totalPlayers}`} />
-
-              <div className="text-[11px] tracking-[0.15em] mt-8 mb-3" style={{ color: FAINT }}>ВАШИ СДЕЛКИ</div>
-              {snap.yourTrades.length === 0 ? <Blank>сделок не было</Blank> :
-                snap.yourTrades.map((t, i) => (
-                  <Line key={i}
-                    left={`${clock(t.time)} · ${t.action === "BUY" ? "покупка" : t.action === "SELL" ? "продажа" : "закрытие"}`}
-                    right={`${fmt(t.notional, 0)} @ ${t.execPrice.toFixed(2)}${t.realizedPnL !== undefined ? `  ${fmtSigned(t.realizedPnL)}` : ""}`}
-                    color={t.flow === "buy" ? LONG : SHORT} />
-                ))}
             </div>
           )}
 
-          {tab === "Ордера" && (
+          {tab === "Защита" && (
             <div className="px-5 pt-2 pb-6">
-              <div className="text-[11px] tracking-[0.15em] mb-3" style={{ color: FAINT }}>
-                ЛИМИТНЫЕ ЗАЯВКИ · {myLimits.length}
+              <div className="text-[11px] tracking-[0.10em] mb-3" style={{ color: FAINT }}>
+                ЗАЩИТА ПОЗИЦИИ
               </div>
-              {myLimits.length === 0 ? <Blank>активных заявок нет</Blank> :
-                myLimits.map((o) => (
-                  <div key={o.id} className="flex items-center justify-between py-3 border-b" style={{ borderColor: HAIR }}>
-                    <div>
-                      <div className="text-[13px]" style={{ color: o.side === "buy" ? LONG : SHORT }}>
-                        {o.side === "buy" ? "покупка" : "продажа"} {fmt(o.notional, 0)}
-                      </div>
-                      <div className="text-[11px] font-mono" style={{ color: FAINT }}>
-                        при цене {o.side === "buy" ? "≤" : "≥"} {o.limitPrice.toFixed(2)}
-                      </div>
-                    </div>
-                    <button onClick={async () => { if ((await send({ type: "CANCEL_LIMIT", orderId: o.id })).ok) say("заявка снята"); }}
-                      className="ui-hit px-2 text-[12px] tap" style={{ color: DIM }}>снять</button>
-                  </div>
-                ))}
-
-              <div className="text-[11px] tracking-[0.15em] mt-8 mb-3" style={{ color: FAINT }}>ЗАЩИТА ПОЗИЦИИ</div>
               {!pos ? <Blank>нужна открытая позиция</Blank> : (
                 <>
                   <div className="flex items-center justify-between py-3 border-b" style={{ borderColor: HAIR }}>
-                    <span className="text-[13px] font-mono">стоп {human.stopLoss ? fmt(human.stopLoss) : "—"}</span>
+                    <div>
+                      <div className="text-[10px] tracking-[0.12em]" style={{ color: FAINT }}>СТОП</div>
+                      <div className="text-[14px] font-mono mt-1">{human.stopLoss ? fmt(human.stopLoss) : "не установлен"}</div>
+                    </div>
                     {human.stopLoss && (
                       <button onClick={() => send({ type: "PROTECT", clear: "sl", stopLoss: null, takeProfit: null })}
-                        className="ui-hit px-2 text-[12px] tap" style={{ color: DIM }}>убрать</button>
+                        className="ui-hit px-3 rounded-xl text-[11px] tap" style={btnSoft(false)}>СНЯТЬ</button>
                     )}
                   </div>
                   <div className="flex items-center justify-between py-3">
-                    <span className="text-[13px] font-mono">тейк {human.takeProfit ? fmt(human.takeProfit) : "—"}</span>
+                    <div>
+                      <div className="text-[10px] tracking-[0.12em]" style={{ color: FAINT }}>ТЕЙК</div>
+                      <div className="text-[14px] font-mono mt-1">{human.takeProfit ? fmt(human.takeProfit) : "не установлен"}</div>
+                    </div>
                     {human.takeProfit && (
                       <button onClick={() => send({ type: "PROTECT", clear: "tp", stopLoss: null, takeProfit: null })}
-                        className="ui-hit px-2 text-[12px] tap" style={{ color: DIM }}>убрать</button>
+                        className="ui-hit px-3 rounded-xl text-[11px] tap" style={btnSoft(false)}>СНЯТЬ</button>
                     )}
                   </div>
+                  <button onClick={() => { setTab("Рынок"); setSheet("risk"); }}
+                    className="w-full min-h-[46px] rounded-xl mt-4 text-[11px] font-semibold tap"
+                    style={btnSoft(true)}>
+                    НАСТРОИТЬ SL / TP
+                  </button>
                 </>
               )}
-
-              <div className="text-[11px] tracking-[0.15em] mt-8 mb-3" style={{ color: FAINT }}>
-                ЗАЯВКИ УЧАСТНИКОВ · {snap.orders.length}
-              </div>
-              {snap.orders.length === 0
-                ? <Blank>боты пользуются стопами и тейками</Blank>
-                : snap.orders.slice(0, 20).map((o) => (
-                    <Line key={o.id} left={o.playerName}
-                      right={`${fmt(o.notional, 0)} @ ${o.limitPrice.toFixed(2)}`}
-                      color={o.side === "buy" ? LONG : SHORT} />
-                  ))}
             </div>
           )}
 
           {tab === "Участники" && (
             <div className="px-5 pt-2 pb-6">
               <div className="grid grid-cols-3 gap-3 mb-5">
-                <Metric label="В ЛОНГЕ" value={String(stats.longPlayers)} color={LONG} />
-                <Metric label="В ШОРТЕ" value={String(stats.shortPlayers)} color={SHORT} />
+                <Metric label="ЛОНГИ" value={String(stats.longPlayers)} color={LONG} />
+                <Metric label="ШОРТЫ" value={String(stats.shortPlayers)} color={SHORT} />
                 <Metric label="ВНЕ РЫНКА" value={String(stats.flatPlayers)} />
               </div>
+              {snap.freeMarket && (
+                <div className="text-[10px] leading-snug mb-3" style={{ color: FAINT }}>
+                  Список ниже — выборка участников. Общие показатели сверху считаются по всему рынку.
+                </div>
+              )}
               <div className="flex gap-0.5 mb-2 flex-wrap">
-                {["Все", "Лонг", "Шорт", "Вне рынка", "Топ-15"].map((f) => (
+                {(snap.freeMarket ? ["Все", "Лонг", "Шорт", "Вне рынка"] : ["Все", "Лонг", "Шорт", "Вне рынка", "Топ-15"]).map((f) => (
                   <Toggle key={f} active={playerFilter === f} onClick={() => setPlayerFilter(f)}>{f}</Toggle>
                 ))}
               </div>
@@ -7092,7 +6705,7 @@ function PracticeApp({ onExit }) {
                   ? ((b.equity - b.startingCapital) / Math.max(1e-9, b.startingCapital))
                     - ((a.equity - a.startingCapital) / Math.max(1e-9, a.startingCapital))
                   : b.equity - a.equity);
-                if (playerFilter === "Топ-15") list = list.slice(0, 15);
+                if (!snap.freeMarket && playerFilter === "Топ-15") list = list.slice(0, 15);
                 if (list.length === 0) return <Blank>пусто</Blank>;
                 return list.map((p, i) => {
                   const eq = p.equity;
@@ -7111,7 +6724,7 @@ function PracticeApp({ onExit }) {
                           )}
                         </div>
                         <div className="text-[11px] truncate" style={{ color: FAINT }}>
-                          {p.isHuman ? "вы" : STRATEGY_LABELS[p.archetype]} · сделок {p.tradeCount}
+                          {p.isHuman ? "вы" : (STRATEGY_LABELS[p.archetype] || "участник")} · сделок {p.tradeCount}
                         </div>
                       </div>
                       <div className="text-right whitespace-nowrap">
@@ -7128,142 +6741,27 @@ function PracticeApp({ onExit }) {
             </div>
           )}
 
-          {tab === "Отладка" && (
-            <div className="px-5 pt-2 pb-6">
-              <div className="text-[11px] tracking-[0.15em] mb-3" style={{ color: FAINT }}>КАПИТАЛ СИСТЕМЫ</div>
-              <Line left="Общий капитал рынка" right={fmt(state.totalCapital)} />
-              <Line left="Свободный кэш участников" right={fmt(stats.totalCash)} />
-              <Line left="Кэш пула" right={fmt(snap.debug?.poolCash ?? 0)} />
-              <Line left="Эквити пула" right={fmt(stats.poolEquity)} />
-              <Line left="Эквити участников" right={fmt(stats.totalEquity)} />
-              <Line left="Сумма" right={fmt(stats.totalEquity + stats.poolEquity)} />
-              <Line left="Расхождение капитала" right={(snap.debug?.capitalDrift ?? 0).toExponential(2)}
-                color={Math.abs(snap.debug?.capitalDrift ?? 0) < 1e-5 ? LONG : SHORT} />
 
-              <div className="text-[11px] tracking-[0.15em] mt-8 mb-3" style={{ color: FAINT }}>МЕХАНИКА ЦЕНЫ</div>
-              <Line left="Оборот покупок (всего)" right={fmt(state.buyTotal ?? 0, 0)} />
-              <Line left="Оборот продаж (всего)" right={fmt(state.sellTotal ?? 0, 0)} />
-              <Line left="Чистый оборот (всего)" right={fmtSigned(state.netTotal ?? 0, 0)}
-                color={(state.netTotal ?? 0) >= 0 ? LONG : SHORT} />
-              <Line left="Оборот за тик" right={fmt((state.buyPressure ?? 0) + (state.sellPressure ?? 0))} />
-              <Line left="Заработали лонги" right={fmtSigned(state.longRealized ?? 0)}
-                color={(state.longRealized ?? 0) >= 0 ? LONG : SHORT} />
-              <button onClick={togglePause}
-                className="w-full text-left py-2.5 text-[13px] tap"
-                style={{ color: paused ? SHORT : DIM, borderBottom: `1px solid ${HAIR}` }}>
-                {paused ? "Рынок на паузе — возобновить" : "Поставить рынок на паузу"}
-              </button>
-              <Line left="Фаза сессии"
-                right={snap.sessionPhase === null || snap.sessionPhase === undefined
-                  ? "без таймера" : `${Math.round(snap.sessionPhase * 100)}%`} />
-              <Line left="Плечо" right={`x${snap.leverage ?? 1}`} />
-              <Line left="Поддерживающая маржа"
-                right={`${((snap.maintenance ?? 0) * 100).toFixed(0)}%`} />
-              <Line left="Ликвидаций в сессии" right={String(snap.liquidations ?? 0)} />
-              <Line left="Заработали шорты" right={fmtSigned(state.shortRealized ?? 0)}
-                color={(state.shortRealized ?? 0) >= 0 ? LONG : SHORT} />
-              <Line left="Перевес ставок (только отладка)" right={fmt(state.liquidity)} />
-              <Line left="Скрытый центр (только отладка)"
-                right={fmt(snap.debug?.center ?? 0)} />
-              <Line left="Капитализация" right={fmt(stats.marketCap)} />
-              <Line left="Фаза рынка" right={state.phase} />
-              <Line left="Скорость (10 тиков)" right={signedPct(snap.context?.speed ?? 0)} />
-              <Line left="Волатильность (40 тиков)"
-                right={((snap.context?.volatility ?? 0) * 100).toFixed(3) + "%"} />
-              <Line left="Перекос толпы" right={signedPct(snap.context?.imbalance ?? 0, 0)}
-                color={(snap.context?.imbalance ?? 0) >= 0 ? LONG : SHORT} />
-              <Line left="Всего сделок" right={String(snap.totalTrades)} />
-
-              <div className="text-[11px] tracking-[0.15em] mt-8 mb-2" style={{ color: FAINT }}>
-                СДЕЛКИ ПОСЛЕДНЕГО ТИКА · ПОЧЕМУ ЦЕНА ДВИНУЛАСЬ
-              </div>
-              {(snap.debug?.lastTrades ?? []).length === 0
-                ? <Blank>сделок не было — цена стоит на месте</Blank>
-                : snap.debug.lastTrades.slice(0, 14).map((t, i) => (
-                    <Line key={i}
-                      left={`${t.playerName} · ${t.action === "BUY" ? "покупка" : t.action === "SELL" ? "продажа" : "закрытие"} · ${t.reason}`}
-                      right={`${fmt(t.notional, 0)} @ ${t.execPrice.toFixed(2)}`}
-                      color={t.flow === "buy" ? LONG : SHORT} />
-                  ))}
-
-              <div className="flex items-center justify-between mt-8 mb-2">
-                <span className="text-[11px] tracking-[0.15em]" style={{ color: FAINT }}>NPC И ПРИЧИНЫ РЕШЕНИЙ</span>
-                <div className="flex gap-0.5">
-                  {["активные", "все"].map((m) => (
-                    <Toggle key={m} active={npcMode === m} onClick={() => setNpcMode(m)}>{m}</Toggle>
-                  ))}
-                </div>
-              </div>
-              {(() => {
-                // Отладочный блок приходит только в dev-снапшоте.
-                // В продакшене сервер его не отдаёт, и вкладка будет пустой.
-                let list = snap.players.filter((p) => p.debug);
-                if (list.length === 0) return <Blank>отладка ботов доступна только в dev-режиме</Blank>;
-                if (npcMode === "активные") {
-                  list = list.filter((p) => p.position || snap.tick - p.debug.lastActionTick < 120);
-                }
-                list = list.sort((a, b) => b.debug.lastActionTick - a.debug.lastActionTick).slice(0, 25);
-                if (list.length === 0) return <Blank>сейчас никто не действует</Blank>;
-                return list.map((p) => {
-                  const pnlNow = p.unrealized;
-                  return (
-                    <div key={p.id} className="py-2.5 border-b" style={{ borderColor: HAIR }}>
-                      <div className="flex justify-between gap-2">
-                        <span className="text-[12px] truncate">
-                          {p.name} · <span style={{ color: DIM }}>{STRATEGY_LABELS[p.archetype]}</span>
-                        </span>
-                        <span className="text-[12px] font-mono whitespace-nowrap">{p.debug.lastAction}</span>
-                      </div>
-                      <div className="text-[11px] font-mono mt-0.5" style={{ color: FAINT }}>
-                        капитал {fmt(p.equity, 0)} ·{" "}
-                        {p.position
-                          ? `${p.position.side} ${fmt(p.position.margin, 0)} от ${p.position.entryPrice.toFixed(2)} · ${fmtSigned(pnlNow)}`
-                          : "вне рынка"}
-                      </div>
-                      <div className="text-[11px] font-mono" style={{ color: FAINT }}>
-                        окно {p.debug.lookback}т · решение каждые {(p.debug.intervalTicks / 10).toFixed(1)}с ·
-                        {" "}точность {(p.debug.accuracy * 100).toFixed(0)}% · ошибок {p.debug.mistakes}
-                      </div>
-                      <div className="text-[11px] font-mono" style={{ color: FAINT }}>
-                        +{p.debug.wins} / −{p.debug.losses} · уверенность {(p.debug.confidence * 100).toFixed(0)}% ·
-                        {" "}режим {p.debug.regimeBias > 0.2 ? "за трендом" : p.debug.regimeBias < -0.2 ? "против тренда" : "нейтрально"} ·
-                        {" "}след. решение в {p.debug.nextDecisionTick}
-                      </div>
-                      <div className="flex flex-wrap gap-x-3 mt-0.5">
-                        {(p.debug.lastReasons ?? []).map(([label, value], i) => (
-                          <span key={i} className="text-[11px] font-mono"
-                            style={{ color: value > 0 ? LONG : value < 0 ? SHORT : FAINT }}>
-                            {label} {value >= 0 ? "+" : ""}{value.toFixed(2)}
-                          </span>
-                        ))}
-                      </div>
-                    </div>
-                  );
-                });
-              })()}
-            </div>
-          )}
         </div>
 
         {/* ---------------------------- панель торговли ---------------------- */}
         {tab === "Рынок" && (
           <div className="px-4 pt-2 pb-2 border-t"
-            style={{ borderColor: HAIR, backgroundColor: "#050506" }}>
+            style={{ borderColor: HAIR, background: "linear-gradient(180deg,#070708,#030304)" }}>
 
             {sheet && snap.tradingOpen && (
               <>
                 <div className="fixed inset-0 z-10" style={{ backgroundColor: "rgba(0,0,0,0.78)" }}
                   onClick={() => setSheet(null)} />
                 <div className="relative z-20 mb-3 rounded-[22px] p-4 tx-sheet"
-                  style={{ backgroundColor: SURFACE, border: `1px solid ${HAIR}`,
-                    boxShadow: "0 18px 60px rgba(0,0,0,.45)" }}>
+                  style={{ ...CARD, boxShadow: "0 18px 60px rgba(0,0,0,.48)" }}>
                   <div className="flex justify-between items-center gap-3 mb-4">
                     <div>
-                      <div className="text-[10px] tracking-[0.18em]" style={{ color: FAINT }}>
-                        {sheet === "risk" ? "ЗАЩИТА ПОЗИЦИИ" : "ОТЛОЖЕННЫЙ ОРДЕР"}
+                      <div className="text-[10px] tracking-[0.12em]" style={{ color: FAINT }}>
+                        ЗАЩИТА ПОЗИЦИИ
                       </div>
                       <div className="text-[16px] mt-1">
-                        {sheet === "risk" ? "Стоп / тейк" : "Лимитная заявка"}
+                        Стоп / тейк
                       </div>
                     </div>
                     <button onClick={() => setSheet(null)}
@@ -7273,8 +6771,7 @@ function PracticeApp({ onExit }) {
                     </button>
                   </div>
 
-                  {sheet === "risk" ? (
-                    <div className="flex flex-col gap-2.5">
+                  <div className="flex flex-col gap-2.5">
                       {[["sl", "СТОП", [0.01, 0.02, 0.05], "−", human.stopLoss],
                         ["tp", "ТЕЙК", [0.01, 0.03, 0.06], "+", human.takeProfit]].map(
                         ([kind, label, steps, sign, current]) => (
@@ -7282,7 +6779,7 @@ function PracticeApp({ onExit }) {
                             style={{ backgroundColor: RAISED, border: `1px solid ${HAIR}` }}>
                             <div className="flex items-center justify-between gap-3 mb-2.5">
                               <div>
-                                <div className="text-[9px] tracking-[0.16em]" style={{ color: FAINT }}>{label}</div>
+                                <div className="text-[9px] tracking-[0.11em]" style={{ color: FAINT }}>{label}</div>
                                 <div className="text-[13px] font-mono mt-1" style={{ color: current ? TEXT : DIM }}>
                                   {current ? fmt(current) : "не установлен"}
                                 </div>
@@ -7313,74 +6810,17 @@ function PracticeApp({ onExit }) {
                         </div>
                       )}
                     </div>
-                  ) : (
-                    <div className="flex flex-col gap-3">
-                      <div className="grid grid-cols-2 gap-2">
-                        {["buy", "sell"].map((sideKey) => {
-                          const active = limitSide === sideKey;
-                          const color = sideKey === "buy" ? LONG : SHORT;
-                          return (
-                            <button key={sideKey} onClick={() => setLimitSide(sideKey)}
-                              className="min-h-[46px] rounded-xl text-[12px] font-semibold tap"
-                              style={{ backgroundColor: active ? `${color}20` : RAISED,
-                                color: active ? color : DIM,
-                                border: `1px solid ${active ? color : HAIR}` }}>
-                              {sideKey === "buy" ? "LONG" : "SHORT"}
-                            </button>
-                          );
-                        })}
-                      </div>
-
-                      <div>
-                        <div className="flex items-center justify-between mb-1.5">
-                          <span className="text-[9px] tracking-[0.16em]" style={{ color: FAINT }}>ЦЕНА ИСПОЛНЕНИЯ</span>
-                          <span className="text-[10px] font-mono" style={{ color: DIM }}>
-                            сейчас {state.price.toFixed(2)}
-                          </span>
-                        </div>
-                        <input value={limitPrice} onChange={(e) => setLimitPrice(e.target.value)} inputMode="decimal"
-                          placeholder={state.price.toFixed(2)}
-                          className="ui-field w-full rounded-xl px-3.5 min-h-[48px] outline-none font-mono text-[16px]"
-                          style={{ backgroundColor: RAISED, color: TEXT, border: `1px solid ${HAIR}` }} />
-                      </div>
-
-                      <div className="flex items-center justify-between text-[10px]" style={{ color: FAINT }}>
-                        <span>РАЗМЕР {fmt(notional, 0)}</span>
-                        <span>ДОСТУПНО {fmt(orderCapacity, 0)}</span>
-                      </div>
-
-                      <button disabled={!validOrderSize || !Number.isFinite(Number(limitPrice)) || Number(limitPrice) <= 0}
-                        onClick={async () => {
-                          const res = await send({
-                            type: "LIMIT", side: limitSide, notional, limitPrice: Number(limitPrice),
-                          });
-                          if (res.ok) { setLimitPrice(""); setSheet(null); say("заявка выставлена"); }
-                        }}
-                        className="min-h-[48px] rounded-xl text-[12px] font-semibold tap disabled:opacity-30"
-                        style={btnSoft(true)}>
-                        ВЫСТАВИТЬ {limitSide === "buy" ? "LONG" : "SHORT"} · {fmt(notional, 0)}
-                      </button>
-                    </div>
-                  )}
                 </div>
               </>
             )}
 
-            {/* Компактная торговая панель: крупные action-кнопки остаются,
-                а служебные элементы собираются в две плотные строки, чтобы
-                график не терял треть экрана. */}
+            {/* Компактная торговая панель: позиция показывается только в блоке
+                состояния выше, здесь остаются размер сделки, SL/TP и действия. */}
             <div className="flex items-center justify-between gap-3 mb-2">
-              <div className="text-[9px] tracking-[0.18em]" style={{ color: FAINT }}>ОРДЕР</div>
-              <div className="flex items-center gap-2 min-w-0 text-[10px]">
-                {pos && (
-                  <span className="font-mono truncate" style={{ color: pos.side === "long" ? LONG : SHORT }}>
-                    {pos.side === "long" ? "LONG" : "SHORT"} {fmt(pos.margin, 0)} · {fmtSigned(pnl)}
-                  </span>
-                )}
-                <span className="font-mono shrink-0" style={{ color: DIM }}>
-                  свободно {fmt(orderCapacity, 0)}
-                </span>
-              </div>
+              <div className="text-[9px] tracking-[0.12em]" style={{ color: FAINT }}>ОРДЕР</div>
+              <span className="text-[10px] font-mono shrink-0" style={{ color: DIM }}>
+                свободно {fmt(orderCapacity, 0)}
+              </span>
             </div>
 
             <div className="flex items-stretch gap-1.5 mb-1.5">
@@ -7410,20 +6850,12 @@ function PracticeApp({ onExit }) {
                   ? `выше доступного на ${fmt(notional - orderCapacity, 0)}`
                   : notional > 0 ? `ордер ${fmt(notional, 0)}` : "введите размер"}
               </span>
-              <div className="flex gap-1.5 shrink-0">
-                <button disabled={!pos}
-                  onClick={() => pos && setSheet(sheet === "risk" ? null : "risk")}
-                  className="h-[34px] min-w-[78px] rounded-lg px-2.5 text-[10px] font-semibold tap disabled:opacity-30"
-                  style={sheet === "risk" ? btnSoft(true) : btnSoft(false)}>
-                  SL / TP
-                </button>
-                <button disabled={!snap.tradingOpen || !validOrderSize}
-                  onClick={() => snap.tradingOpen && validOrderSize && setSheet(sheet === "limit" ? null : "limit")}
-                  className="h-[34px] min-w-[78px] rounded-lg px-2.5 text-[10px] font-semibold tap disabled:opacity-30"
-                  style={sheet === "limit" ? btnSoft(true) : btnSoft(false)}>
-                  ЛИМИТ{myLimits.length ? ` · ${myLimits.length}` : ""}
-                </button>
-              </div>
+              <button disabled={!pos}
+                onClick={() => pos && setSheet(sheet === "risk" ? null : "risk")}
+                className="h-[34px] min-w-[82px] rounded-lg px-3 text-[10px] font-semibold tap disabled:opacity-30 shrink-0"
+                style={sheet === "risk" ? btnSoft(true) : btnSoft(false)}>
+                SL / TP
+              </button>
             </div>
 
             <div className="grid grid-cols-2 gap-2">
