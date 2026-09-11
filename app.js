@@ -1768,7 +1768,19 @@ const RU_LABELS = {
   spike: "импульс", maker: "мейкер", copycat: "копирующий", sniper: "снайпер",
   pullback: "откат", flow: "поток", accel: "ускорение", chase: "преследование",
 };
-const STRATEGY_LABELS = Object.fromEntries(TYPES.map((t) => [t, RU_LABELS[t] || t]));
+const EN_LABELS = {
+  breakout: "breakout", herd: "herd", hunter: "hunter", trap: "trap",
+  aggressive: "aggressive", conservative: "conservative", momentum: "momentum",
+  contrarian: "contrarian", random: "random", scared: "risk-averse", greedy: "greedy",
+  scalper: "scalper", longterm: "long-term", panic: "panic", inactive: "passive",
+  crowdfade: "crowd fade", meanrev: "mean reversion", range: "range", squeeze: "squeeze",
+  spike: "spike", maker: "maker", copycat: "copycat", sniper: "sniper", pullback: "pullback",
+  flow: "flow", accel: "acceleration", chase: "chase",
+};
+function strategyLabel(type) {
+  const labels = ACTIVE_LANG === "en" ? EN_LABELS : RU_LABELS;
+  return labels[type] || type;
+}
 
 function clock(ms) {
   const s = Math.floor(ms / 1000);
@@ -1779,6 +1791,316 @@ function clock(ms) {
 function signedPct(v, d = 2) {
   const s = v >= 0 ? "+" : "";
   return `${s}${(v * 100).toFixed(d)}%`;
+}
+
+/* ------------------------------ ЛОКАЛИЗАЦИЯ ------------------------------
+   Язык хранится отдельно от игровых state-ключей. Внутри движка и UI-state
+   по-прежнему используются стабильные значения (например, "Рынок"), а
+   пользователь видит перевод через tr(). Поэтому смена языка не ломает
+   вкладки, фильтры, таймфреймы или открытую сессию. */
+const LANGUAGE_KEY = "tradeexe:language";
+function readLanguage() {
+  try { return localStorage.getItem(LANGUAGE_KEY) === "en" ? "en" : "ru"; }
+  catch (_) { return "ru"; }
+}
+let ACTIVE_LANG = readLanguage();
+function setActiveLanguage(code) {
+  ACTIVE_LANG = code === "en" ? "en" : "ru";
+  try { localStorage.setItem(LANGUAGE_KEY, ACTIVE_LANG); } catch (_) {}
+  if (typeof document !== "undefined") document.documentElement.lang = ACTIVE_LANG;
+  return ACTIVE_LANG;
+}
+setActiveLanguage(ACTIVE_LANG);
+
+const EN = {
+  "Назад": "Back",
+  "ПОДГОТОВКА СРЕДЫ": "PREPARING ENVIRONMENT",
+  "готово": "ready",
+  "проверка аккаунта": "checking account",
+  "загрузка профиля": "loading profile",
+  "прогрев движка": "warming up engine",
+  "синхронизация интерфейса": "syncing interface",
+  "РЕАЛЬНЫЙ РЫНОК": "REAL MARKET",
+  "Цена формируется только действиями участников.": "Price is formed only by participant actions.",
+  "ЖИВЫЕ ИГРОКИ": "LIVE PLAYERS",
+  "Торгуй против других участников в реальном времени.": "Trade against other participants in real time.",
+  "НИЧЕГО ЛИШНЕГО": "NOTHING EXTRA",
+  "Никаких внешних факторов. Только ты и рынок.": "No outside factors. Just you and the market.",
+  "ЗАКРЫТЫЙ РЫНОК": "CLOSED MARKET",
+  "ДЛЯ ПРАКТИКИ": "FOR PRACTICE",
+  "Готовы начать?": "Ready to start?",
+  "ВОЙТИ": "SIGN IN",
+  "ДАЛЕЕ": "NEXT",
+  "СОЗДАТЬ АККАУНТ": "CREATE ACCOUNT",
+  "ПРОПУСТИТЬ": "SKIP",
+  "скрыть": "hide",
+  "показать": "show",
+  "СОЗДАЙТЕ АККАУНТ": "CREATE YOUR ACCOUNT",
+  "ДОБРО ПОЖАЛОВАТЬ": "WELCOME BACK",
+  "Начните торговать": "Start trading",
+  "Войдите в свой аккаунт": "Sign in to your account",
+  "РЕГИСТРАЦИЯ": "SIGN UP",
+  "ПАРОЛЬ": "PASSWORD",
+  "Введите пароль": "Enter password",
+  "ПОДТВЕРДИТЕ ПАРОЛЬ": "CONFIRM PASSWORD",
+  "Повторите пароль": "Repeat password",
+  "Запомнить меня": "Remember me",
+  "Забыли пароль?": "Forgot password?",
+  "Я принимаю Пользовательское соглашение и Политику конфиденциальности": "I accept the Terms of Use and Privacy Policy",
+  "ПОДОЖДИТЕ…": "PLEASE WAIT…",
+  "ИЛИ": "OR",
+  "ПРОФИЛЬ": "PROFILE",
+  "СЕССИЙ": "SESSIONS",
+  "ПРИБЫЛЬНЫХ": "PROFITABLE",
+  "ВИНРЕЙТ": "WIN RATE",
+  "СРЕДНЯЯ": "AVERAGE",
+  "ЛУЧШАЯ": "BEST",
+  "ХУДШАЯ": "WORST",
+  "СРЕД. МЕСТО": "AVG. RANK",
+  "ЛУЧШЕЕ МЕСТО": "BEST RANK",
+  "ВСЕГО СДЕЛОК": "TOTAL TRADES",
+  "СРЕД. ВРЕМЯ": "AVG. TIME",
+  "ВЗНОСОВ": "ENTRY CAPITAL",
+  "СДЕЛОК/СЕССИЯ": "TRADES/SESSION",
+  "ЗАРАБОТАНО": "EARNED",
+  "ПОТЕРЯНО": "LOST",
+  "РАСПРЕДЕЛЕНИЕ МЕСТ": "RANK DISTRIBUTION",
+  "ВСЕ СЕССИИ": "ALL SESSIONS",
+  "СВОБОДНЫЙ РЫНОК": "FREE MARKET",
+  "Всегда открыт": "Always open",
+  "ОТКРЫТЬ →": "OPEN →",
+  "ТРОФЕИ": "TROPHIES",
+  "ОБМЕН НА БОНУС": "REDEEM FOR BONUS",
+  "ОБМЕНЯТЬ": "REDEEM",
+  "НЕ ХВАТАЕТ": "NOT ENOUGH",
+  "ПОПОЛНЕНИЕ БАЛАНСА": "ADD FUNDS",
+  "ТЕКУЩИЙ БАЛАНС": "CURRENT BALANCE",
+  "СУММА ПОПОЛНЕНИЯ": "AMOUNT TO ADD",
+  "СПОСОБ ОПЛАТЫ": "PAYMENT METHOD",
+  "ПОПОЛНИТЬ": "ADD FUNDS",
+  "ВЫВОД СРЕДСТВ": "WITHDRAW FUNDS",
+  "ДОСТУПНО К ВЫВОДУ": "AVAILABLE TO WITHDRAW",
+  "СУММА ВЫВОДА": "WITHDRAWAL AMOUNT",
+  "ВСЁ": "ALL",
+  "КУДА ВЫВЕСТИ": "WITHDRAW TO",
+  "ВЫВЕСТИ": "WITHDRAW",
+  "РЕЙТИНГ ИГРОКОВ": "PLAYER RANKING",
+  "ИГРОК": "PLAYER",
+  "РЕЗУЛЬТАТ": "RESULT",
+  "Рынки": "Markets",
+  "Разные режимы одной рыночной модели.": "Different modes built on the same market model.",
+  "ГЛАВНАЯ": "HOME",
+  "РЫНКИ": "MARKETS",
+  "РЕЙТИНГ": "RANKING",
+  "УРОВЕНЬ": "LEVEL",
+  "СЕРИЯ": "STREAK",
+  "ЛУЧШАЯ СЕССИЯ": "BEST SESSION",
+  "НАСТРОЙКИ": "SETTINGS",
+  "ЯЗЫК": "LANGUAGE",
+  "АККАУНТ": "ACCOUNT",
+  "БАЛАНС": "BALANCE",
+  "Отмена": "Cancel",
+  "Обнулить": "Reset",
+  "Пополнить": "Add funds",
+  "Вывести": "Withdraw",
+  "Трофеи": "Trophies",
+  "ОНЛАЙН РЫНОК": "ONLINE MARKET",
+  "СЕРВЕРНАЯ ВЕРСИЯ": "SERVER VERSION",
+  "ОФЛАЙН ПРАКТИКА": "OFFLINE PRACTICE",
+  "ОТКРЫТЬ ПРАКТИКУ": "OPEN PRACTICE",
+  "ДНЕВНАЯ ДИНАМИКА": "PERFORMANCE",
+  "ПОСЛЕДНИЕ СЕССИИ": "RECENT SESSIONS",
+  "СМОТРЕТЬ ВСЕ": "VIEW ALL",
+  "БОТЫ": "BOTS",
+  "МИН. ВХОД": "MIN. ENTRY",
+  "МАКС. ВХОД": "MAX. ENTRY",
+  "КАПИТАЛ ДЛЯ ВХОДА": "ENTRY CAPITAL",
+  "Таймер": "Timer",
+  "Штраф за выход": "Exit penalty",
+  "Баланс участников": "Participant balances",
+  "нет": "none",
+  "разный": "varied",
+  "Новая сессия": "New session",
+  "EYES-сессия": "EYES session",
+  "ВЗНОС": "ENTRY",
+  "УЧАСТНИКИ": "PARTICIPANTS",
+  "ПЛЕЧО": "LEVERAGE",
+  "без плеча": "no leverage",
+  "ДЛИТЕЛЬНОСТЬ": "DURATION",
+  "Капитал комнаты": "Room capital",
+  "Равный старт": "Equal start",
+  "Досрочный выход": "Early exit",
+  "ПОДБОР УЧАСТНИКОВ": "MATCHING PLAYERS",
+  "ОТМЕНИТЬ ПОДБОР": "CANCEL MATCHING",
+  "Взнос каждого": "Entry per player",
+  "Актив": "Asset",
+  "Режим": "Mode",
+  "ВЫХОД ИЗ FREE MARKET": "FREE MARKET EXIT",
+  "ДОСРОЧНЫЙ ВЫХОД": "EARLY EXIT",
+  "СЕССИЯ ЗАВЕРШЕНА": "SESSION COMPLETE",
+  "Введено": "Entered",
+  "Итоговый капитал": "Final capital",
+  "Место": "Rank",
+  "Сделки": "Trades",
+  "Время в рынке": "Time in market",
+  "Цена выхода": "Exit price",
+  "Штраф за досрочный выход": "Early-exit penalty",
+  "ЛУЧШИЕ В КОМНАТЕ": "ROOM LEADERS",
+  "НА ГЛАВНУЮ": "BACK TO HOME",
+  "ЕЩЁ": "MORE",
+  "СКОРОСТЬ": "SPEED",
+  "Да, завершить": "Yes, end",
+  "РЫНОК ОТКРОЕТСЯ ЧЕРЕЗ": "MARKET OPENS IN",
+  "ЛОНГИ": "LONGS",
+  "ШОРТЫ": "SHORTS",
+  "PNL ЛОНГОВ": "LONG PNL",
+  "PNL ШОРТОВ": "SHORT PNL",
+  "СВЕЧИ": "CANDLES",
+  "ЛИНИЯ": "LINE",
+  "ЭКВИТИ": "EQUITY",
+  "СВОБОДНО": "AVAILABLE",
+  "ПОЗИЦИЯ": "POSITION",
+  "МАРЖА": "MARGIN",
+  "Цена входа": "Entry price",
+  "Текущая цена": "Current price",
+  "Объём в единицах": "Position units",
+  "При закрытии сейчас": "Value if closed now",
+  "Стоп-лосс": "Stop loss",
+  "Тейк-профит": "Take profit",
+  "всё": "all",
+  "ИТОГИ": "SUMMARY",
+  "Стартовый капитал": "Starting capital",
+  "Эквити": "Equity",
+  "Всего заработано": "Total PnL",
+  "Реализованный PnL": "Realized PnL",
+  "Место в рейтинге": "Ranking",
+  "ЗАЩИТА ПОЗИЦИИ": "POSITION PROTECTION",
+  "СТОП": "STOP",
+  "ТЕЙК": "TAKE PROFIT",
+  "СНЯТЬ": "REMOVE",
+  "НАСТРОИТЬ SL / TP": "SET SL / TP",
+  "ВНЕ РЫНКА": "FLAT",
+  "Все": "All",
+  "Лонг": "Long",
+  "Шорт": "Short",
+  "Вне рынка": "Flat",
+  "Топ-15": "Top 15",
+  "пусто": "empty",
+  "Стоп / тейк": "Stop / take profit",
+  "ЗАКРЫТЬ": "CLOSE",
+  "ОРДЕР": "ORDER",
+  "ЛОНГ": "LONG",
+  "ШОРТ": "SHORT",
+  "ЗАКРЫТЬ ПОЗИЦИЮ": "CLOSE POSITION",
+  "Позиции": "Positions",
+  "Защита": "Protection",
+  "Участники": "Participants",
+  "Рынок": "Market",
+  "не установлен": "not set",
+  "Позиции нет": "No open position",
+  "нужна открытая позиция": "an open position is required",
+  "собираем свечи…": "building candles…",
+  "КЛАСТЕРОВ": "CLUSTERS",
+  "активных зон нет": "no active zones",
+  "история пока пуста": "history is empty",
+  "потенциальное давление продаж": "potential sell pressure",
+  "потенциальное давление покупок": "potential buy pressure",
+  "вы": "you",
+  "участник": "participant",
+  "гость": "guest",
+  "почта аккаунта": "account email",
+  "Сменить режим": "Change mode",
+  "Выйти из аккаунта": "Sign out",
+  "Сбросить баланс до $0": "Reset balance to $0",
+  "пополнить можно на экране пополнения": "you can add funds from the deposit screen",
+};
+Object.assign(EN, {
+  "Банковская карта": "Bank card",
+  "Другой способ": "Other method",
+  "Минимальная сумма — $10": "Minimum amount — $10",
+  "недоступно сейчас": "unavailable",
+  "открыть рынок": "open market",
+  "Свободный рынок без конца сессии": "Free market with no session end",
+  "ботов": "bots",
+  "вход": "entry",
+  "режим": "mode",
+  "Участники с разными балансами и стратегиями. Войти и выйти можно в любой момент.": "Participants use different balances and strategies. Enter or leave at any time.",
+  "Закрытая сессия с одинаковым капиталом участников": "Closed session with equal starting capital",
+  "участники": "participants",
+  "взнос": "entry",
+  "тик": "tick",
+  "Подходит для коротких соревновательных сессий и проверки стратегий.": "Built for short competitive sessions and strategy testing.",
+  "Тот же рынок с обезличенными зонами SL / TP": "The same market with anonymized SL / TP zones",
+  "данные": "data",
+  "стопы / тейки": "stops / takes",
+  "имена": "names",
+  "скрыты": "hidden",
+  "математика": "math",
+  "та же": "same",
+  "Дополнительный информационный слой без изменения базовой цены рынка.": "An extra information layer that does not change the underlying market price.",
+  "сессий ещё не было": "no sessions yet",
+  "ОНЛАЙН РЫНОК": "ONLINE MARKET",
+  "Реальные участники и единая сессия в реальном времени": "Real participants in one live session",
+  "Онлайн-комнаты появятся после подключения сервера. Пока доступна офлайн-практика.": "Online rooms will be available once the server is connected. Offline practice is available for now.",
+  "ОФЛАЙН ПРАКТИКА": "OFFLINE PRACTICE",
+  "Та же рыночная модель локально — для тестов и практики": "The same market model running locally for testing and practice",
+  "суммарный результат": "cumulative result",
+  "здесь появятся результаты ваших сессий": "your session results will appear here",
+  "Свободный рынок": "Free market",
+  "Непрерывный рынок из 5 000 автономных участников. Вход и выход — в любой момент.": "A continuous market with 5,000 autonomous participants. Enter and exit at any time.",
+  "Доступный диапазон": "Available range",
+  "Пока приложение открыто, повторный вход возвращает в тот же локальный рынок. После полной перезагрузки создаётся новое ядро.": "While the app stays open, re-entering returns you to the same local market. A full reload creates a new market instance.",
+  "Настройте капитал, размер комнаты и время. Все участники начинают на равных условиях.": "Choose capital, room size and duration. Every participant starts on equal terms.",
+  "не хватает баланса": "insufficient balance",
+  "позиция закрывается автоматически.": "the position is closed automatically.",
+  "В конце сессии на баланс возвращается итоговый капитал. Размер взноса меняет масштаб денег, но не поведение модели.": "At the end of the session, final equity returns to your balance. Entry size changes the money scale, not the market model.",
+  "вы вошли в комнату": "you joined the room",
+  "обычный": "standard",
+  "результат от введённого капитала": "return on entered capital",
+  "результат сессии": "session result",
+  "Взнос": "Entry",
+  "Открытая позиция будет закрыта по текущему рынку. Штрафа за выход нет, итоговый капитал вернётся на баланс.": "Your open position will be closed at the current market price. There is no exit penalty; final equity will return to your balance.",
+  "До открытия цена стоит и торговля полностью недоступна.": "Price is frozen until the market opens and trading is disabled.",
+  "Позиция была закрыта принудительно по маржин-коллу.": "The position was force-closed by a margin call.",
+  "Позиции нет": "No open position",
+  "Список ниже — выборка участников. Общие показатели сверху считаются по всему рынку.": "The list below is a participant sample. Summary metrics above are calculated across the full market.",
+  "Сначала откройте позицию — уровни рассчитываются от цены входа.": "Open a position first — protection levels are calculated from the entry price.",
+  "Размер позиции": "Position size",
+  "введите размер": "enter size",
+  "закрыть SHORT": "close SHORT",
+  "закрыть LONG": "close LONG",
+  "позиция закрыта": "position closed",
+  "свободно": "available",
+});
+
+function tr(ru) { return ACTIVE_LANG === "en" ? (EN[ru] || ru) : ru; }
+function tfLabel(label) {
+  if (ACTIVE_LANG !== "en") return label;
+  return ({ "1с": "1s", "5с": "5s", "15с": "15s", "1м": "1m", "5м": "5m" })[label] || label;
+}
+function gameTabLabel(key) {
+  return ({ "Рынок": tr("Рынок"), "Позиции": tr("Позиции"), "Защита": tr("Защита"), "Участники": tr("Участники"), EYES: "EYES" })[key] || key;
+}
+function filterLabel(key) {
+  return ({ "Все": tr("Все"), "Лонг": tr("Лонг"), "Шорт": tr("Шорт"), "Вне рынка": tr("Вне рынка"), "Топ-15": tr("Топ-15") })[key] || key;
+}
+function periodLabel(key) {
+  if (ACTIVE_LANG !== "en") return key;
+  return ({ "ДЕНЬ": "DAY", "НЕДЕЛЯ": "WEEK", "МЕСЯЦ": "MONTH", "ВСЁ ВРЕМЯ": "ALL TIME", "СЕГОДНЯ": "TODAY" })[key] || key;
+}
+function translateEngineReason(reason) {
+  if (ACTIVE_LANG !== "en" || !reason) return reason;
+  return ({
+    "нет такого участника": "participant not found",
+    "пустая команда": "empty command",
+    "неизвестное действие": "unknown action",
+    "нет открытой позиции": "no open position",
+    "неверный объём": "invalid size",
+    "недостаточно свободных средств": "insufficient available funds",
+    "неизвестная команда": "unknown command",
+    "рынок ещё не открыт": "market is not open yet",
+    "вы уже вышли из свободного рынка": "you have already left the free market",
+  })[reason] || reason;
 }
 
 /* ============================== EYES ======================================
@@ -3152,7 +3474,7 @@ function Chart({ state, timeframe, mode, entryPrice, stopLoss, takeProfit,
     return (
       <div ref={box} className="w-full h-full flex items-center justify-center text-[12px]"
         style={{ minHeight: 110 }}>
-        <span style={{ color: FAINT }}>собираем свечи…</span>
+        <span style={{ color: FAINT }}>{tr("собираем свечи…")}</span>
       </div>
     );
   }
@@ -3236,7 +3558,9 @@ function Chart({ state, timeframe, mode, entryPrice, stopLoss, takeProfit,
         <div className="absolute inset-x-0 top-[44%] z-10 flex justify-center pointer-events-none">
           <div className="px-2.5 py-1 rounded text-[10px]"
             style={{ backgroundColor: "rgba(12,12,14,.9)", color: DIM, border: `1px solid ${HAIR}` }}>
-            {timeframe}: история накапливается · сейчас {shown.length} свеча
+            {ACTIVE_LANG === "en"
+              ? `${tfLabel(timeframe)}: history is building · ${shown.length} ${shown.length === 1 ? "candle" : "candles"}`
+              : `${timeframe}: история накапливается · сейчас ${shown.length} ${shown.length === 1 ? "свеча" : "свечи"}`}
           </div>
         </div>
       )}
@@ -3245,7 +3569,9 @@ function Chart({ state, timeframe, mode, entryPrice, stopLoss, takeProfit,
         <button onClick={() => { setBarW(BAR_DEFAULT); setOffset(0); setYZoom(1); }}
           className="absolute top-1 left-1 z-10 min-h-[36px] px-2.5 rounded-lg text-[10px] font-mono tap"
           style={{ backgroundColor: RAISED, color: DIM, border: `1px solid ${HAIR}` }}>
-          {shown.length} св.{effectiveOffset ? ` · −${effectiveOffset}` : ""} · сброс
+          {ACTIVE_LANG === "en"
+            ? `${shown.length} candles${effectiveOffset ? ` · −${effectiveOffset}` : ""} · reset`
+            : `${shown.length} св.${effectiveOffset ? ` · −${effectiveOffset}` : ""} · сброс`}
         </button>
       )}
 
@@ -3355,15 +3681,15 @@ function Chart({ state, timeframe, mode, entryPrice, stopLoss, takeProfit,
           );
         })()}
 
-        {level(entryPrice, `вход ${entryPrice?.toFixed(2)}`, "6 4", TEXT, true)}
-        {level(liquidationPrice, `ликвидация ${liquidationPrice?.toFixed(2)}`, "2 2", SHORT, true)}
+        {level(entryPrice, `${ACTIVE_LANG === "en" ? "entry" : "вход"} ${entryPrice?.toFixed(2)}`, "6 4", TEXT, true)}
+        {level(liquidationPrice, `${ACTIVE_LANG === "en" ? "liquidation" : "ликвидация"} ${liquidationPrice?.toFixed(2)}`, "2 2", SHORT, true)}
         {(() => {
           const sl = drag?.kind === "sl" ? drag.price : stopLoss;
           const tp = drag?.kind === "tp" ? drag.price : takeProfit;
           return (
             <>
-              {level(sl, `стоп ${sl?.toFixed(2)}`, "4 3", SHORT, drag?.kind === "sl")}
-              {level(tp, `тейк ${tp?.toFixed(2)}`, "4 3", LONG, drag?.kind === "tp")}
+              {level(sl, `${ACTIVE_LANG === "en" ? "stop" : "стоп"} ${sl?.toFixed(2)}`, "4 3", SHORT, drag?.kind === "sl")}
+              {level(tp, `${ACTIVE_LANG === "en" ? "take" : "тейк"} ${tp?.toFixed(2)}`, "4 3", LONG, drag?.kind === "tp")}
             </>
           );
         })()}
@@ -3411,8 +3737,8 @@ const EYES_FILTERS = ["ВСЁ", "STOP", "TAKE", "LONG", "SHORT"];
 
 function pressureOf(side) {
   // STOP LONG и TAKE LONG закрываются продажей, обе SHORT-зоны — покупкой.
-  return side === "LONG" ? "потенциальное давление продаж"
-                         : "потенциальное давление покупок";
+  return side === "LONG" ? tr("потенциальное давление продаж")
+                         : tr("потенциальное давление покупок");
 }
 
 function eyesFilter(list, f) {
@@ -3457,7 +3783,7 @@ function EyesPanel({ eyes, filter, onFilter, view, onView }) {
             </div>
           </div>
           <div>
-            <div className="text-[9px] tracking-[0.10em]" style={{ color: FAINT }}>КЛАСТЕРОВ</div>
+            <div className="text-[9px] tracking-[0.10em]" style={{ color: FAINT }}>{tr("КЛАСТЕРОВ")}</div>
             <div className="text-[15px] font-mono mt-1">
               {t.stopClusters} / {t.takeClusters}
             </div>
@@ -3470,7 +3796,7 @@ function EyesPanel({ eyes, filter, onFilter, view, onView }) {
               className="px-3 py-1.5 rounded-lg text-[10px] tracking-[0.1em] shrink-0 tap"
               style={{ backgroundColor: f === filter ? "#1B1B1F" : RAISED,
                 color: f === filter ? TEXT : DIM, border: `1px solid ${f === filter ? "#3A393D" : HAIR}` }}>
-              {f}
+              {f === "ВСЁ" ? tr("ВСЁ") : f}
             </button>
           ))}
         </div>
@@ -3479,7 +3805,7 @@ function EyesPanel({ eyes, filter, onFilter, view, onView }) {
       {list.length === 0 ? (
         <div className="rounded-2xl py-8 text-center text-[12px] mt-2"
           style={{ ...card, color: FAINT }}>
-          {view === "LIVE" ? "активных зон нет" : "история пока пуста"}
+          {view === "LIVE" ? tr("активных зон нет") : tr("история пока пуста")}
         </div>
       ) : (
         <div className="flex flex-col gap-2 mt-2">
@@ -3498,7 +3824,7 @@ function EyesPanel({ eyes, filter, onFilter, view, onView }) {
                 <div className="flex items-center justify-between gap-3 mt-1.5">
                   <span className="text-[15px] font-mono">{fmt(c.volume, 0)}</span>
                   <span className="text-[11px]" style={{ color: DIM }}>
-                    {c.participants} уч. · {c.status === "NEW" ? "NEW" : clock(c.age || 0)}
+                    {c.participants} {ACTIVE_LANG === "en" ? "participants" : "уч."} · {c.status === "NEW" ? "NEW" : clock(c.age || 0)}
                   </span>
                 </div>
                 <div className="flex items-center justify-between gap-3 mt-1.5">
@@ -3561,7 +3887,7 @@ function Toggle({ active, onClick, children }) {
 
 
 const BackButton = ({ onClick, label = "Назад" }) => (
-  <button onClick={onClick} aria-label={label} className="ui-back tap shrink-0">
+  <button onClick={onClick} aria-label={label === "Назад" ? tr("Назад") : label} className="ui-back tap shrink-0">
     <span aria-hidden="true" className="text-[19px] leading-none -translate-y-px">←</span>
   </button>
 );
@@ -3867,12 +4193,12 @@ function Boot({ done }) {
         <div className="text-center mt-7">
           <div className="text-[24px] tracking-tight">trade.exe</div>
           <div className="text-[10px] tracking-[0.14em] mt-2" style={{ color: FAINT }}>
-            ПОДГОТОВКА СРЕДЫ
+            {tr("ПОДГОТОВКА СРЕДЫ")}
           </div>
         </div>
         <div className="mt-8">
           <div className="flex justify-between text-[10px] mb-2" style={{ color: FAINT }}>
-            <span>{done >= total ? "готово" : BOOT_STEPS[current]?.label}</span>
+            <span>{done >= total ? tr("готово") : tr(BOOT_STEPS[current]?.label)}</span>
             <span className="font-mono">{Math.round(progress * 100)}%</span>
           </div>
           <div className="h-[3px] rounded-full overflow-hidden" style={{ backgroundColor: HAIR }}>
@@ -3948,7 +4274,7 @@ function Onboarding({ onSignIn, onSignUp }) {
             <div className="text-[30px] tracking-tight mt-5">trade.exe</div>
             <div className="text-[12px] tracking-[0.19em] text-center mt-10 leading-loose"
               style={{ color: DIM }}>
-              ЗАКРЫТЫЙ РЫНОК<br />ДЛЯ ПРАКТИКИ
+              {tr("ЗАКРЫТЫЙ РЫНОК")}<br />{tr("ДЛЯ ПРАКТИКИ")}
             </div>
           </div>
         )}
@@ -3964,9 +4290,9 @@ function Onboarding({ onSignIn, onSignUp }) {
                   style={{ borderColor: HAIR, ...stagger(i + 1) }}>
                   <div className="shrink-0 mt-0.5"><FeatureIcon name={f.icon} /></div>
                   <div className="min-w-0">
-                    <div className="text-[13px] tracking-[0.13em] font-semibold">{f.title}</div>
+                    <div className="text-[13px] tracking-[0.13em] font-semibold">{tr(f.title)}</div>
                     <div className="text-[13px] mt-1.5 leading-snug" style={{ color: DIM }}>
-                      {f.text}
+                      {tr(f.text)}
                     </div>
                   </div>
                 </div>
@@ -3978,10 +4304,11 @@ function Onboarding({ onSignIn, onSignUp }) {
         {slide === 2 && (
           <div key="s2" className={`flex flex-col items-center text-center ${anim}`}>
             <Logo size={84} live />
-            <div className="text-[26px] tracking-tight mt-4">Готовы начать?</div>
+            <div className="text-[26px] tracking-tight mt-4">{tr("Готовы начать?")}</div>
             <div className="text-[13px] mt-4 leading-relaxed max-w-[280px]" style={{ color: DIM }}>
-              Сессия — это закрытая комната на 100 участников с одинаковым взносом.
-              Общий капитал не меняется: всё, что кто-то заработал, кто-то потерял.
+              {ACTIVE_LANG === "en"
+                ? "A session is a closed room with 100 participants starting with equal capital. Total capital stays constant: every dollar earned is a dollar lost by someone else."
+                : "Сессия — это закрытая комната на 100 участников с одинаковым взносом. Общий капитал не меняется: всё, что кто-то заработал, кто-то потерял."}
             </div>
           </div>
         )}
@@ -3990,7 +4317,7 @@ function Onboarding({ onSignIn, onSignUp }) {
       <div className="max-w-md w-full mx-auto px-7 pb-5 shrink-0 ui-safe-bottom">
         <div className="flex justify-center gap-2 mb-7">
           {[0, 1, 2].map((i) => (
-            <button key={i} onClick={() => go(i)} aria-label={`Слайд ${i + 1}`}
+            <button key={i} onClick={() => go(i)} aria-label={`${ACTIVE_LANG === "en" ? "Slide" : "Слайд"} ${i + 1}`}
               className="w-8 h-8 flex items-center justify-center rounded-full tap">
               <span className="rounded-full" style={{ width: i === slide ? 22 : 7, height: 7,
                 backgroundColor: i === slide ? TEXT : HAIR,
@@ -4002,11 +4329,11 @@ function Onboarding({ onSignIn, onSignUp }) {
         <button onClick={() => (last ? onSignIn() : go(slide + 1))}
           className="w-full rounded-2xl py-5 text-[14px] tracking-[0.10em] font-bold tap"
           style={btnSoft(true)}>
-          {last ? "ВОЙТИ" : "ДАЛЕЕ"}
+          {last ? tr("ВОЙТИ") : tr("ДАЛЕЕ")}
         </button>
         <button onClick={last ? onSignUp : () => onSignIn()}
           className="w-full py-4 text-[12px] tracking-[0.10em] tap" style={{ color: DIM }}>
-          {last ? "СОЗДАТЬ АККАУНТ" : "ПРОПУСТИТЬ"}
+          {last ? tr("СОЗДАТЬ АККАУНТ") : tr("ПРОПУСТИТЬ")}
         </button>
       </div>
     </div>
@@ -4029,7 +4356,7 @@ function Field({ label, value, onChange, placeholder, secret, type = "text" }) {
         {secret && (
           <button onClick={() => setShown((v) => !v)} className="min-h-[44px] px-2 text-[11px] tap"
             style={{ color: shown ? TEXT : FAINT }}>
-            {shown ? "скрыть" : "показать"}
+            {shown ? tr("скрыть") : tr("показать")}
           </button>
         )}
       </div>
@@ -4060,16 +4387,16 @@ function AuthScreen({ mode, onMode, onBack, onDone }) {
 
   const submit = async () => {
     setError(null);
-    if (!EMAIL_RE.test(email.trim())) return setError("Проверьте адрес почты");
-    if (pass.length < 6) return setError("Пароль от 6 символов");
-    if (signup && pass !== pass2) return setError("Пароли не совпадают");
-    if (signup && !agree) return setError("Нужно принять условия");
+    if (!EMAIL_RE.test(email.trim())) return setError(ACTIVE_LANG === "en" ? "Check your email address" : "Проверьте адрес почты");
+    if (pass.length < 6) return setError(ACTIVE_LANG === "en" ? "Password must be at least 6 characters" : "Пароль от 6 символов");
+    if (signup && pass !== pass2) return setError(ACTIVE_LANG === "en" ? "Passwords do not match" : "Пароли не совпадают");
+    if (signup && !agree) return setError(ACTIVE_LANG === "en" ? "Please accept the terms" : "Нужно принять условия");
     setBusy(true);
     const res = signup
       ? await authStore.signUp(email.trim(), pass)
       : await authStore.signIn(email.trim(), pass);
     setBusy(false);
-    if (!res.ok) return setError(res.reason || "Не удалось войти");
+    if (!res.ok) return setError(translateEngineReason(res.reason) || (ACTIVE_LANG === "en" ? "Could not sign in" : "Не удалось войти"));
     onDone(res.account);
   };
 
@@ -4091,40 +4418,40 @@ function AuthScreen({ mode, onMode, onBack, onDone }) {
 
         <div className="text-center mt-6">
           <div className="text-[13px] tracking-[0.11em]" style={{ color: DIM }}>
-            {signup ? "СОЗДАЙТЕ АККАУНТ" : "ДОБРО ПОЖАЛОВАТЬ"}
+            {signup ? tr("СОЗДАЙТЕ АККАУНТ") : tr("ДОБРО ПОЖАЛОВАТЬ")}
           </div>
           <div className="text-[14px] mt-2" style={{ color: DIM }}>
-            {signup ? "Начните торговать" : "Войдите в свой аккаунт"}
+            {signup ? tr("Начните торговать") : tr("Войдите в свой аккаунт")}
           </div>
         </div>
 
         <div className="flex gap-1 p-1 rounded-2xl mt-7 mb-7"
           style={CARD}>
-          {tab("signin", "ВОЙТИ")}
-          {tab("signup", "РЕГИСТРАЦИЯ")}
+          {tab("signin", tr("ВОЙТИ"))}
+          {tab("signup", tr("РЕГИСТРАЦИЯ"))}
         </div>
 
         <Field label="EMAIL" value={email} onChange={setEmail}
           placeholder="you@example.com" type="email" />
-        <Field label="ПАРОЛЬ" value={pass} onChange={setPass}
-          placeholder="Введите пароль" secret />
+        <Field label={tr("ПАРОЛЬ")} value={pass} onChange={setPass}
+          placeholder={tr("Введите пароль")} secret />
         {signup && (
-          <Field key="p2" label="ПОДТВЕРДИТЕ ПАРОЛЬ" value={pass2} onChange={setPass2}
-            placeholder="Повторите пароль" secret />
+          <Field key="p2" label={tr("ПОДТВЕРДИТЕ ПАРОЛЬ")} value={pass2} onChange={setPass2}
+            placeholder={tr("Повторите пароль")} secret />
         )}
 
         {!signup ? (
           <div className="flex items-center justify-between mt-1 mb-6">
-            <Check on={remember} onClick={() => setRemember((v) => !v)}>Запомнить меня</Check>
-            <button onClick={() => setError("Восстановление пароля появится после подключения авторизации")}
+            <Check on={remember} onClick={() => setRemember((v) => !v)}>{tr("Запомнить меня")}</Check>
+            <button onClick={() => setError(ACTIVE_LANG === "en" ? "Password recovery will be available once server authentication is connected" : "Восстановление пароля появится после подключения авторизации")}
               className="min-h-[44px] px-2 text-[12px] whitespace-nowrap tap" style={{ color: DIM }}>
-              Забыли пароль?
+              {tr("Забыли пароль?")}
             </button>
           </div>
         ) : (
           <div className="mt-1 mb-6">
             <Check on={agree} onClick={() => setAgree((v) => !v)}>
-              Я принимаю Пользовательское соглашение и Политику конфиденциальности
+              {tr("Я принимаю Пользовательское соглашение и Политику конфиденциальности")}
             </Check>
           </div>
         )}
@@ -4136,19 +4463,19 @@ function AuthScreen({ mode, onMode, onBack, onDone }) {
         <button onClick={submit} disabled={busy}
           className="w-full rounded-2xl min-h-[54px] py-4 text-[14px] tracking-[0.08em] font-semibold disabled:opacity-40 tap"
           style={btnSoft(true)}>
-          {busy ? "ПОДОЖДИТЕ…" : signup ? "СОЗДАТЬ АККАУНТ" : "ВОЙТИ"}
+          {busy ? tr("ПОДОЖДИТЕ…") : signup ? tr("СОЗДАТЬ АККАУНТ") : tr("ВОЙТИ")}
         </button>
 
         {!signup && (
           <>
             <div className="flex items-center gap-4 my-6">
               <div className="flex-1 h-px" style={{ backgroundColor: HAIR }} />
-              <span className="text-[11px] tracking-[0.13em]" style={{ color: FAINT }}>ИЛИ</span>
+              <span className="text-[11px] tracking-[0.13em]" style={{ color: FAINT }}>{tr("ИЛИ")}</span>
               <div className="flex-1 h-px" style={{ backgroundColor: HAIR }} />
             </div>
             <div className="grid grid-cols-2 gap-3">
               {["Google", "Apple"].map((p) => (
-                <button key={p} onClick={() => setError(`Вход через ${p} появится вместе с сервером`)}
+                <button key={p} onClick={() => setError(ACTIVE_LANG === "en" ? `${p} sign-in will be available with the server version` : `Вход через ${p} появится вместе с сервером`)}
                   className="rounded-2xl py-4 text-[13px] font-semibold tap"
                   style={btnSoft(false)}>
                   {p}
@@ -4160,8 +4487,8 @@ function AuthScreen({ mode, onMode, onBack, onDone }) {
 
         <div className="text-[11px] text-center mt-8 leading-relaxed" style={{ color: FAINT }}>
           {signup
-            ? "Уже есть аккаунт? Нажмите «Войти» выше."
-            : "Нажимая «Войти», вы соглашаетесь с Условиями и Политикой конфиденциальности."}
+            ? (ACTIVE_LANG === "en" ? "Already have an account? Tap Sign in above." : "Уже есть аккаунт? Нажмите «Войти» выше.")
+            : (ACTIVE_LANG === "en" ? "By signing in, you agree to the Terms and Privacy Policy." : "Нажимая «Войти», вы соглашаетесь с Условиями и Политикой конфиденциальности.")}
         </div>
       </div>
     </div>
@@ -4310,7 +4637,7 @@ function EquityCurve({ sessions, rangeMs }) {
     return (
       <div className="flex items-center justify-center text-[12px] tx-fade"
         style={{ height: 64, color: FAINT }}>
-        закрытых сессий за этот период нет
+        {ACTIVE_LANG === "en" ? "no closed sessions in this period" : "закрытых сессий за этот период нет"}
       </div>
     );
   }
@@ -4367,7 +4694,7 @@ function EquityCurve({ sessions, rangeMs }) {
   const shown = levels.filter((v) => v > min + (max - min) * 0.05
     && v < max - (max - min) * 0.03 && Math.abs(v) > gap);
 
-  const hhmm = (t) => new Date(t).toLocaleTimeString("ru-RU",
+  const hhmm = (t) => new Date(t).toLocaleTimeString(ACTIVE_LANG === "en" ? "en-US" : "ru-RU",
     { hour: "2-digit", minute: "2-digit" });
   const uid = `eq${Math.round(min)}_${Math.round(max)}`;
 
@@ -4483,7 +4810,7 @@ function ProfileScreen({ profile, account, onClose, onSettings }) {
 
         <div className="flex items-center justify-between">
           <BackButton onClick={onClose} />
-          <div className="text-[10px] tracking-[0.11em]" style={{ color: DIM }}>ПРОФИЛЬ</div>
+          <div className="text-[10px] tracking-[0.11em]" style={{ color: DIM }}>{tr("ПРОФИЛЬ")}</div>
           <button onClick={onSettings}
             className="w-11 h-11 rounded-xl flex items-center justify-center tap"
             style={{ backgroundColor: RAISED, border: `1px solid ${HAIR}` }}>
@@ -4497,9 +4824,9 @@ function ProfileScreen({ profile, account, onClose, onSettings }) {
             <Icon name="user" size={22} color={DIM} />
           </div>
           <div className="min-w-0">
-            <div className="text-[15px] truncate">{account?.email || "гость"}</div>
+            <div className="text-[15px] truncate">{account?.email || tr("гость")}</div>
             <div className="text-[11px] mt-0.5" style={{ color: FAINT }}>
-              уровень {profileProgress(profile).level} · баланс {fmt(profile.wallet, 0)}
+              {ACTIVE_LANG === "en" ? `level ${profileProgress(profile).level} · balance ${fmt(profile.wallet, 0)}` : `уровень ${profileProgress(profile).level} · баланс ${fmt(profile.wallet, 0)}`}
             </div>
           </div>
         </div>
@@ -4507,7 +4834,7 @@ function ProfileScreen({ profile, account, onClose, onSettings }) {
         {n === 0 ? (
           <div className="rounded-2xl py-12 text-center text-[12px] mt-6"
             style={{ ...card, color: FAINT }}>
-            пока нечего разбирать — проведите первую сессию
+            {ACTIVE_LANG === "en" ? "nothing to analyze yet — finish your first session" : "пока нечего разбирать — проведите первую сессию"}
           </div>
         ) : (
           <>
@@ -4517,35 +4844,35 @@ function ProfileScreen({ profile, account, onClose, onSettings }) {
                 {fmtSigned(total)}
               </div>
               <div className="text-[12px] mt-2" style={{ color: DIM }}>
-                за {n} {n === 1 ? "сессию" : "сессий"} · доходность {signedPct(roi)}
+                {ACTIVE_LANG === "en" ? `across ${n} ${n === 1 ? "session" : "sessions"} · return ${signedPct(roi)}` : `за ${n} ${n === 1 ? "сессию" : "сессий"} · доходность ${signedPct(roi)}`}
               </div>
             </div>
 
             <div className="rounded-2xl px-4 py-4 mt-5 grid grid-cols-3 gap-y-5 gap-x-3 tx-in"
               style={{ ...card, ...stagger(1) }}>
-              <Cell label="СЕССИЙ" value={String(n)} />
-              <Cell label="ПРИБЫЛЬНЫХ" value={String(wins)} />
-              <Cell label="ВИНРЕЙТ" value={`${Math.round((wins / n) * 100)}%`} />
-              <Cell label="СРЕДНЯЯ" value={fmtSigned(avg)}
+              <Cell label={tr("СЕССИЙ")} value={String(n)} />
+              <Cell label={tr("ПРИБЫЛЬНЫХ")} value={String(wins)} />
+              <Cell label={tr("ВИНРЕЙТ")} value={`${Math.round((wins / n) * 100)}%`} />
+              <Cell label={tr("СРЕДНЯЯ")} value={fmtSigned(avg)}
                 color={avg < 0 ? SHORT : TEXT} />
-              <Cell label="ЛУЧШАЯ" value={fmtSigned(Math.max(...list.map((x) => x.pnl)))}
+              <Cell label={tr("ЛУЧШАЯ")} value={fmtSigned(Math.max(...list.map((x) => x.pnl)))}
                 color={LONG} />
-              <Cell label="ХУДШАЯ" value={fmtSigned(Math.min(...list.map((x) => x.pnl)))}
+              <Cell label={tr("ХУДШАЯ")} value={fmtSigned(Math.min(...list.map((x) => x.pnl)))}
                 color={SHORT} />
-              <Cell label="СРЕД. МЕСТО" value={avgRank.toFixed(1)} />
-              <Cell label="ЛУЧШЕЕ МЕСТО" value={String(bestRank)} />
-              <Cell label="ВСЕГО СДЕЛОК" value={String(trades)} />
-              <Cell label="СРЕД. ВРЕМЯ" value={clock(avgTime)} />
-              <Cell label="ВЗНОСОВ" value={fmt(invested, 0)} />
-              <Cell label="СДЕЛОК/СЕССИЯ" value={(trades / n).toFixed(1)} />
-              <Cell label="ЗАРАБОТАНО" value={fmtSigned(grossWin, 0)}
+              <Cell label={tr("СРЕД. МЕСТО")} value={avgRank.toFixed(1)} />
+              <Cell label={tr("ЛУЧШЕЕ МЕСТО")} value={String(bestRank)} />
+              <Cell label={tr("ВСЕГО СДЕЛОК")} value={String(trades)} />
+              <Cell label={tr("СРЕД. ВРЕМЯ")} value={clock(avgTime)} />
+              <Cell label={tr("ВЗНОСОВ")} value={fmt(invested, 0)} />
+              <Cell label={tr("СДЕЛОК/СЕССИЯ")} value={(trades / n).toFixed(1)} />
+              <Cell label={tr("ЗАРАБОТАНО")} value={fmtSigned(grossWin, 0)}
                 color={grossWin > 0 ? LONG : TEXT} />
-              <Cell label="ПОТЕРЯНО" value={fmtSigned(grossLoss, 0)}
+              <Cell label={tr("ПОТЕРЯНО")} value={fmtSigned(grossLoss, 0)}
                 color={grossLoss < 0 ? SHORT : TEXT} />
             </div>
 
             <div className="text-[10px] tracking-[0.11em] mt-7 mb-2.5" style={{ color: FAINT }}>
-              РАСПРЕДЕЛЕНИЕ МЕСТ
+              {tr("РАСПРЕДЕЛЕНИЕ МЕСТ")}
             </div>
             <div className="rounded-2xl px-4 py-4 tx-in" style={{ ...card, ...stagger(2) }}>
               {buckets.map((b, i) => (
@@ -4565,7 +4892,7 @@ function ProfileScreen({ profile, account, onClose, onSettings }) {
             </div>
 
             <div className="text-[10px] tracking-[0.11em] mt-7 mb-2.5" style={{ color: FAINT }}>
-              ВСЕ СЕССИИ
+              {tr("ВСЕ СЕССИИ")}
             </div>
             <div className="flex flex-col gap-2">
               {list.map((x, i) => (
@@ -4577,7 +4904,7 @@ function ProfileScreen({ profile, account, onClose, onSettings }) {
                       {fmt(x.capital, 0)} → {fmt(x.equity)}
                     </div>
                     <div className="text-[11px] mt-1 truncate" style={{ color: FAINT }}>
-                      {clock(x.ticks * CONFIG.market.tickMs)} · {x.trades} сделок · место {x.rank} из {x.totalPlayers || CONFIG.market.totalPlayers}
+                      {ACTIVE_LANG === "en" ? `${clock(x.ticks * CONFIG.market.tickMs)} · ${x.trades} trades · rank ${x.rank} of ${x.totalPlayers || CONFIG.market.totalPlayers}` : `${clock(x.ticks * CONFIG.market.tickMs)} · ${x.trades} сделок · место ${x.rank} из ${x.totalPlayers || CONFIG.market.totalPlayers}`}
                     </div>
                   </div>
                   <span className="text-[14px] font-mono shrink-0"
@@ -4703,12 +5030,12 @@ function FreeMarketMiniCard({ onClick }) {
       <div className="flex items-center gap-4">
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-2">
-            <span className="text-[10px] tracking-[0.12em]" style={{ color: FAINT }}>СВОБОДНЫЙ РЫНОК</span>
+            <span className="text-[10px] tracking-[0.12em]" style={{ color: FAINT }}>{tr("СВОБОДНЫЙ РЫНОК")}</span>
             <span className="w-1.5 h-1.5 rounded-full" style={{ backgroundColor: LONG }} />
           </div>
-          <div className="text-[19px] leading-tight mt-2">Всегда открыт</div>
+          <div className="text-[19px] leading-tight mt-2">{tr("Всегда открыт")}</div>
           <div className="text-[11px] leading-snug mt-1.5" style={{ color: DIM }}>
-            {fm.botCount.toLocaleString("ru-RU")} автономных участников · вход {fmt(fm.minCapital,0)}–{fmt(fm.maxCapital,0)}
+            {ACTIVE_LANG === "en" ? `${fm.botCount.toLocaleString("en-US")} autonomous participants · entry ${fmt(fm.minCapital,0)}–${fmt(fm.maxCapital,0)}` : `${fm.botCount.toLocaleString("ru-RU")} автономных участников · вход ${fmt(fm.minCapital,0)}–${fmt(fm.maxCapital,0)}`}
           </div>
         </div>
         <div className="w-[94px] h-[70px] shrink-0 rounded-[14px] overflow-hidden flex items-center"
@@ -4717,8 +5044,8 @@ function FreeMarketMiniCard({ onClick }) {
         </div>
       </div>
       <div className="flex items-center justify-between mt-3 pt-3" style={{ borderTop: `1px solid ${HAIR}` }}>
-        <span className="text-[10px]" style={{ color: FAINT }}>24 / 7 · без фиксированной сессии</span>
-        <span className="text-[11px] font-medium">ОТКРЫТЬ →</span>
+        <span className="text-[10px]" style={{ color: FAINT }}>{ACTIVE_LANG === "en" ? "24 / 7 · no fixed session" : "24 / 7 · без фиксированной сессии"}</span>
+        <span className="text-[11px] font-medium">{tr("ОТКРЫТЬ →")}</span>
       </div>
     </button>
   );
@@ -4758,7 +5085,7 @@ function TrophyScreen({ profile, onBack, onRedeem }) {
       <div className="max-w-md w-full mx-auto flex-1 min-h-0 overflow-y-auto no-scrollbar px-5 pb-6 ui-safe-top ui-scroll-pad">
         <div className="flex items-center gap-4">
           <BackButton onClick={onBack} />
-          <div className="text-[11px] tracking-[0.10em]" style={{ color: DIM }}>ТРОФЕИ</div>
+          <div className="text-[11px] tracking-[0.10em]" style={{ color: DIM }}>{tr("ТРОФЕИ")}</div>
         </div>
 
         <div className="rounded-2xl px-4 py-5 mt-6 flex items-center gap-4"
@@ -4772,20 +5099,20 @@ function TrophyScreen({ profile, onBack, onRedeem }) {
             <div className="text-[32px] leading-none font-semibold"
               style={{ color: p.trophies > 0 ? GOLD : TEXT }}>{p.trophies}</div>
             <div className="text-[12px] mt-1.5" style={{ color: DIM }}>
-              кубков на счету{p.trophiesSpent > 0 ? ` · обменяно ${p.trophiesSpent}` : ""}
+              {ACTIVE_LANG === "en" ? "trophies available" : "кубков на счету"}{p.trophiesSpent > 0 ? ACTIVE_LANG === "en" ? ` · redeemed ${p.trophiesSpent}` : ` · обменяно ${p.trophiesSpent}` : ""}
             </div>
           </div>
         </div>
 
         <div className="text-[12px] mt-4 leading-relaxed" style={{ color: DIM }}>
-          Кубок даётся за каждые пять прибыльных сессий подряд.
+          {ACTIVE_LANG === "en" ? "You earn one trophy for every five profitable sessions in a row." : "Кубок даётся за каждые пять прибыльных сессий подряд."}
           {p.streak > 0 && p.toTrophy > 0
-            ? ` До следующего осталось ${p.toTrophy}.`
-            : " Серия прерывается на первой убыточной сессии."}
+            ? ACTIVE_LANG === "en" ? ` ${p.toTrophy} left until the next trophy.` : ` До следующего осталось ${p.toTrophy}.`
+            : ACTIVE_LANG === "en" ? " The streak resets after the first losing session." : " Серия прерывается на первой убыточной сессии."}
         </div>
 
         <div className="text-[10px] tracking-[0.10em] mt-7 mb-2.5" style={{ color: FAINT }}>
-          ОБМЕН НА БОНУС
+          {tr("ОБМЕН НА БОНУС")}
         </div>
         <div className="flex flex-col gap-2.5">
           {TROPHY_TIERS.map((t) => {
@@ -4794,7 +5121,7 @@ function TrophyScreen({ profile, onBack, onRedeem }) {
               <button key={t.cups} disabled={!can}
                 onClick={() => {
                   onRedeem(t.cups, t.bonus);
-                  setNote(`${fmt(t.bonus, 0)} зачислены на баланс`);
+                  setNote(ACTIVE_LANG === "en" ? `${fmt(t.bonus, 0)} added to your balance` : `${fmt(t.bonus, 0)} зачислены на баланс`);
                 }}
                 className="flex items-center gap-3.5 rounded-2xl px-4 py-3.5 text-left tap disabled:opacity-35"
                 style={btnSoft(false)}>
@@ -4805,16 +5132,17 @@ function TrophyScreen({ profile, onBack, onRedeem }) {
                 </span>
                 <span className="flex-1 min-w-0">
                   <span className="block text-[15px] font-semibold">
-                    {fmt(t.bonus, 0)} на баланс
+                    {ACTIVE_LANG === "en" ? `${fmt(t.bonus, 0)} to balance` : `${fmt(t.bonus, 0)} на баланс`}
                   </span>
                   <span className="block text-[12px] mt-0.5" style={{ color: DIM }}>
-                    {t.cups} {t.cups === 1 ? "кубок" : t.cups < 5 ? "кубка" : "кубков"}
-                    {" · "}{fmt(t.bonus / t.cups, t.bonus / t.cups % 1 ? 2 : 0)} за кубок
+                    {ACTIVE_LANG === "en"
+                      ? `${t.cups} ${t.cups === 1 ? "trophy" : "trophies"} · ${fmt(t.bonus / t.cups, t.bonus / t.cups % 1 ? 2 : 0)} per trophy`
+                      : `${t.cups} ${t.cups === 1 ? "кубок" : t.cups < 5 ? "кубка" : "кубков"} · ${fmt(t.bonus / t.cups, t.bonus / t.cups % 1 ? 2 : 0)} за кубок`}
                   </span>
                 </span>
                 <span className="text-[12px] shrink-0 tracking-[0.10em]"
                   style={{ color: can ? TEXT : FAINT }}>
-                  {can ? "ОБМЕНЯТЬ" : "НЕ ХВАТАЕТ"}
+                  {can ? tr("ОБМЕНЯТЬ") : tr("НЕ ХВАТАЕТ")}
                 </span>
               </button>
             );
@@ -4828,7 +5156,7 @@ function TrophyScreen({ profile, onBack, onRedeem }) {
         )}
 
         <div className="text-[11px] text-center mt-6 leading-relaxed" style={{ color: FAINT }}>
-          Бонус попадает на баланс и участвует в сессиях наравне с пополнением.
+          {ACTIVE_LANG === "en" ? "The bonus is added to your balance and can be used in sessions like any other deposit." : "Бонус попадает на баланс и участвует в сессиях наравне с пополнением."}
         </div>
       </div>
     </div>
@@ -4849,17 +5177,17 @@ function DepositScreen({ profile, onBack, onDemoTopUp }) {
         <div className="flex items-center gap-4">
           <BackButton onClick={onBack} />
           <div className="text-[11px] tracking-[0.10em]" style={{ color: DIM }}>
-            ПОПОЛНЕНИЕ БАЛАНСА
+            {tr("ПОПОЛНЕНИЕ БАЛАНСА")}
           </div>
         </div>
 
         <div className="text-[10px] tracking-[0.10em] mt-6" style={{ color: FAINT }}>
-          ТЕКУЩИЙ БАЛАНС
+          {tr("ТЕКУЩИЙ БАЛАНС")}
         </div>
         <div className="text-[30px] font-mono leading-none mt-2 tx-pop">{fmt(profile.wallet, 0)}</div>
 
         <div className="text-[10px] tracking-[0.10em] mt-6 mb-2" style={{ color: FAINT }}>
-          СУММА ПОПОЛНЕНИЯ
+          {tr("СУММА ПОПОЛНЕНИЯ")}
         </div>
         <div className="ui-field flex items-center rounded-2xl px-4"
           style={CARD}>
@@ -4883,7 +5211,7 @@ function DepositScreen({ profile, onBack, onDemoTopUp }) {
         </div>
 
         <div className="text-[10px] tracking-[0.10em] mt-7 mb-2" style={{ color: FAINT }}>
-          СПОСОБ ОПЛАТЫ
+          {tr("СПОСОБ ОПЛАТЫ")}
         </div>
         <div className="rounded-2xl overflow-hidden"
           style={CARD}>
@@ -4897,7 +5225,7 @@ function DepositScreen({ profile, onBack, onDemoTopUp }) {
                 <Icon name={m.icon} size={16} color={m.tint} />
               </span>
               <span className="flex-1 min-w-0">
-                <span className="block text-[13px] truncate">{m.label}</span>
+                <span className="block text-[13px] truncate">{tr(m.label)}</span>
                 {m.sub && (
                   <span className="block text-[11px] font-mono" style={{ color: FAINT }}>{m.sub}</span>
                 )}
@@ -4921,18 +5249,18 @@ function DepositScreen({ profile, onBack, onDemoTopUp }) {
 
       <div className="max-w-md w-full mx-auto px-5 pt-3 shrink-0 ui-bottom-surface ui-safe-bottom">
         <button disabled={!ok}
-          onClick={() => setNote("Приём оплат ещё не подключён. Пока баланс можно пополнить только в демо-режиме.")}
+          onClick={() => setNote(ACTIVE_LANG === "en" ? "Payments are not connected yet. For now, balance top-ups are available in demo mode only." : "Приём оплат ещё не подключён. Пока баланс можно пополнить только в демо-режиме.")}
           className="w-full rounded-2xl py-4 text-[13px] tracking-[0.10em] font-bold tap disabled:opacity-40"
           style={btnSoft(true)}>
-          ПОПОЛНИТЬ
+          {tr("ПОПОЛНИТЬ")}
         </button>
         <button disabled={!ok} onClick={() => { onDemoTopUp(value); onBack(); }}
           className="w-full py-3 mt-2 text-[11px] tracking-[0.13em] tap disabled:opacity-40"
           style={{ color: DIM }}>
-          НАЧИСЛИТЬ {fmt(value, 0)} В ДЕМО-РЕЖИМЕ
+          {ACTIVE_LANG === "en" ? `ADD ${fmt(value, 0)} IN DEMO MODE` : `НАЧИСЛИТЬ ${fmt(value, 0)} В ДЕМО-РЕЖИМЕ`}
         </button>
         <div className="text-[11px] text-center mt-1" style={{ color: FAINT }}>
-          Минимальная сумма — $10
+          {tr("Минимальная сумма — $10")}
         </div>
       </div>
     </div>
@@ -4959,16 +5287,16 @@ function WithdrawScreen({ profile, onBack }) {
       <div className="max-w-md w-full mx-auto flex-1 min-h-0 overflow-y-auto no-scrollbar px-5 pb-6 ui-safe-top ui-scroll-pad">
         <div className="flex items-center gap-4">
           <BackButton onClick={onBack} />
-          <div className="text-[11px] tracking-[0.10em]" style={{ color: DIM }}>ВЫВОД СРЕДСТВ</div>
+          <div className="text-[11px] tracking-[0.10em]" style={{ color: DIM }}>{tr("ВЫВОД СРЕДСТВ")}</div>
         </div>
 
         <div className="text-[10px] tracking-[0.10em] mt-6" style={{ color: FAINT }}>
-          ДОСТУПНО К ВЫВОДУ
+          {tr("ДОСТУПНО К ВЫВОДУ")}
         </div>
         <div className="text-[30px] font-mono leading-none mt-2 tx-pop">{fmt(profile.wallet, 0)}</div>
 
         <div className="text-[10px] tracking-[0.10em] mt-6 mb-2" style={{ color: FAINT }}>
-          СУММА ВЫВОДА
+          {tr("СУММА ВЫВОДА")}
         </div>
         <div className="ui-field flex items-center rounded-2xl px-4"
           style={CARD}>
@@ -4979,7 +5307,7 @@ function WithdrawScreen({ profile, onBack }) {
             style={{ color: TEXT }} />
           <button onClick={() => setAmount(String(Math.floor(profile.wallet)))}
             className="pl-3 text-[11px] tracking-[0.1em] tap" style={{ color: DIM }}>
-            ВСЁ
+            {tr("ВСЁ")}
           </button>
         </div>
 
@@ -4994,7 +5322,7 @@ function WithdrawScreen({ profile, onBack }) {
         </div>
 
         <div className="text-[10px] tracking-[0.10em] mt-7 mb-2" style={{ color: FAINT }}>
-          КУДА ВЫВЕСТИ
+          {tr("КУДА ВЫВЕСТИ")}
         </div>
         <div className="rounded-2xl overflow-hidden"
           style={CARD}>
@@ -5008,7 +5336,7 @@ function WithdrawScreen({ profile, onBack }) {
                 <Icon name={m.icon} size={16} color={m.tint} />
               </span>
               <span className="flex-1 min-w-0">
-                <span className="block text-[13px] truncate">{m.label}</span>
+                <span className="block text-[13px] truncate">{tr(m.label)}</span>
                 {m.sub && (
                   <span className="block text-[11px] font-mono" style={{ color: FAINT }}>{m.sub}</span>
                 )}
@@ -5032,15 +5360,15 @@ function WithdrawScreen({ profile, onBack }) {
 
       <div className="max-w-md w-full mx-auto px-5 pt-3 shrink-0 ui-bottom-surface ui-safe-bottom">
         <button disabled={!enough}
-          onClick={() => setNote("Выплаты ещё не подключены. Баланс остаётся на месте.")}
+          onClick={() => setNote(ACTIVE_LANG === "en" ? "Withdrawals are not connected yet. Your balance will stay unchanged." : "Выплаты ещё не подключены. Баланс остаётся на месте.")}
           className="w-full rounded-2xl py-4 text-[13px] tracking-[0.10em] font-bold tap disabled:opacity-40"
           style={btnSoft(true)}>
-          ВЫВЕСТИ
+          {tr("ВЫВЕСТИ")}
         </button>
         <div className="text-[11px] text-center mt-2" style={{ color: FAINT }}>
           {value > profile.wallet
-            ? "Больше, чем есть на балансе"
-            : `Минимальная сумма — ${fmt(WITHDRAW_MIN, 0)}`}
+            ? (ACTIVE_LANG === "en" ? "More than your available balance" : "Больше, чем есть на балансе")
+            : (ACTIVE_LANG === "en" ? `Minimum amount — ${fmt(WITHDRAW_MIN, 0)}` : `Минимальная сумма — ${fmt(WITHDRAW_MIN, 0)}`)}
         </div>
       </div>
     </div>
@@ -5065,7 +5393,7 @@ function RankingTab({ profile, period, onPeriod }) {
   const bots = RANK_NAMES.map((name) => ({
     name, pnl: Math.round((400 + rnd() * 12000) * scale) / 100,
   }));
-  const rows = [...bots, { name: "вы", pnl: st.total, me: true }]
+  const rows = [...bots, { name: tr("вы"), pnl: st.total, me: true }]
     .sort((a, b) => b.pnl - a.pnl)
     .map((r, i) => ({ ...r, place: i + 1 }));
 
@@ -5074,7 +5402,7 @@ function RankingTab({ profile, period, onPeriod }) {
   return (
     <div className="px-5 ui-safe-top">
       <div className="text-[11px] tracking-[0.10em] text-center" style={{ color: DIM }}>
-        РЕЙТИНГ ИГРОКОВ
+        {tr("РЕЙТИНГ ИГРОКОВ")}
       </div>
 
       <div className="flex gap-1 p-1 rounded-2xl mt-5"
@@ -5085,7 +5413,7 @@ function RankingTab({ profile, period, onPeriod }) {
             style={{ backgroundColor: p === period ? RAISED : "transparent",
               color: p === period ? TEXT : FAINT,
               border: `1px solid ${p === period ? "#35343A" : "transparent"}` }}>
-            {p}
+            {periodLabel(p)}
           </button>
         ))}
       </div>
@@ -5110,8 +5438,8 @@ function RankingTab({ profile, period, onPeriod }) {
       <div className="flex items-center px-4 mt-6 mb-1 text-[9px] tracking-[0.10em]"
         style={{ color: FAINT }}>
         <span className="w-7">#</span>
-        <span className="flex-1">ИГРОК</span>
-        <span>РЕЗУЛЬТАТ</span>
+        <span className="flex-1">{tr("ИГРОК")}</span>
+        <span>{tr("РЕЗУЛЬТАТ")}</span>
       </div>
       <div className="rounded-2xl overflow-hidden"
         style={CARD}>
@@ -5129,8 +5457,7 @@ function RankingTab({ profile, period, onPeriod }) {
       </div>
 
       <div className="text-[11px] text-center mt-4 leading-snug" style={{ color: FAINT }}>
-        Соперники показаны для примера: общий рейтинг появится вместе с онлайн-режимом.
-        Ваша строка считается по реальной истории сессий.
+        {ACTIVE_LANG === "en" ? "Other players are placeholders for now; the global ranking will arrive with online mode. Your row is calculated from your actual session history." : "Соперники показаны для примера: общий рейтинг появится вместе с онлайн-режимом. Ваша строка считается по реальной истории сессий."}
       </div>
     </div>
   );
@@ -5165,7 +5492,7 @@ function MarketsTab({ onPlay, onFree }) {
         </div>
       </div>
       <div className="flex items-center justify-between mt-3 pt-3" style={{ borderTop: `1px solid ${HAIR}` }}>
-        <span className="text-[10px]" style={{ color: DIM }}>{disabled ? "недоступно сейчас" : "открыть рынок"}</span>
+        <span className="text-[10px]" style={{ color: DIM }}>{disabled ? tr("недоступно сейчас") : tr("открыть рынок")}</span>
         <Icon name="chevron" size={15} color={disabled ? FAINT : TEXT} />
       </div>
     </button>
@@ -5174,31 +5501,31 @@ function MarketsTab({ onPlay, onFree }) {
   return (
     <div className="px-5 ui-safe-top pb-6">
       <div className="mb-5">
-        <div className="text-[22px] tracking-tight">Рынки</div>
+        <div className="text-[22px] tracking-tight">{tr("Рынки")}</div>
         <div className="text-[11px] mt-1.5" style={{ color: DIM }}>
-          Разные режимы одной рыночной модели.
+          {tr("Разные режимы одной рыночной модели.")}
         </div>
       </div>
 
       <div className="grid gap-2.5">
         <MarketItem kind="free" title={`${m.assetSymbol} · FREE`} status="LIVE"
-          sub="Свободный рынок без конца сессии"
-          rows={[["ботов", m.freeMarket.botCount.toLocaleString("ru-RU")],
-            ["вход", `${fmt(m.freeMarket.minCapital,0)}–${fmt(m.freeMarket.maxCapital,0)}`], ["режим", "24/7"]]}
-          note="Участники с разными балансами и стратегиями. Войти и выйти можно в любой момент."
+          sub={tr("Свободный рынок без конца сессии")}
+          rows={[[tr("ботов"), m.freeMarket.botCount.toLocaleString(ACTIVE_LANG === "en" ? "en-US" : "ru-RU")],
+            [tr("вход"), `${fmt(m.freeMarket.minCapital,0)}–${fmt(m.freeMarket.maxCapital,0)}`], [tr("режим"), "24/7"]]}
+          note={tr("Участники с разными балансами и стратегиями. Войти и выйти можно в любой момент.")}
           onClick={onFree} />
 
         <MarketItem kind="offline" title={`${m.assetSymbol} · SESSION`} status="LOCAL"
-          sub="Закрытая сессия с одинаковым капиталом участников"
-          rows={[["участники", m.playerOptions.join("/")],
-            ["взнос", m.capitalOptions.map((c) => fmt(c,0)).join(" · ")], ["тик", `${m.tickMs}мс`]]}
-          note="Подходит для коротких соревновательных сессий и проверки стратегий."
+          sub={tr("Закрытая сессия с одинаковым капиталом участников")}
+          rows={[[tr("участники"), m.playerOptions.join("/")],
+            [tr("взнос"), m.capitalOptions.map((c) => fmt(c,0)).join(" · ")], [tr("тик"), `${m.tickMs}ms`]]}
+          note={tr("Подходит для коротких соревновательных сессий и проверки стратегий.")}
           onClick={() => onPlay(false)} />
 
         <MarketItem kind="online" title={`${m.assetSymbol} · EYES`} status="DATA"
-          sub="Тот же рынок с обезличенными зонами SL / TP"
-          rows={[["данные", "стопы / тейки"], ["имена", "скрыты"], ["математика", "та же"]]}
-          note="Дополнительный информационный слой без изменения базовой цены рынка."
+          sub={tr("Тот же рынок с обезличенными зонами SL / TP")}
+          rows={[[tr("данные"), tr("стопы / тейки")], [tr("имена"), tr("скрыты")], [tr("математика"), tr("та же")]]}
+          note={tr("Дополнительный информационный слой без изменения базовой цены рынка.")}
           onClick={() => onPlay(true)} />
       </div>
     </div>
@@ -5228,7 +5555,7 @@ function TabBar({ active, onChange }) {
             <Icon name={t.icon} size={20} color={on ? TEXT : FAINT} />
             <span className="text-[10px] tracking-[0.06em]"
               style={{ color: on ? TEXT : FAINT }}>
-              {t.label}
+              {tr(t.label)}
             </span>
           </button>
         );
@@ -5304,7 +5631,7 @@ function LevelBar({ profile }) {
     <div className="rounded-[20px] p-4 mt-4 tx-in" style={{ ...CARD, ...stagger(1) }}>
       <div className="flex items-start justify-between gap-4">
         <div>
-          <div className="ui-label">УРОВЕНЬ</div>
+          <div className="ui-label">{tr("УРОВЕНЬ")}</div>
           <div className="text-[34px] leading-none font-mono mt-1">{p.level}</div>
         </div>
         <div className="text-right">
@@ -5312,11 +5639,11 @@ function LevelBar({ profile }) {
             <Icon name="trophy" size={15} color={p.trophies > 0 ? GOLD : FAINT} />
             <span className="text-[18px] font-mono" style={{ color: p.trophies > 0 ? GOLD : TEXT }}>{p.trophies}</span>
           </div>
-          <div className="text-[9px] mt-1" style={{ color: FAINT }}>кубков</div>
+          <div className="text-[9px] mt-1" style={{ color: FAINT }}>{ACTIVE_LANG === "en" ? "trophies" : "кубков"}</div>
         </div>
       </div>
       <div className="flex items-center justify-between mt-4">
-        <span className="text-[11px]" style={{ color: DIM }}>{p.done} из {p.need} прибыльных сессий</span>
+        <span className="text-[11px]" style={{ color: DIM }}>{ACTIVE_LANG === "en" ? `${p.done} of ${p.need} profitable sessions` : `${p.done} из ${p.need} прибыльных сессий`}</span>
         <span className="text-[11px] font-mono" style={{ color: DIM }}>{Math.round(p.progress*100)}%</span>
       </div>
       <div className="h-[3px] w-full rounded-full mt-2 overflow-hidden" style={{ backgroundColor: HAIR }}>
@@ -5325,11 +5652,11 @@ function LevelBar({ profile }) {
       </div>
       <div className="grid grid-cols-2 gap-0 mt-4 pt-3" style={{ borderTop: `1px solid ${HAIR}` }}>
         <div className="pr-3">
-          <div className="ui-label">СЕРИЯ</div>
-          <div className="text-[12px] mt-1">{p.dayStreak > 0 ? `${p.dayStreak} ${plural(p.dayStreak,"день","дня","дней")} подряд` : "—"}</div>
+          <div className="ui-label">{tr("СЕРИЯ")}</div>
+          <div className="text-[12px] mt-1">{p.dayStreak > 0 ? ACTIVE_LANG === "en" ? `${p.dayStreak} ${p.dayStreak === 1 ? "day" : "days"} in a row` : `${p.dayStreak} ${plural(p.dayStreak,"день","дня","дней")} подряд` : "—"}</div>
         </div>
         <div className="pl-3" style={{ borderLeft: `1px solid ${HAIR}` }}>
-          <div className="ui-label">ЛУЧШАЯ СЕССИЯ</div>
+          <div className="ui-label">{tr("ЛУЧШАЯ СЕССИЯ")}</div>
           <div className="text-[12px] font-mono mt-1" style={{ color: p.bestPct > 0 ? TEXT : DIM }}>
             {p.wins || p.bestPct ? signedPct(p.bestPct) : "—"}
           </div>
@@ -5358,8 +5685,7 @@ const LANGS = [
   { code: "en", label: "English" },
 ];
 
-function SettingsScreen({ account, onClose, onReset, onExit, onSignOut }) {
-  const [lang, setLang] = useState("ru");
+function SettingsScreen({ account, language, onLanguageChange, onClose, onReset, onExit, onSignOut }) {
   const [confirmReset, setConfirmReset] = useState(false);
   const card = CARD;
 
@@ -5378,60 +5704,60 @@ function SettingsScreen({ account, onClose, onReset, onExit, onSignOut }) {
       <div className="max-w-md w-full mx-auto flex-1 min-h-0 overflow-y-auto no-scrollbar px-5 pb-7 ui-safe-top ui-scroll-pad">
         <div className="flex items-center gap-4">
           <BackButton onClick={onClose} />
-          <div className="text-[11px] tracking-[0.10em]" style={{ color: DIM }}>НАСТРОЙКИ</div>
+          <div className="text-[11px] tracking-[0.10em]" style={{ color: DIM }}>{tr("НАСТРОЙКИ")}</div>
         </div>
 
-        <div className="text-[10px] tracking-[0.10em] mt-7 mb-2" style={{ color: FAINT }}>ЯЗЫК</div>
+        <div className="text-[10px] tracking-[0.10em] mt-7 mb-2" style={{ color: FAINT }}>{tr("ЯЗЫК")}</div>
         <div className="grid grid-cols-2 gap-2">
           {LANGS.map((l) => (
-            <button key={l.code} onClick={() => setLang(l.code)}
+            <button key={l.code} onClick={() => onLanguageChange(l.code)}
               className="rounded-xl py-3.5 text-[13px] font-semibold tap"
-              style={{ background: lang === l.code ? "linear-gradient(180deg,#1B1B1F,#101013)" : CARD_BG_SOFT,
-                color: lang === l.code ? TEXT : DIM,
-                border: `1px solid ${lang === l.code ? "#3A393D" : HAIR}` }}>
-              {l.label}
+              style={{ background: language === l.code ? "linear-gradient(180deg,#1B1B1F,#101013)" : CARD_BG_SOFT,
+                color: language === l.code ? TEXT : DIM,
+                border: `1px solid ${language === l.code ? "#3A393D" : HAIR}` }}>
+              {l.code === "ru" ? (ACTIVE_LANG === "en" ? "Russian" : "Русский") : "English"}
             </button>
           ))}
         </div>
         <div className="text-[11px] mt-2" style={{ color: FAINT }}>
-          Перевод интерфейса ещё не сделан — переключатель пока ничего не меняет.
+          {language === "en" ? "The interface is shown in English." : "Интерфейс показан на русском языке."}
         </div>
 
-        <div className="text-[10px] tracking-[0.10em] mt-7 mb-2" style={{ color: FAINT }}>АККАУНТ</div>
+        <div className="text-[10px] tracking-[0.10em] mt-7 mb-2" style={{ color: FAINT }}>{tr("АККАУНТ")}</div>
         <div className="rounded-2xl overflow-hidden" style={card}>
-          <Row label={account?.email || "гость"} sub="почта аккаунта" />
-          {onExit && <Row label="Сменить режим" onClick={onExit} color={DIM} />}
-          <Row label="Выйти из аккаунта" onClick={onSignOut} color={SHORT} last />
+          <Row label={account?.email || tr("гость")} sub={tr("почта аккаунта")} />
+          {onExit && <Row label={tr("Сменить режим")} onClick={onExit} color={DIM} />}
+          <Row label={tr("Выйти из аккаунта")} onClick={onSignOut} color={SHORT} last />
         </div>
 
-        <div className="text-[10px] tracking-[0.10em] mt-7 mb-2" style={{ color: FAINT }}>БАЛАНС</div>
+        <div className="text-[10px] tracking-[0.10em] mt-7 mb-2" style={{ color: FAINT }}>{tr("БАЛАНС")}</div>
         <div className="rounded-2xl overflow-hidden" style={card}>
           {confirmReset ? (
             <div className="px-4 py-3.5">
               <div className="text-[13px]" style={{ color: SHORT }}>
-                Обнулить баланс? История сессий останется.
+                {ACTIVE_LANG === "en" ? "Reset balance? Your session history will be kept." : "Обнулить баланс? История сессий останется."}
               </div>
               <div className="grid grid-cols-2 gap-2 mt-3">
                 <button onClick={() => setConfirmReset(false)}
                   className="rounded-xl py-3 text-[13px] font-semibold tap"
                   style={btnSoft(false)}>
-                  Отмена
+                  {tr("Отмена")}
                 </button>
                 <button onClick={() => { onReset(); setConfirmReset(false); }}
                   className="rounded-xl py-3 text-[13px] font-semibold tap"
                   style={{ backgroundColor: SHORT, color: BG }}>
-                  Обнулить
+                  {tr("Обнулить")}
                 </button>
               </div>
             </div>
           ) : (
-            <Row label="Сбросить баланс до $0" sub="пополнить можно на экране пополнения"
+            <Row label={tr("Сбросить баланс до $0")} sub={tr("пополнить можно на экране пополнения")}
               onClick={() => setConfirmReset(true)} color={SHORT} last />
           )}
         </div>
 
         <div className="text-[11px] text-center mt-8 leading-relaxed" style={{ color: FAINT }}>
-          trade.exe · закрытый рынок для практики
+          {ACTIVE_LANG === "en" ? "trade.exe · closed market for practice" : "trade.exe · закрытый рынок для практики"}
         </div>
       </div>
     </div>
@@ -5439,7 +5765,7 @@ function SettingsScreen({ account, onClose, onReset, onExit, onSignOut }) {
 }
 
 /* --------------------------------- ЛОББИ --------------------------------- */
-function Lobby({ profile, account, onNew, onFree, onReset, onExit, onSignOut, onTopUp, onRedeem }) {
+function Lobby({ profile, account, onNew, onFree, onReset, onExit, onSignOut, onTopUp, onRedeem, language, onLanguageChange }) {
   const st = profileStats(profile);
   const [tab, setTab] = useState("home");
   const [profileOpen, setProfileOpen] = useState(false);
@@ -5465,8 +5791,8 @@ function Lobby({ profile, account, onNew, onFree, onReset, onExit, onSignOut, on
       onSettings={() => { setProfileOpen(false); setSettingsOpen(true); }} />;
   }
   if (settingsOpen) {
-    return <SettingsScreen account={account} onClose={() => setSettingsOpen(false)}
-      onReset={onReset} onExit={onExit} onSignOut={onSignOut} />;
+    return <SettingsScreen account={account} language={language} onLanguageChange={onLanguageChange}
+      onClose={() => setSettingsOpen(false)} onReset={onReset} onExit={onExit} onSignOut={onSignOut} />;
   }
   if (deposit) {
     return <DepositScreen profile={profile} onBack={() => setDeposit(false)}
@@ -5511,15 +5837,15 @@ function Lobby({ profile, account, onNew, onFree, onReset, onExit, onSignOut, on
                  моноширинный на большом кегле читается как терминал. */}
               <div className="mt-6">
                 <div className="text-[11px] tracking-[0.12em]" style={{ color: FAINT }}>
-                  БАЛАНС
+                  {tr("БАЛАНС")}
                 </div>
                 <div className="text-[36px] leading-[1.05] font-semibold tracking-tight truncate tx-pop mt-1">
                   {fmt(profile.wallet, 0)}
                 </div>
                 <div className="text-[13px] mt-1.5"
                   style={{ color: st.total > 0 ? LONG : st.total < 0 ? SHORT : DIM }}>
-                  {st.count === 0 ? "сессий ещё не было"
-                    : `${fmtSigned(st.total)} за ${st.count} сесс.`}
+                  {st.count === 0 ? tr("сессий ещё не было")
+                    : (ACTIVE_LANG === "en" ? `${fmtSigned(st.total)} across ${st.count} sessions` : `${fmtSigned(st.total)} за ${st.count} сесс.`)}
                 </div>
               </div>
 
@@ -5528,22 +5854,22 @@ function Lobby({ profile, account, onNew, onFree, onReset, onExit, onSignOut, on
               </div>
 
               <div className="grid grid-cols-3 gap-2 mt-4">
-                <WalletAction icon="plus" label="Пополнить" onClick={() => setDeposit(true)} />
-                <WalletAction icon="arrowUpRight" label="Вывести" onClick={() => setWithdraw(true)} />
-                <WalletAction icon="trophy" label="Трофеи" onClick={() => setTrophy(true)} />
+                <WalletAction icon="plus" label={tr("Пополнить")} onClick={() => setDeposit(true)} />
+                <WalletAction icon="arrowUpRight" label={tr("Вывести")} onClick={() => setWithdraw(true)} />
+                <WalletAction icon="trophy" label={tr("Трофеи")} onClick={() => setTrophy(true)} />
               </div>
 
               <LevelBar profile={profile} />
 
               {/* --------------------------- режимы -------------------------- */}
               <div className="grid grid-cols-1 gap-2 mt-5 tx-in" style={stagger(1)}>
-                <ModeCard kind="online" title="ОНЛАЙН РЫНОК"
-                  text="Реальные участники и единая сессия в реальном времени"
-                  cta="СЕРВЕРНАЯ ВЕРСИЯ" primary
-                  onClick={() => setNotice("Онлайн-комнаты появятся после подключения сервера. Пока доступна офлайн-практика.")} />
-                <ModeCard kind="offline" title="ОФЛАЙН ПРАКТИКА"
-                  text="Та же рыночная модель локально — для тестов и практики"
-                  cta="ОТКРЫТЬ ПРАКТИКУ" onClick={() => onNew(false)} disabled={!affordable} />
+                <ModeCard kind="online" title={tr("ОНЛАЙН РЫНОК")}
+                  text={tr("Реальные участники и единая сессия в реальном времени")}
+                  cta={tr("СЕРВЕРНАЯ ВЕРСИЯ")} primary
+                  onClick={() => setNotice(tr("Онлайн-комнаты появятся после подключения сервера. Пока доступна офлайн-практика."))} />
+                <ModeCard kind="offline" title={tr("ОФЛАЙН ПРАКТИКА")}
+                  text={tr("Та же рыночная модель локально — для тестов и практики")}
+                  cta={tr("ОТКРЫТЬ ПРАКТИКУ")} onClick={() => onNew(false)} disabled={!affordable} />
               </div>
 
               {notice && (
@@ -5558,9 +5884,9 @@ function Lobby({ profile, account, onNew, onFree, onReset, onExit, onSignOut, on
                     повторяет винрейт из профиля. Осталось три колонки. */}
                 <div className="grid grid-cols-3 gap-2">
                   {[
-                    ["СЕССИЙ", String(st.count), TEXT, "flag"],
-                    ["ЛУЧШАЯ", st.count ? fmtSigned(st.best, 0) : "—", st.best > 0 ? LONG : TEXT, "star"],
-                    ["ХУДШАЯ", st.count ? fmtSigned(st.worst, 0) : "—", st.worst < 0 ? SHORT : TEXT, "star"],
+                    [tr("СЕССИЙ"), String(st.count), TEXT, "flag"],
+                    [tr("ЛУЧШАЯ"), st.count ? fmtSigned(st.best, 0) : "—", st.best > 0 ? LONG : TEXT, "star"],
+                    [tr("ХУДШАЯ"), st.count ? fmtSigned(st.worst, 0) : "—", st.worst < 0 ? SHORT : TEXT, "star"],
                   ].map(([label, value, color, icon]) => (
                     /* Иконка стоит в одной строке с подписью, а не под
                        значением: значения разной ширины (+$2,501 и −$14)
@@ -5580,7 +5906,7 @@ function Lobby({ profile, account, onNew, onFree, onReset, onExit, onSignOut, on
 
               {/* ---------------------- дневная динамика --------------------- */}
               <div className="text-[10px] tracking-[0.11em] mt-6 mb-2.5" style={{ color: FAINT }}>
-                ДНЕВНАЯ ДИНАМИКА
+                {tr("ДНЕВНАЯ ДИНАМИКА")}
               </div>
               <div className="rounded-2xl px-4 py-3.5 tx-in" style={{ ...card, ...stagger(3) }}>
                 <div className="flex items-start justify-between gap-3">
@@ -5589,13 +5915,13 @@ function Lobby({ profile, account, onNew, onFree, onReset, onExit, onSignOut, on
                       style={{ color: rangeTotal > 0 ? LONG : rangeTotal < 0 ? SHORT : TEXT }}>
                       {inRange.length ? fmtSigned(rangeTotal) : "—"}
                     </div>
-                    <div className="text-[12px] mt-1.5" style={{ color: DIM }}>суммарный результат</div>
+                    <div className="text-[12px] mt-1.5" style={{ color: DIM }}>{tr("суммарный результат")}</div>
                   </div>
                   <div className="relative shrink-0">
                     <button onClick={() => setRangeOpen((v) => !v)}
                       className="flex items-center gap-2 px-3 py-2 rounded-xl text-[11px] tracking-[0.10em] tap"
                       style={btnSoft(false)}>
-                      {range.key}<Icon name="caret" size={13} color={DIM} />
+                      {periodLabel(range.key)}<Icon name="caret" size={13} color={DIM} />
                     </button>
                     {rangeOpen && (
                       <div className="absolute right-0 mt-1 rounded-xl overflow-hidden z-10 tx-pop"
@@ -5604,7 +5930,7 @@ function Lobby({ profile, account, onNew, onFree, onReset, onExit, onSignOut, on
                           <button key={r.key} onClick={() => { setRange(r); setRangeOpen(false); }}
                             className="block w-full text-left px-4 py-2.5 text-[11px] tracking-[0.10em] whitespace-nowrap tap"
                             style={{ color: r.key === range.key ? TEXT : DIM }}>
-                            {r.key}
+                            {periodLabel(r.key)}
                           </button>
                         ))}
                       </div>
@@ -5619,18 +5945,18 @@ function Lobby({ profile, account, onNew, onFree, onReset, onExit, onSignOut, on
               {/* ------------------------ последние сессии ------------------- */}
               <div className="flex items-center justify-between mt-6 mb-2.5">
                 <span className="text-[10px] tracking-[0.11em]" style={{ color: FAINT }}>
-                  ПОСЛЕДНИЕ СЕССИИ
+                  {tr("ПОСЛЕДНИЕ СЕССИИ")}
                 </span>
                 {profile.sessions.length > 0 && (
                   <button onClick={() => setProfileOpen(true)}
                     className="text-[10px] tracking-[0.13em] tap" style={{ color: DIM }}>
-                    СМОТРЕТЬ ВСЕ
+                    {tr("СМОТРЕТЬ ВСЕ")}
                   </button>
                 )}
               </div>
               {profile.sessions.length === 0 ? (
                 <div className="rounded-2xl py-7 text-center text-[12px]" style={{ ...card, color: FAINT }}>
-                  здесь появятся результаты ваших сессий
+                  {tr("здесь появятся результаты ваших сессий")}
                 </div>
               ) : (
                 <div className="flex flex-col gap-2">
@@ -5643,7 +5969,7 @@ function Lobby({ profile, account, onNew, onFree, onReset, onExit, onSignOut, on
                           {fmt(x.capital, 0)} → {fmt(x.equity)}
                         </div>
                         <div className="text-[11px] mt-1 truncate" style={{ color: FAINT }}>
-                          {clock(x.ticks * CONFIG.market.tickMs)} в рынке · место {x.rank} из {x.totalPlayers || CONFIG.market.totalPlayers}
+                          {ACTIVE_LANG === "en" ? `${clock(x.ticks * CONFIG.market.tickMs)} in market · rank ${x.rank} of ${x.totalPlayers || CONFIG.market.totalPlayers}` : `${clock(x.ticks * CONFIG.market.tickMs)} в рынке · место ${x.rank} из ${x.totalPlayers || CONFIG.market.totalPlayers}`}
                         </div>
                       </div>
                       <div className="flex items-center gap-1.5 shrink-0">
@@ -5698,18 +6024,18 @@ function FreeMarketSetup({ wallet, onStart, onBack }) {
         </div>
 
         <div className="mt-6">
-          <div className="text-[28px] tracking-tight">Свободный рынок</div>
+          <div className="text-[28px] tracking-tight">{tr("Свободный рынок")}</div>
           <div className="text-[12px] mt-2 leading-relaxed max-w-[330px]" style={{ color: DIM }}>
-            Непрерывный рынок из 5 000 автономных участников. Вход и выход — в любой момент.
+            {tr("Непрерывный рынок из 5 000 автономных участников. Вход и выход — в любой момент.")}
           </div>
         </div>
 
         <div className="rounded-[20px] mt-5 px-4 py-3.5" style={CARD}>
           <div className="grid grid-cols-3">
             {[
-              ["БОТЫ", FREE_MARKET.botCount.toLocaleString("ru-RU")],
-              ["МИН. ВХОД", fmt(FREE_MARKET.minCapital, 0)],
-              ["МАКС. ВХОД", fmt(FREE_MARKET.maxCapital, 0)],
+              [tr("БОТЫ"), FREE_MARKET.botCount.toLocaleString(ACTIVE_LANG === "en" ? "en-US" : "ru-RU")],
+              [tr("МИН. ВХОД"), fmt(FREE_MARKET.minCapital, 0)],
+              [tr("МАКС. ВХОД"), fmt(FREE_MARKET.maxCapital, 0)],
             ].map(([k, v], i) => (
               <div key={k} className={`${i ? "pl-3 border-l" : ""} ${i < 2 ? "pr-3" : ""}`} style={{ borderColor: HAIR }}>
                 <div className="text-[8px] tracking-[0.08em]" style={{ color: FAINT }}>{k}</div>
@@ -5721,8 +6047,8 @@ function FreeMarketSetup({ wallet, onStart, onBack }) {
 
         <div className="mt-7">
           <div className="flex items-end justify-between gap-3 mb-2.5">
-            <div className="text-[10px] tracking-[0.08em]" style={{ color: FAINT }}>КАПИТАЛ ДЛЯ ВХОДА</div>
-            <div className="text-[10px] font-mono" style={{ color: DIM }}>доступно {fmt(max, 0)}</div>
+            <div className="text-[10px] tracking-[0.08em]" style={{ color: FAINT }}>{tr("КАПИТАЛ ДЛЯ ВХОДА")}</div>
+            <div className="text-[10px] font-mono" style={{ color: DIM }}>{ACTIVE_LANG === "en" ? "available" : "доступно"} {fmt(max, 0)}</div>
           </div>
           <div className="ui-field flex items-center rounded-[18px] px-4"
             style={{ ...CARD, border: `1px solid ${valid ? HAIR : SHORT}` }}>
@@ -5733,24 +6059,24 @@ function FreeMarketSetup({ wallet, onStart, onBack }) {
               style={{ color: valid ? TEXT : SHORT }} />
           </div>
           {!valid && <div className="text-[10px] mt-2" style={{ color: SHORT }}>
-            Доступный диапазон: {fmt(FREE_MARKET.minCapital, 0)}–{fmt(Math.min(FREE_MARKET.maxCapital, max), 0)}
+            {ACTIVE_LANG === "en" ? "Available range" : "Доступный диапазон"}: {fmt(FREE_MARKET.minCapital, 0)}–{fmt(Math.min(FREE_MARKET.maxCapital, max), 0)}
           </div>}
         </div>
 
         <div className="mt-5 rounded-[18px] px-4 py-3.5" style={CARD_SOFT}>
-          <div className="flex items-center justify-between py-1.5"><span className="text-[11px]" style={{ color: DIM }}>Таймер</span><span className="text-[11px] font-mono">нет</span></div>
-          <div className="flex items-center justify-between py-1.5"><span className="text-[11px]" style={{ color: DIM }}>Штраф за выход</span><span className="text-[11px] font-mono">нет</span></div>
-          <div className="flex items-center justify-between py-1.5"><span className="text-[11px]" style={{ color: DIM }}>Баланс участников</span><span className="text-[11px]">разный</span></div>
+          <div className="flex items-center justify-between py-1.5"><span className="text-[11px]" style={{ color: DIM }}>{tr("Таймер")}</span><span className="text-[11px] font-mono">{tr("нет")}</span></div>
+          <div className="flex items-center justify-between py-1.5"><span className="text-[11px]" style={{ color: DIM }}>{tr("Штраф за выход")}</span><span className="text-[11px] font-mono">{tr("нет")}</span></div>
+          <div className="flex items-center justify-between py-1.5"><span className="text-[11px]" style={{ color: DIM }}>{tr("Баланс участников")}</span><span className="text-[11px]">{tr("разный")}</span></div>
         </div>
 
         <div className="text-[10px] mt-4 leading-relaxed" style={{ color: FAINT }}>
-          Пока приложение открыто, повторный вход возвращает в тот же локальный рынок. После полной перезагрузки создаётся новое ядро.
+          {tr("Пока приложение открыто, повторный вход возвращает в тот же локальный рынок. После полной перезагрузки создаётся новое ядро.")}
         </div>
       </div>
       <div className="max-w-md w-full mx-auto px-5 pt-3 ui-bottom-surface ui-safe-bottom">
         <button disabled={!valid} onClick={() => onStart(value)}
           className="w-full rounded-[18px] min-h-[54px] px-4 text-[13px] font-semibold tap disabled:opacity-30" style={btnSoft(true)}>
-          ВОЙТИ · {valid ? fmt(value, 0) : "—"}
+          {tr("ВОЙТИ")} · {valid ? fmt(value, 0) : "—"}
         </button>
       </div>
     </div>
@@ -5771,12 +6097,12 @@ function SessionSetup({ wallet, onStart, onBack, eyes = false }) {
       <div className="max-w-md w-full mx-auto flex-1 min-h-0 overflow-y-auto no-scrollbar px-5 pb-8 ui-safe-top ui-scroll-pad">
         <BackButton onClick={onBack} />
         <div className="mt-6">
-          <div className="text-[28px] tracking-tight">{eyes ? "EYES-сессия" : "Новая сессия"}</div>
+          <div className="text-[28px] tracking-tight">{eyes ? tr("EYES-сессия") : tr("Новая сессия")}</div>
           <div className="text-[12px] mt-2 leading-relaxed" style={{ color: DIM }}>
-            Настройте капитал, размер комнаты и время. Все участники начинают на равных условиях.
+            {tr("Настройте капитал, размер комнаты и время. Все участники начинают на равных условиях.")}
           </div>
 
-        <div className="text-[10px] tracking-[0.08em] mt-7 mb-2.5" style={{ color: FAINT }}>ВЗНОС</div>
+        <div className="text-[10px] tracking-[0.08em] mt-7 mb-2.5" style={{ color: FAINT }}>{tr("ВЗНОС")}</div>
         <div className="grid grid-cols-2 gap-2">
           {options.map((value) => {
             const active = capital === value;
@@ -5787,14 +6113,14 @@ function SessionSetup({ wallet, onStart, onBack, eyes = false }) {
                 style={choiceStyle(active, locked)}>
                 <div className="text-[22px] font-mono">${value.toLocaleString("en-US")}</div>
                 <div className="text-[11px] mt-1" style={{ color: active && !locked ? DIM : FAINT }}>
-                  {locked ? "не хватает баланса" : `рынок $${(value * players).toLocaleString("en-US")}`}
+                  {locked ? tr("не хватает баланса") : (ACTIVE_LANG === "en" ? `market $${(value * players).toLocaleString("en-US")}` : `рынок $${(value * players).toLocaleString("en-US")}`)}
                 </div>
               </button>
             );
           })}
         </div>
 
-        <div className="text-[10px] tracking-[0.08em] mt-7 mb-2.5" style={{ color: FAINT }}>УЧАСТНИКИ</div>
+        <div className="text-[10px] tracking-[0.08em] mt-7 mb-2.5" style={{ color: FAINT }}>{tr("УЧАСТНИКИ")}</div>
         <div className="grid grid-cols-3 gap-2">
           {CONFIG.market.playerOptions.map((n) => {
             const active = players === n;
@@ -5808,7 +6134,7 @@ function SessionSetup({ wallet, onStart, onBack, eyes = false }) {
           })}
         </div>
 
-        <div className="text-[10px] tracking-[0.08em] mt-7 mb-2.5" style={{ color: FAINT }}>ПЛЕЧО</div>
+        <div className="text-[10px] tracking-[0.08em] mt-7 mb-2.5" style={{ color: FAINT }}>{tr("ПЛЕЧО")}</div>
         <div className="grid grid-cols-3 gap-2">
           {CONFIG.market.leverageOptions.map((lv) => {
             const active = leverage === lv;
@@ -5816,19 +6142,19 @@ function SessionSetup({ wallet, onStart, onBack, eyes = false }) {
               <button key={lv} onClick={() => setLeverage(lv)}
                 className="rounded-xl min-h-[48px] px-2 text-[13px] font-mono font-semibold tap"
                 style={choiceStyle(active)}>
-                {lv === 1 ? "без плеча" : `x${lv}`}
+                {lv === 1 ? tr("без плеча") : `x${lv}`}
               </button>
             );
           })}
         </div>
         {leverage > 1 && (
           <div className="rounded-[16px] px-3.5 py-3 mt-3 text-[11px] leading-relaxed" style={{ ...CARD_SOFT, color: DIM }}>
-            Максимальная позиция — x{leverage}. Заём оплачивается из кассы комнаты; при падении запаса ниже{" "}
-            <span className="font-mono" style={{ color: TEXT }}>{(CONFIG.LEV_MAINTENANCE / leverage * 100).toFixed(1)}%</span> позиция закрывается автоматически.
+            {ACTIVE_LANG === "en" ? `Maximum position size is x${leverage}. Borrowing is funded from the room pool; if margin falls below ` : `Максимальная позиция — x${leverage}. Заём оплачивается из кассы комнаты; при падении запаса ниже `}
+            <span className="font-mono" style={{ color: TEXT }}>{(CONFIG.LEV_MAINTENANCE / leverage * 100).toFixed(1)}%</span>{ACTIVE_LANG === "en" ? " the position is force-closed." : " позиция закрывается автоматически."}
           </div>
         )}
 
-        <div className="text-[10px] tracking-[0.08em] mt-7 mb-2.5" style={{ color: FAINT }}>ДЛИТЕЛЬНОСТЬ</div>
+        <div className="text-[10px] tracking-[0.08em] mt-7 mb-2.5" style={{ color: FAINT }}>{tr("ДЛИТЕЛЬНОСТЬ")}</div>
         <div className="grid grid-cols-4 gap-2">
           {CONFIG.market.durationOptions.map((mm) => {
             const active = minutes === mm;
@@ -5836,19 +6162,19 @@ function SessionSetup({ wallet, onStart, onBack, eyes = false }) {
               <button key={mm} onClick={() => setMinutes(mm)}
                 className="rounded-xl min-h-[48px] px-2 text-[13px] font-mono font-semibold tap"
                 style={choiceStyle(active)}>
-                {mm} мин
+                {mm} {ACTIVE_LANG === "en" ? "min" : "мин"}
               </button>
             );
           })}
         </div>
 
         <div className="rounded-[18px] px-4 py-3.5 mt-6" style={CARD_SOFT}>
-          <div className="flex items-center justify-between py-1.5"><span className="text-[11px]" style={{ color: DIM }}>Капитал комнаты</span><span className="text-[11px] font-mono">{capital ? fmt(capital * players, 0) : "—"}</span></div>
-          <div className="flex items-center justify-between py-1.5"><span className="text-[11px]" style={{ color: DIM }}>Равный старт</span><span className="text-[11px]">{players} участников</span></div>
-          <div className="flex items-center justify-between py-1.5"><span className="text-[11px]" style={{ color: DIM }}>Досрочный выход</span><span className="text-[11px] font-mono">−{Math.round(CONFIG.market.earlyExitPenalty * 100)}%</span></div>
+          <div className="flex items-center justify-between py-1.5"><span className="text-[11px]" style={{ color: DIM }}>{tr("Капитал комнаты")}</span><span className="text-[11px] font-mono">{capital ? fmt(capital * players, 0) : "—"}</span></div>
+          <div className="flex items-center justify-between py-1.5"><span className="text-[11px]" style={{ color: DIM }}>{tr("Равный старт")}</span><span className="text-[11px]">{players} {ACTIVE_LANG === "en" ? "participants" : "участников"}</span></div>
+          <div className="flex items-center justify-between py-1.5"><span className="text-[11px]" style={{ color: DIM }}>{tr("Досрочный выход")}</span><span className="text-[11px] font-mono">−{Math.round(CONFIG.market.earlyExitPenalty * 100)}%</span></div>
         </div>
         <div className="text-[10px] mt-3 leading-relaxed" style={{ color: FAINT }}>
-          В конце сессии на баланс возвращается итоговый капитал. Размер взноса меняет масштаб денег, но не поведение модели.
+          {tr("В конце сессии на баланс возвращается итоговый капитал. Размер взноса меняет масштаб денег, но не поведение модели.")}
         </div>
         </div>
       </div>
@@ -5858,8 +6184,8 @@ function SessionSetup({ wallet, onStart, onBack, eyes = false }) {
           onClick={() => capital && capital <= wallet && onStart(capital, leverage, minutes, eyes, players)}
           className="w-full rounded-2xl min-h-[54px] px-4 text-[14px] tracking-[0.09em] font-semibold tap disabled:opacity-30"
           style={btnSoft(true)}>
-          {capital ? `ВОЙТИ В ${eyes ? "EYES" : "РЫНОК"} · ${fmt(capital, 0)} · ${minutes} МИН · ${players}`
-            : "НЕДОСТАТОЧНО СРЕДСТВ ДЛЯ ВХОДА"}
+          {capital ? (ACTIVE_LANG === "en" ? `ENTER ${eyes ? "EYES" : "MARKET"} · ${fmt(capital, 0)} · ${minutes} MIN · ${players}` : `ВОЙТИ В ${eyes ? "EYES" : "РЫНОК"} · ${fmt(capital, 0)} · ${minutes} МИН · ${players}`)
+            : (ACTIVE_LANG === "en" ? "INSUFFICIENT BALANCE" : "НЕДОСТАТОЧНО СРЕДСТВ ДЛЯ ВХОДА")}
         </button>
       </div>
     </div>
@@ -5879,7 +6205,7 @@ const ROOM_NAMES = [
 
 function Matchmaking({ capital, leverage = 1, total: totalProp, onReady, onCancel }) {
   const [joined, setJoined] = useState(1);
-  const [feed, setFeed] = useState(["вы вошли в комнату"]);
+  const [feed, setFeed] = useState([ACTIVE_LANG === "en" ? "you joined the room" : "вы вошли в комнату"]);
   const total = totalProp || CONFIG.market.totalPlayers;
 
   useEffect(() => {
@@ -5893,7 +6219,7 @@ function Matchmaking({ capital, leverage = 1, total: totalProp, onReady, onCance
       count = Math.min(total, count + step * (3 + Math.floor(Math.random() * 9)));
       setJoined(count);
       const who = ROOM_NAMES[Math.floor(Math.random() * ROOM_NAMES.length)];
-      setFeed((prev) => [`${who}-${Math.floor(Math.random() * 900 + 100)} присоединился`,
+      setFeed((prev) => [ACTIVE_LANG === "en" ? `${who}-${Math.floor(Math.random() * 900 + 100)} joined` : `${who}-${Math.floor(Math.random() * 900 + 100)} присоединился`,
         ...prev].slice(0, 5));
       if (count >= total) {
         clearInterval(timer);
@@ -5911,7 +6237,7 @@ function Matchmaking({ capital, leverage = 1, total: totalProp, onReady, onCance
     <div className="w-full flex flex-col tx-screen"
       style={{ height: "100dvh", backgroundColor: BG, color: TEXT }}>
       <div className="max-w-md w-full mx-auto flex-1 flex flex-col justify-center px-5 ui-safe-top">
-        <div className="text-[11px] tracking-[0.11em]" style={{ color: FAINT }}>ПОДБОР УЧАСТНИКОВ</div>
+        <div className="text-[11px] tracking-[0.11em]" style={{ color: FAINT }}>{tr("ПОДБОР УЧАСТНИКОВ")}</div>
         <div className="text-[56px] leading-none font-mono tracking-tight mt-3">
           {joined}<span className="text-[24px]" style={{ color: FAINT }}> / {total}</span>
         </div>
@@ -5922,10 +6248,10 @@ function Matchmaking({ capital, leverage = 1, total: totalProp, onReady, onCance
         </div>
 
         <div className="mt-8">
-          <Line left="Взнос каждого" right={fmt(capital, 0)} />
-          <Line left="Капитал комнаты" right={fmt(capital * total, 0)} />
-          <Line left="Актив" right={CONFIG.market.assetSymbol} />
-          <Line left="Режим" right={leverage > 1 ? `маржинальный · плечо x${leverage}` : "обычный"}
+          <Line left={tr("Взнос каждого")} right={fmt(capital, 0)} />
+          <Line left={tr("Капитал комнаты")} right={fmt(capital * total, 0)} />
+          <Line left={tr("Актив")} right={CONFIG.market.assetSymbol} />
+          <Line left={tr("Режим")} right={leverage > 1 ? (ACTIVE_LANG === "en" ? `margin · leverage x${leverage}` : `маржинальный · плечо x${leverage}`) : tr("обычный")}
             color={TEXT} />
         </div>
 
@@ -5942,7 +6268,7 @@ function Matchmaking({ capital, leverage = 1, total: totalProp, onReady, onCance
       <div className="max-w-md w-full mx-auto px-5 pt-3 ui-safe-bottom">
         <button onClick={onCancel} className="w-full rounded-2xl min-h-[52px] px-4 text-[13px] tracking-[0.14em] font-semibold tap"
           style={btnSoft(false)}>
-          ОТМЕНИТЬ ПОДБОР
+          {tr("ОТМЕНИТЬ ПОДБОР")}
         </button>
       </div>
     </div>
@@ -5957,37 +6283,37 @@ function SessionResult({ result, onDone }) {
     <div className="w-full flex flex-col tx-screen" style={{ height: "100dvh", backgroundColor: BG, color: TEXT }}>
       <div className="max-w-md w-full mx-auto flex-1 min-h-0 overflow-y-auto no-scrollbar px-5 pb-8 ui-safe-top ui-scroll-pad">
         <div className="text-[10px] tracking-[0.08em]" style={{ color: FAINT }}>
-          {result.mode === "free" ? "ВЫХОД ИЗ FREE MARKET" : result.early ? "ДОСРОЧНЫЙ ВЫХОД" : "СЕССИЯ ЗАВЕРШЕНА"}
+          {result.mode === "free" ? tr("ВЫХОД ИЗ FREE MARKET") : result.early ? tr("ДОСРОЧНЫЙ ВЫХОД") : tr("СЕССИЯ ЗАВЕРШЕНА")}
         </div>
         <div className="mt-5 flex items-end justify-between gap-4">
           <div className="text-[44px] leading-none font-mono tracking-tight" style={{ color: good ? LONG : SHORT }}>{fmtSigned(result.pnl)}</div>
           <div className="text-[14px] font-mono pb-1" style={{ color: good ? LONG : SHORT }}>{pct >= 0 ? "+" : ""}{pct.toFixed(2)}%</div>
         </div>
-        <div className="text-[12px] mt-2" style={{ color: DIM }}>{result.mode === "free" ? "результат от введённого капитала" : "результат сессии"}</div>
+        <div className="text-[12px] mt-2" style={{ color: DIM }}>{result.mode === "free" ? tr("результат от введённого капитала") : tr("результат сессии")}</div>
 
         <div className="rounded-[20px] px-4 mt-7" style={CARD}>
-          <Line left={result.mode === "free" ? "Введено" : "Взнос"} right={fmt(result.capital)} />
-          <Line left="Итоговый капитал" right={fmt(result.equity)} />
-          <Line left="Место" right={`${result.rank} из ${result.totalPlayers || CONFIG.market.totalPlayers}`} />
-          <Line left="Сделки" right={String(result.trades)} />
-          <Line left="Время в рынке" right={clock(result.ticks * CONFIG.market.tickMs)} />
-          <div className="flex items-center justify-between gap-3 min-h-[42px] py-2.5"><span className="text-[12px]" style={{ color: DIM }}>Цена выхода</span><span className="text-[12px] font-mono">{fmt(result.price)}</span></div>
+          <Line left={result.mode === "free" ? tr("Введено") : tr("Взнос")} right={fmt(result.capital)} />
+          <Line left={tr("Итоговый капитал")} right={fmt(result.equity)} />
+          <Line left={tr("Место")} right={ACTIVE_LANG === "en" ? `${result.rank} of ${result.totalPlayers || CONFIG.market.totalPlayers}` : `${result.rank} из ${result.totalPlayers || CONFIG.market.totalPlayers}`} />
+          <Line left={tr("Сделки")} right={String(result.trades)} />
+          <Line left={tr("Время в рынке")} right={clock(result.ticks * CONFIG.market.tickMs)} />
+          <div className="flex items-center justify-between gap-3 min-h-[42px] py-2.5"><span className="text-[12px]" style={{ color: DIM }}>{tr("Цена выхода")}</span><span className="text-[12px] font-mono">{fmt(result.price)}</span></div>
         </div>
 
-        {result.early && <div className="rounded-[16px] px-4 py-3 mt-3 flex items-center justify-between" style={CARD_SOFT}><span className="text-[11px]" style={{ color: DIM }}>Штраф за досрочный выход</span><span className="text-[12px] font-mono" style={{ color: SHORT }}>−{fmt(result.penalty || 0)}</span></div>}
+        {result.early && <div className="rounded-[16px] px-4 py-3 mt-3 flex items-center justify-between" style={CARD_SOFT}><span className="text-[11px]" style={{ color: DIM }}>{tr("Штраф за досрочный выход")}</span><span className="text-[12px] font-mono" style={{ color: SHORT }}>−{fmt(result.penalty || 0)}</span></div>}
 
         {result.top && result.top.length > 0 && <>
-          <div className="text-[10px] tracking-[0.08em] mt-8 mb-2.5" style={{ color: FAINT }}>ЛУЧШИЕ В КОМНАТЕ</div>
+          <div className="text-[10px] tracking-[0.08em] mt-8 mb-2.5" style={{ color: FAINT }}>{tr("ЛУЧШИЕ В КОМНАТЕ")}</div>
           <div className="rounded-[20px] overflow-hidden" style={CARD}>
             {result.top.map((p, i) => <div key={i} className={`px-4 py-3 flex items-center gap-3 tx-in ${i ? "border-t" : ""}`} style={{ borderColor: HAIR, backgroundColor: p.you ? RAISED : "transparent", ...stagger(i) }}>
               <span className="text-[12px] font-mono w-6 shrink-0" style={{ color: i === 0 ? GOLD : FAINT }}>{String(i + 1).padStart(2, "0")}</span>
-              <span className="flex-1 min-w-0 text-[12px] truncate" style={{ color: p.you ? TEXT : DIM }}>{p.you ? "вы" : (STRATEGY_LABELS[String(p.name).split("-")[0]] || p.name)}</span>
+              <span className="flex-1 min-w-0 text-[12px] truncate" style={{ color: p.you ? TEXT : DIM }}>{p.you ? tr("вы") : (strategyLabel(String(p.name).split("-")[0]) || p.name)}</span>
               <span className="text-[12px] font-mono shrink-0" style={{ color: p.pnl >= 0 ? LONG : SHORT }}>{fmtSigned(p.pnl)}</span>
             </div>)}
           </div>
         </>}
       </div>
-      <div className="max-w-md w-full mx-auto px-5 pt-3 ui-bottom-surface ui-safe-bottom"><button onClick={onDone} className="w-full rounded-[18px] min-h-[54px] px-4 text-[13px] font-semibold tap" style={btnSoft(true)}>НА ГЛАВНУЮ</button></div>
+      <div className="max-w-md w-full mx-auto px-5 pt-3 ui-bottom-surface ui-safe-bottom"><button onClick={onDone} className="w-full rounded-[18px] min-h-[54px] px-4 text-[13px] font-semibold tap" style={btnSoft(true)}>{tr("НА ГЛАВНУЮ")}</button></div>
     </div>
   );
 }
@@ -5998,6 +6324,11 @@ function SessionResult({ result, onDone }) {
    попробовать механику рынка без входа в аккаунт.
    ========================================================================== */
 function PracticeApp({ onExit }) {
+  const [language, setLanguage] = useState(() => ACTIVE_LANG);
+  const changeLanguage = (code) => {
+    const next = setActiveLanguage(code);
+    setLanguage(next);
+  };
   const [profile, setProfile] = useState(null);
   const [account, setAccount] = useState(undefined);   // undefined = ещё грузим, null = не вошёл
   const [authStage, setAuthStage] = useState("intro"); // intro | signin | signup
@@ -6239,6 +6570,7 @@ function PracticeApp({ onExit }) {
 
   if (screen === "lobby") {
     return <Lobby profile={profile} account={account} onSignOut={signOut} onTopUp={topUp} onRedeem={redeem}
+      language={language} onLanguageChange={changeLanguage}
       onNew={(e) => { setPendingEyes(!!e); setScreen("setup"); }}
       onFree={() => setScreen("free-setup")} onExit={onExit}
       onReset={() => persist({ ...profile, wallet: 0 })} />;
@@ -6262,6 +6594,7 @@ function PracticeApp({ onExit }) {
   }
   if (!engineRef.current || !snapshot) {
     return <Lobby profile={profile} account={account} onSignOut={signOut} onTopUp={topUp} onRedeem={redeem}
+      language={language} onLanguageChange={changeLanguage}
       onNew={(e) => { setPendingEyes(!!e); setScreen("setup"); }}
       onFree={() => setScreen("free-setup")} onExit={onExit}
       onReset={() => persist({ ...profile, wallet: 0 })} />;
@@ -6296,7 +6629,7 @@ function PracticeApp({ onExit }) {
    *  поэтому и весь путь команды — от кнопки до тоста — асинхронный. */
   const send = async (command) => {
     const res = await transport.send(command);
-    if (!res.ok) say(res.reason, SHORT);
+    if (!res.ok) say(translateEngineReason(res.reason), SHORT);
     refresh();
     return res;
   };
@@ -6307,14 +6640,14 @@ function PracticeApp({ onExit }) {
     const res = closingShort
       ? await send({ type: "TRADE", action: "CLOSE", fraction: 1, reason: "закрытие Short кнопкой Long" })
       : await send({ type: "TRADE", action: "BUY", notional, reason: "ручная покупка" });
-    if (res.ok) say(closingShort ? "закрываем Short" : `покупка ${fmt(notional, 0)}`, LONG);
+    if (res.ok) say(closingShort ? (ACTIVE_LANG === "en" ? "closing Short" : "закрываем Short") : (ACTIVE_LANG === "en" ? `buy ${fmt(notional, 0)}` : `покупка ${fmt(notional, 0)}`), LONG);
   };
   const doSell = async () => {
     const closingLong = pos && pos.side === "long";
     const res = closingLong
       ? await send({ type: "TRADE", action: "CLOSE", fraction: 1, reason: "закрытие Long кнопкой Short" })
       : await send({ type: "TRADE", action: "SELL", notional, reason: "ручная продажа" });
-    if (res.ok) say(closingLong ? "закрываем Long" : `продажа ${fmt(notional, 0)}`, SHORT);
+    if (res.ok) say(closingLong ? (ACTIVE_LANG === "en" ? "closing Long" : "закрываем Long") : (ACTIVE_LANG === "en" ? `sell ${fmt(notional, 0)}` : `продажа ${fmt(notional, 0)}`), SHORT);
   };
   const doClose = async (fraction, label) => {
     const res = await send({ type: "TRADE", action: "CLOSE", fraction, reason: "ручное закрытие" });
@@ -6333,7 +6666,7 @@ function PracticeApp({ onExit }) {
       stopLoss: kind === "sl" ? value : null,
       takeProfit: kind === "tp" ? value : null,
     });
-    if (res.ok) say(`${kind === "sl" ? "стоп" : "тейк"} ${value.toFixed(2)}`);
+    if (res.ok) say(`${kind === "sl" ? (ACTIVE_LANG === "en" ? "stop" : "стоп") : (ACTIVE_LANG === "en" ? "take" : "тейк")} ${value.toFixed(2)}`);
   };
 
   const setRisk = async (kind, delta) => {
@@ -6347,7 +6680,7 @@ function PracticeApp({ onExit }) {
       stopLoss: kind === "sl" ? target : null,
       takeProfit: kind === "tp" ? target : null,
     });
-    if (res.ok) say(`${kind === "sl" ? "стоп" : "тейк"} ${target.toFixed(2)}`);
+    if (res.ok) say(`${kind === "sl" ? (ACTIVE_LANG === "en" ? "stop" : "стоп") : (ACTIVE_LANG === "en" ? "take" : "тейк")} ${target.toFixed(2)}`);
   };
 
   const eyesData = snap.eyes;
@@ -6384,7 +6717,7 @@ function PracticeApp({ onExit }) {
             <button onClick={() => setShowSettings((v) => !v)}
               className="ui-hit px-2.5 rounded-xl text-[11px] tracking-[0.10em] tap"
               style={{ color: showSettings ? TEXT : FAINT, backgroundColor: showSettings ? SURFACE : "transparent" }}>
-              ЕЩЁ
+              {ACTIVE_LANG === "en" ? "MORE" : "ЕЩЁ"}
             </button>
           </div>
         </div>
@@ -6394,7 +6727,7 @@ function PracticeApp({ onExit }) {
             style={CARD}>
             {marketMode !== "free" && (
               <div className="flex items-center justify-between">
-                <span className="text-[11px] tracking-[0.10em]" style={{ color: FAINT }}>СКОРОСТЬ</span>
+                <span className="text-[11px] tracking-[0.10em]" style={{ color: FAINT }}>{ACTIVE_LANG === "en" ? "SPEED" : "СКОРОСТЬ"}</span>
                 <div className="flex gap-1">
                   {[1, 2, 5, 10].map((s) => (
                     <Toggle key={s} active={speed === s} onClick={() => setSpeed(s)}>{s}x</Toggle>
@@ -6404,35 +6737,34 @@ function PracticeApp({ onExit }) {
             )}
             {confirmingEnd && marketMode === "free" && (
               <div className="mb-2 text-[11px] leading-snug" style={{ color: DIM }}>
-                Открытая позиция будет закрыта по текущему рынку. Штрафа за выход нет,
-                итоговый капитал вернётся на баланс.
+                {tr("Открытая позиция будет закрыта по текущему рынку. Штрафа за выход нет, итоговый капитал вернётся на баланс.")}
               </div>
             )}
             {confirmingEnd && marketMode !== "free" && left > 0 && (
               <div className="mb-2 text-[11px] leading-snug" style={{ color: SHORT }}>
-                До конца сессии ещё {clock(left)}. При досрочном выходе
-                с остатка спишется {Math.round(CONFIG.market.earlyExitPenalty * 100)}%
-                и поровну уйдёт остальным участникам.
+                {ACTIVE_LANG === "en"
+                  ? `${clock(left)} left in the session. Exiting early deducts ${Math.round(CONFIG.market.earlyExitPenalty * 100)}% of remaining equity and distributes it across the other participants.`
+                  : `До конца сессии ещё ${clock(left)}. При досрочном выходе с остатка спишется ${Math.round(CONFIG.market.earlyExitPenalty * 100)}% и поровну уйдёт остальным участникам.`}
               </div>
             )}
             {confirmingEnd ? (
               <div className="flex gap-2">
                 <button onClick={() => setConfirmingEnd(false)} className="flex-1 rounded-lg py-3 text-[13px] font-semibold tap"
                   style={btnSoft(false)}>
-                  Отмена
+                  {tr("Отмена")}
                 </button>
                 <button onClick={() => finishSession(marketMode === "free" ? false : left > 0)}
                   className="flex-1 rounded-lg py-3 text-[13px] font-semibold tap"
                   style={{ backgroundColor: SHORT, color: BG }}>
-                  Да, завершить
+                  {tr("Да, завершить")}
                 </button>
               </div>
             ) : (
               <button onClick={() => setConfirmingEnd(true)} className="rounded-lg py-3 text-[13px] font-semibold tap"
                 style={btnSoft(false)}>
-                {marketMode === "free" ? "Выйти из рынка" : "Завершить сессию"} · {fmt(
+                {marketMode === "free" ? (ACTIVE_LANG === "en" ? "Exit market" : "Выйти из рынка") : (ACTIVE_LANG === "en" ? "End session" : "Завершить сессию")} · {fmt(
                   marketMode === "free" ? equity : left > 0
-                    ? equity * (1 - CONFIG.market.earlyExitPenalty) : equity)} на баланс
+                    ? equity * (1 - CONFIG.market.earlyExitPenalty) : equity)} {ACTIVE_LANG === "en" ? "to balance" : "на баланс"}
               </button>
             )}
           </div>
@@ -6450,7 +6782,7 @@ function PracticeApp({ onExit }) {
                   backdrop-blur-[2px] tx-fade"
                   style={{ backgroundColor: "rgba(0,0,0,0.62)" }}>
                   <div className="text-[10px] tracking-[0.19em]" style={{ color: FAINT }}>
-                    РЫНОК ОТКРОЕТСЯ ЧЕРЕЗ
+                    {tr("РЫНОК ОТКРОЕТСЯ ЧЕРЕЗ")}
                   </div>
                   <div className="text-[72px] leading-none font-mono mt-3 tabular-nums tx-pop"
                     key={Math.ceil(snap.warmupLeft / 10)}>
@@ -6465,33 +6797,31 @@ function PracticeApp({ onExit }) {
                   </div>
                   <div className="text-[12px] mt-5 text-center max-w-[260px] leading-snug"
                     style={{ color: DIM }}>
-                    До открытия цена стоит и торговля полностью недоступна.
+                    {tr("До открытия цена стоит и торговля полностью недоступна.")}
                   </div>
                 </div>
               )}
               {leverage > 1 && !pos && (
                 <div className="mx-4 mb-2 rounded-xl px-3.5 py-2.5 text-[11px]"
                   style={{ backgroundColor: RAISED, color: DIM, border: `1px solid ${HAIR}` }}>
-                  Вход на 100% даёт начальную маржу {(100 / leverage).toFixed(0)}%.
-                  Принудительное закрытие при {(snap.maintenance * 100).toFixed(0)}% —
-                  запаса хватает примерно на {(100 / leverage - snap.maintenance * 100).toFixed(0)}
-                  {" "}процентных пункта.
+                  {ACTIVE_LANG === "en"
+                    ? `A 100% entry starts at ${(100 / leverage).toFixed(0)}% margin. Forced closure is at ${(snap.maintenance * 100).toFixed(0)}%, leaving about ${(100 / leverage - snap.maintenance * 100).toFixed(0)} percentage points of room.`
+                    : <>Вход на 100% даёт начальную маржу {(100 / leverage).toFixed(0)}%. Принудительное закрытие при {(snap.maintenance * 100).toFixed(0)}% — запаса хватает примерно на {(100 / leverage - snap.maintenance * 100).toFixed(0)} процентных пункта.</>}
                 </div>
               )}
               {leverage > 1 && pos && human.marginLevel !== null
                 && human.marginLevel < snap.maintenance * 1.6 && (
                 <div className="mx-4 mb-2 rounded-xl px-3.5 py-2.5 text-[11px] tx-pop"
                   style={{ backgroundColor: RAISED, color: SHORT, border: `1px solid ${SHORT}` }}>
-                  Маржа {(human.marginLevel * 100).toFixed(0)}% — до принудительного
-                  закрытия {(snap.maintenance * 100).toFixed(0)}%.
+                  {ACTIVE_LANG === "en" ? `Margin ${(human.marginLevel * 100).toFixed(0)}% · forced closure at ${(snap.maintenance * 100).toFixed(0)}%.` : `Маржа ${(human.marginLevel * 100).toFixed(0)}% — до принудительного закрытия ${(snap.maintenance * 100).toFixed(0)}%.`}
                   {human.liquidationPrice
-                    ? ` Ликвидация около ${fmt(human.liquidationPrice)}.` : ""}
+                    ? ACTIVE_LANG === "en" ? ` Liquidation near ${fmt(human.liquidationPrice)}.` : ` Ликвидация около ${fmt(human.liquidationPrice)}.` : ""}
                 </div>
               )}
               {leverage > 1 && !pos && human.wasLiquidated && (
                 <div className="mx-4 mb-2 rounded-xl px-3.5 py-2.5 text-[11px]"
                   style={{ backgroundColor: RAISED, color: DIM, border: `1px solid ${HAIR}` }}>
-                  Позиция была закрыта принудительно по маржин-коллу.
+                  {tr("Позиция была закрыта принудительно по маржин-коллу.")}
                 </div>
               )}
               <div className="px-5 pt-1 flex items-end justify-between gap-4">
@@ -6505,7 +6835,7 @@ function PracticeApp({ onExit }) {
                 </div>
                 <div className="text-right">
                   <div className="text-[11px] font-mono" style={{ color: FAINT }}>
-                    {stats.activePositions} / {snap.totalPlayers} в рынке
+                    {stats.activePositions} / {snap.totalPlayers} {ACTIVE_LANG === "en" ? "in market" : "в рынке"}
                   </div>
                 </div>
               </div>
@@ -6522,11 +6852,11 @@ function PracticeApp({ onExit }) {
                 {/* Суммы ставок по сторонам НЕ показываем: вместе с числом
                     участников они позволяют вычислить скрытую точку
                     равновесия сессии. Показываем только количество. */}
-                <Metric label="ЛОНГИ" value={String(stats.longPlayers)} color={LONG} />
-                <Metric label="ШОРТЫ" value={String(stats.shortPlayers)} color={SHORT} />
-                <Metric label="PNL ЛОНГОВ" value={fmtSigned(state.longRealized ?? 0, 0)}
+                <Metric label={tr("ЛОНГИ")} value={String(stats.longPlayers)} color={LONG} />
+                <Metric label={tr("ШОРТЫ")} value={String(stats.shortPlayers)} color={SHORT} />
+                <Metric label={tr("PNL ЛОНГОВ")} value={fmtSigned(state.longRealized ?? 0, 0)}
                   color={(state.longRealized ?? 0) >= 0 ? LONG : SHORT} />
-                <Metric label="PNL ШОРТОВ" value={fmtSigned(state.shortRealized ?? 0, 0)}
+                <Metric label={tr("PNL ШОРТОВ")} value={fmtSigned(state.shortRealized ?? 0, 0)}
                   color={(state.shortRealized ?? 0) >= 0 ? LONG : SHORT} />
               </div>
 
@@ -6534,14 +6864,14 @@ function PracticeApp({ onExit }) {
                 <div className="flex gap-1 min-w-0">
                   {TIMEFRAMES.map((tf) => (
                     <Toggle key={tf.label} active={timeframe === tf.label} onClick={() => setTimeframe(tf.label)}>
-                      {tf.label}
+                      {tfLabel(tf.label)}
                     </Toggle>
                   ))}
                 </div>
                 <button onClick={() => setChartMode(chartMode === "свечи" ? "линия" : "свечи")}
                   className="ui-hit px-3 rounded-xl text-[11px] shrink-0 tap"
                   style={{ color: DIM, backgroundColor: SURFACE, border: `1px solid ${HAIR}` }}>
-                  {chartMode === "свечи" ? "СВЕЧИ" : "ЛИНИЯ"}
+                  {chartMode === "свечи" ? tr("СВЕЧИ") : tr("ЛИНИЯ")}
                 </button>
               </div>
 
@@ -6562,7 +6892,7 @@ function PracticeApp({ onExit }) {
                         style={{ backgroundColor: f === eyesFilterName ? "#1B1B1F" : RAISED,
                           color: f === eyesFilterName ? TEXT : FAINT,
                           border: `1px solid ${f === eyesFilterName ? "#3A393D" : HAIR}` }}>
-                        {f}
+                        {f === "ВСЁ" ? tr("ВСЁ") : f}
                       </button>
                     ))}
                   </div>
@@ -6578,14 +6908,14 @@ function PracticeApp({ onExit }) {
 
               <div className="px-5 pb-3 pt-2 grid gap-3"
                 style={{ gridTemplateColumns: `repeat(${leverage > 1 ? 5 : 4}, minmax(0, 1fr))` }}>
-                <Metric label="ЭКВИТИ" value={fmt(equity)} />
-                <Metric label="СВОБОДНО" value={fmt(human.cash)} />
-                <Metric label="ПОЗИЦИЯ"
+                <Metric label={tr("ЭКВИТИ")} value={fmt(equity)} />
+                <Metric label={tr("СВОБОДНО")} value={fmt(human.cash)} />
+                <Metric label={tr("ПОЗИЦИЯ")}
                   value={pos ? `${pos.side === "long" ? "LONG" : "SHORT"} ${fmt(pos.margin, 0)}` : "—"}
                   color={pos ? (pos.side === "long" ? LONG : SHORT) : TEXT} />
                 <Metric label="PNL" value={pos ? fmtSigned(pnl) : "—"} color={pnlColor} />
                 {leverage > 1 && (
-                  <Metric label="МАРЖА"
+                  <Metric label={tr("МАРЖА")}
                     value={pos && human.marginLevel !== null
                       ? `${(human.marginLevel * 100).toFixed(0)}%` : "—"}
                     color={!pos || human.marginLevel === null ? TEXT
@@ -6603,7 +6933,7 @@ function PracticeApp({ onExit }) {
 
           {tab === "Позиции" && (
             <div className="px-5 pt-2 pb-6">
-              <div className="text-[11px] tracking-[0.10em] mb-3" style={{ color: FAINT }}>ПОЗИЦИЯ</div>
+              <div className="text-[11px] tracking-[0.10em] mb-3" style={{ color: FAINT }}>{tr("ПОЗИЦИЯ")}</div>
               {pos ? (
                 <>
                   <div className="flex items-baseline justify-between mb-4">
@@ -6615,64 +6945,64 @@ function PracticeApp({ onExit }) {
                       {fmtSigned(pnl)} · {signedPct(pnlRatio)}
                     </span>
                   </div>
-                  <Line left="Цена входа" right={fmt(pos.entryPrice)} />
-                  <Line left="Текущая цена" right={fmt(state.price)} />
-                  <Line left="Объём в единицах" right={pos.units.toFixed(4)} />
-                  <Line left="При закрытии сейчас" right={fmt(pos.settlement)} />
-                  <Line left="Стоп-лосс" right={human.stopLoss ? fmt(human.stopLoss) : "нет"} />
-                  <Line left="Тейк-профит" right={human.takeProfit ? fmt(human.takeProfit) : "нет"} />
+                  <Line left={tr("Цена входа")} right={fmt(pos.entryPrice)} />
+                  <Line left={tr("Текущая цена")} right={fmt(state.price)} />
+                  <Line left={tr("Объём в единицах")} right={pos.units.toFixed(4)} />
+                  <Line left={tr("При закрытии сейчас")} right={fmt(pos.settlement)} />
+                  <Line left={tr("Стоп-лосс")} right={human.stopLoss ? fmt(human.stopLoss) : tr("нет")} />
+                  <Line left={tr("Тейк-профит")} right={human.takeProfit ? fmt(human.takeProfit) : tr("нет")} />
                   <div className="grid grid-cols-3 gap-2 mt-4">
                     {[[0.25, "25%"], [0.5, "50%"], [1, "всё"]].map(([f, l]) => (
-                      <button key={l} onClick={() => doClose(f, `закрыто ${l}`)}
+                      <button key={l} onClick={() => doClose(f, ACTIVE_LANG === "en" ? `closed ${l === "всё" ? "all" : l}` : `закрыто ${l}`)}
                         className="rounded-lg py-3 text-[13px] font-semibold tap"
-                        style={btnSoft(false)}>{l}</button>
+                        style={btnSoft(false)}>{l === "всё" ? tr("всё") : l}</button>
                     ))}
                   </div>
                 </>
-              ) : <Blank>Позиции нет</Blank>}
+              ) : <Blank>{tr("Позиции нет")}</Blank>}
 
-              <div className="text-[11px] tracking-[0.10em] mt-8 mb-3" style={{ color: FAINT }}>ИТОГИ</div>
-              <Line left="Стартовый капитал" right={fmt(human.startingCapital)} />
-              <Line left="Эквити" right={fmt(equity)} />
-              <Line left="Всего заработано" right={fmtSigned(equity - human.startingCapital)}
+              <div className="text-[11px] tracking-[0.10em] mt-8 mb-3" style={{ color: FAINT }}>{tr("ИТОГИ")}</div>
+              <Line left={tr("Стартовый капитал")} right={fmt(human.startingCapital)} />
+              <Line left={tr("Эквити")} right={fmt(equity)} />
+              <Line left={tr("Всего заработано")} right={fmtSigned(equity - human.startingCapital)}
                 color={equity >= human.startingCapital ? LONG : SHORT} />
-              <Line left="Реализованный PnL" right={fmtSigned(human.realizedPnL)}
+              <Line left={tr("Реализованный PnL")} right={fmtSigned(human.realizedPnL)}
                 color={human.realizedPnL >= 0 ? LONG : SHORT} />
-              <Line left="Место в рейтинге" right={`${snap.rank} из ${snap.totalPlayers}`} />
+              <Line left={tr("Место в рейтинге")} right={ACTIVE_LANG === "en" ? `${snap.rank} of ${snap.totalPlayers}` : `${snap.rank} из ${snap.totalPlayers}`} />
             </div>
           )}
 
           {tab === "Защита" && (
             <div className="px-5 pt-2 pb-6">
               <div className="text-[11px] tracking-[0.10em] mb-3" style={{ color: FAINT }}>
-                ЗАЩИТА ПОЗИЦИИ
+                {tr("ЗАЩИТА ПОЗИЦИИ")}
               </div>
-              {!pos ? <Blank>нужна открытая позиция</Blank> : (
+              {!pos ? <Blank>{tr("нужна открытая позиция")}</Blank> : (
                 <>
                   <div className="flex items-center justify-between py-3 border-b" style={{ borderColor: HAIR }}>
                     <div>
-                      <div className="text-[10px] tracking-[0.12em]" style={{ color: FAINT }}>СТОП</div>
-                      <div className="text-[14px] font-mono mt-1">{human.stopLoss ? fmt(human.stopLoss) : "не установлен"}</div>
+                      <div className="text-[10px] tracking-[0.12em]" style={{ color: FAINT }}>{tr("СТОП")}</div>
+                      <div className="text-[14px] font-mono mt-1">{human.stopLoss ? fmt(human.stopLoss) : tr("не установлен")}</div>
                     </div>
                     {human.stopLoss && (
                       <button onClick={() => send({ type: "PROTECT", clear: "sl", stopLoss: null, takeProfit: null })}
-                        className="ui-hit px-3 rounded-xl text-[11px] tap" style={btnSoft(false)}>СНЯТЬ</button>
+                        className="ui-hit px-3 rounded-xl text-[11px] tap" style={btnSoft(false)}>{tr("СНЯТЬ")}</button>
                     )}
                   </div>
                   <div className="flex items-center justify-between py-3">
                     <div>
-                      <div className="text-[10px] tracking-[0.12em]" style={{ color: FAINT }}>ТЕЙК</div>
-                      <div className="text-[14px] font-mono mt-1">{human.takeProfit ? fmt(human.takeProfit) : "не установлен"}</div>
+                      <div className="text-[10px] tracking-[0.12em]" style={{ color: FAINT }}>{tr("ТЕЙК")}</div>
+                      <div className="text-[14px] font-mono mt-1">{human.takeProfit ? fmt(human.takeProfit) : tr("не установлен")}</div>
                     </div>
                     {human.takeProfit && (
                       <button onClick={() => send({ type: "PROTECT", clear: "tp", stopLoss: null, takeProfit: null })}
-                        className="ui-hit px-3 rounded-xl text-[11px] tap" style={btnSoft(false)}>СНЯТЬ</button>
+                        className="ui-hit px-3 rounded-xl text-[11px] tap" style={btnSoft(false)}>{tr("СНЯТЬ")}</button>
                     )}
                   </div>
                   <button onClick={() => { setTab("Рынок"); setSheet("risk"); }}
                     className="w-full min-h-[46px] rounded-xl mt-4 text-[11px] font-semibold tap"
                     style={btnSoft(true)}>
-                    НАСТРОИТЬ SL / TP
+                    {tr("НАСТРОИТЬ SL / TP")}
                   </button>
                 </>
               )}
@@ -6682,18 +7012,18 @@ function PracticeApp({ onExit }) {
           {tab === "Участники" && (
             <div className="px-5 pt-2 pb-6">
               <div className="grid grid-cols-3 gap-3 mb-5">
-                <Metric label="ЛОНГИ" value={String(stats.longPlayers)} color={LONG} />
-                <Metric label="ШОРТЫ" value={String(stats.shortPlayers)} color={SHORT} />
-                <Metric label="ВНЕ РЫНКА" value={String(stats.flatPlayers)} />
+                <Metric label={tr("ЛОНГИ")} value={String(stats.longPlayers)} color={LONG} />
+                <Metric label={tr("ШОРТЫ")} value={String(stats.shortPlayers)} color={SHORT} />
+                <Metric label={tr("ВНЕ РЫНКА")} value={String(stats.flatPlayers)} />
               </div>
               {snap.freeMarket && (
                 <div className="text-[10px] leading-snug mb-3" style={{ color: FAINT }}>
-                  Список ниже — выборка участников. Общие показатели сверху считаются по всему рынку.
+                  {tr("Список ниже — выборка участников. Общие показатели сверху считаются по всему рынку.")}
                 </div>
               )}
               <div className="flex gap-0.5 mb-2 flex-wrap">
                 {(snap.freeMarket ? ["Все", "Лонг", "Шорт", "Вне рынка"] : ["Все", "Лонг", "Шорт", "Вне рынка", "Топ-15"]).map((f) => (
-                  <Toggle key={f} active={playerFilter === f} onClick={() => setPlayerFilter(f)}>{f}</Toggle>
+                  <Toggle key={f} active={playerFilter === f} onClick={() => setPlayerFilter(f)}>{filterLabel(f)}</Toggle>
                 ))}
               </div>
               {(() => {
@@ -6706,7 +7036,7 @@ function PracticeApp({ onExit }) {
                     - ((a.equity - a.startingCapital) / Math.max(1e-9, a.startingCapital))
                   : b.equity - a.equity);
                 if (!snap.freeMarket && playerFilter === "Топ-15") list = list.slice(0, 15);
-                if (list.length === 0) return <Blank>пусто</Blank>;
+                if (list.length === 0) return <Blank>{tr("пусто")}</Blank>;
                 return list.map((p, i) => {
                   const eq = p.equity;
                   const delta = eq - p.startingCapital;
@@ -6724,7 +7054,7 @@ function PracticeApp({ onExit }) {
                           )}
                         </div>
                         <div className="text-[11px] truncate" style={{ color: FAINT }}>
-                          {p.isHuman ? "вы" : (STRATEGY_LABELS[p.archetype] || "участник")} · сделок {p.tradeCount}
+                          {p.isHuman ? tr("вы") : strategyLabel(p.archetype)} · {ACTIVE_LANG === "en" ? "trades" : "сделок"} {p.tradeCount}
                         </div>
                       </div>
                       <div className="text-right whitespace-nowrap">
@@ -6758,22 +7088,22 @@ function PracticeApp({ onExit }) {
                   <div className="flex justify-between items-center gap-3 mb-4">
                     <div>
                       <div className="text-[10px] tracking-[0.12em]" style={{ color: FAINT }}>
-                        ЗАЩИТА ПОЗИЦИИ
+                        {tr("ЗАЩИТА ПОЗИЦИИ")}
                       </div>
                       <div className="text-[16px] mt-1">
-                        Стоп / тейк
+                        {tr("Стоп / тейк")}
                       </div>
                     </div>
                     <button onClick={() => setSheet(null)}
                       className="ui-hit px-3 rounded-xl text-[11px] tap"
                       style={{ color: DIM, backgroundColor: RAISED, border: `1px solid ${HAIR}` }}>
-                      ЗАКРЫТЬ
+                      {tr("ЗАКРЫТЬ")}
                     </button>
                   </div>
 
                   <div className="flex flex-col gap-2.5">
-                      {[["sl", "СТОП", [0.01, 0.02, 0.05], "−", human.stopLoss],
-                        ["tp", "ТЕЙК", [0.01, 0.03, 0.06], "+", human.takeProfit]].map(
+                      {[["sl", tr("СТОП"), [0.01, 0.02, 0.05], "−", human.stopLoss],
+                        ["tp", tr("ТЕЙК"), [0.01, 0.03, 0.06], "+", human.takeProfit]].map(
                         ([kind, label, steps, sign, current]) => (
                           <div key={kind} className="rounded-2xl p-3"
                             style={{ backgroundColor: RAISED, border: `1px solid ${HAIR}` }}>
@@ -6781,14 +7111,14 @@ function PracticeApp({ onExit }) {
                               <div>
                                 <div className="text-[9px] tracking-[0.11em]" style={{ color: FAINT }}>{label}</div>
                                 <div className="text-[13px] font-mono mt-1" style={{ color: current ? TEXT : DIM }}>
-                                  {current ? fmt(current) : "не установлен"}
+                                  {current ? fmt(current) : tr("не установлен")}
                                 </div>
                               </div>
                               {current && (
                                 <button onClick={() => send({ type: "PROTECT", clear: kind, stopLoss: null, takeProfit: null })}
                                   className="ui-hit px-3 rounded-xl text-[11px] tap"
                                   style={{ color: DIM, backgroundColor: SURFACE, border: `1px solid ${HAIR}` }}>
-                                  СНЯТЬ
+                                  {tr("СНЯТЬ")}
                                 </button>
                               )}
                             </div>
@@ -6806,7 +7136,7 @@ function PracticeApp({ onExit }) {
                       )}
                       {!pos && (
                         <div className="text-[11px] leading-snug" style={{ color: FAINT }}>
-                          Сначала откройте позицию — уровни рассчитываются от цены входа.
+                          {tr("Сначала откройте позицию — уровни рассчитываются от цены входа.")}
                         </div>
                       )}
                     </div>
@@ -6817,9 +7147,9 @@ function PracticeApp({ onExit }) {
             {/* Компактная торговая панель: позиция показывается только в блоке
                 состояния выше, здесь остаются размер сделки, SL/TP и действия. */}
             <div className="flex items-center justify-between gap-3 mb-2">
-              <div className="text-[9px] tracking-[0.12em]" style={{ color: FAINT }}>ОРДЕР</div>
+              <div className="text-[9px] tracking-[0.12em]" style={{ color: FAINT }}>{tr("ОРДЕР")}</div>
               <span className="text-[10px] font-mono shrink-0" style={{ color: DIM }}>
-                свободно {fmt(orderCapacity, 0)}
+                {ACTIVE_LANG === "en" ? "available" : "свободно"} {fmt(orderCapacity, 0)}
               </span>
             </div>
 
@@ -6829,7 +7159,7 @@ function PracticeApp({ onExit }) {
                   border: `1px solid ${orderTooLarge ? SHORT : HAIR}` }}>
                 <span className="font-mono text-[12px] mr-1.5 shrink-0" style={{ color: FAINT }}>$</span>
                 <input value={size} onChange={(e) => setSize(e.target.value)} inputMode="decimal"
-                  placeholder="0" aria-label="Размер позиции"
+                  placeholder="0" aria-label={tr("Размер позиции")}
                   className="w-full bg-transparent outline-none font-mono text-[17px] min-w-0 h-[46px] leading-none"
                   style={{ color: orderTooLarge ? SHORT : TEXT }} />
               </div>
@@ -6847,8 +7177,8 @@ function PracticeApp({ onExit }) {
             <div className="min-h-[16px] mb-1.5 flex items-center justify-between gap-2">
               <span className="text-[9px] truncate" style={{ color: orderTooLarge ? SHORT : FAINT }}>
                 {orderTooLarge
-                  ? `выше доступного на ${fmt(notional - orderCapacity, 0)}`
-                  : notional > 0 ? `ордер ${fmt(notional, 0)}` : "введите размер"}
+                  ? ACTIVE_LANG === "en" ? `over available by ${fmt(notional - orderCapacity, 0)}` : `выше доступного на ${fmt(notional - orderCapacity, 0)}`
+                  : notional > 0 ? ACTIVE_LANG === "en" ? `order ${fmt(notional, 0)}` : `ордер ${fmt(notional, 0)}` : tr("введите размер")}
               </span>
               <button disabled={!pos}
                 onClick={() => pos && setSheet(sheet === "risk" ? null : "risk")}
@@ -6862,26 +7192,26 @@ function PracticeApp({ onExit }) {
               <button disabled={!snap.tradingOpen || (!(pos && pos.side === "short") && !validOrderSize)} onClick={doBuy}
                 className="rounded-2xl h-[60px] px-3 disabled:opacity-25 flex flex-col items-start justify-center text-left tap"
                 style={btnAccent(LONG)}>
-                <span className="font-bold text-[17px] tracking-wide">ЛОНГ</span>
+                <span className="font-bold text-[17px] tracking-wide">{tr("ЛОНГ")}</span>
                 <span className="text-[9px] opacity-70 mt-0.5 leading-tight truncate w-full">
-                  {pos && pos.side === "short" ? "закрыть SHORT" : `${fmt(notional, 0)} · открыть / добавить`}
+                  {pos && pos.side === "short" ? tr("закрыть SHORT") : (ACTIVE_LANG === "en" ? `${fmt(notional, 0)} · open / add` : `${fmt(notional, 0)} · открыть / добавить`)}
                 </span>
               </button>
               <button disabled={!snap.tradingOpen || (!(pos && pos.side === "long") && !validOrderSize)} onClick={doSell}
                 className="rounded-2xl h-[60px] px-3 disabled:opacity-25 flex flex-col items-start justify-center text-left tap"
                 style={btnAccent(SHORT)}>
-                <span className="font-bold text-[17px] tracking-wide">ШОРТ</span>
+                <span className="font-bold text-[17px] tracking-wide">{tr("ШОРТ")}</span>
                 <span className="text-[9px] opacity-70 mt-0.5 leading-tight truncate w-full">
-                  {pos && pos.side === "long" ? "закрыть LONG" : `${fmt(notional, 0)} · открыть / добавить`}
+                  {pos && pos.side === "long" ? tr("закрыть LONG") : (ACTIVE_LANG === "en" ? `${fmt(notional, 0)} · open / add` : `${fmt(notional, 0)} · открыть / добавить`)}
                 </span>
               </button>
             </div>
 
             {pos && (
-              <button disabled={!snap.tradingOpen} onClick={() => doClose(1, "позиция закрыта")}
+              <button disabled={!snap.tradingOpen} onClick={() => doClose(1, tr("позиция закрыта"))}
                 className="w-full h-[38px] mt-1.5 rounded-xl px-3 flex items-center justify-between gap-3 tap disabled:opacity-30"
                 style={btnSoft(false)}>
-                <span className="text-[10px] font-semibold tracking-[0.08em]">ЗАКРЫТЬ ПОЗИЦИЮ</span>
+                <span className="text-[10px] font-semibold tracking-[0.08em]">{tr("ЗАКРЫТЬ ПОЗИЦИЮ")}</span>
                 <span className="text-[11px] font-mono" style={{ color: pnlColor }}>
                   {fmtSigned(pnl)}
                 </span>
@@ -6909,7 +7239,7 @@ function PracticeApp({ onExit }) {
                 style={{ color: active ? TEXT : FAINT, backgroundColor: "transparent" }}>
                 {active && <span className="absolute top-0 left-[22%] right-[22%] h-[2px] rounded-full"
                   style={{ backgroundColor: TEXT }} />}
-                {key}
+                {gameTabLabel(key)}
               </button>
             );
           })}
@@ -6929,10 +7259,10 @@ class ErrBoundary extends React.Component {
     if (!this.state.err) return this.props.children;
     const e = this.state.err;
     const text =
-      "СООБЩЕНИЕ:\n" + (e && e.message ? e.message : String(e)) +
-      "\n\nСТЕК:\n" + (e && e.stack ? e.stack : "(нет)") +
-      "\n\nКОМПОНЕНТЫ:\n" + (this.state.info && this.state.info.componentStack
-        ? this.state.info.componentStack : "(нет)");
+      (ACTIVE_LANG === "en" ? "MESSAGE:\n" : "СООБЩЕНИЕ:\n") + (e && e.message ? e.message : String(e)) +
+      (ACTIVE_LANG === "en" ? "\n\nSTACK:\n" : "\n\nСТЕК:\n") + (e && e.stack ? e.stack : (ACTIVE_LANG === "en" ? "(none)" : "(нет)")) +
+      (ACTIVE_LANG === "en" ? "\n\nCOMPONENTS:\n" : "\n\nКОМПОНЕНТЫ:\n") + (this.state.info && this.state.info.componentStack
+        ? this.state.info.componentStack : (ACTIVE_LANG === "en" ? "(none)" : "(нет)"));
     return React.createElement("pre", {
       style: {
         margin: 0, padding: "16px", background: "#111", color: "#fff",
