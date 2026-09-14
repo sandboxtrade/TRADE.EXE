@@ -1,9 +1,0 @@
-{
-  "name": "@market-sandbox/engine",
-  "version": "4.0.0",
-  "description": "Детерминированный торговый движок Market Sandbox (v4 — ограниченная кривая + клиринг тика по единой цене). Импортируется приложением, Cloud Functions и тик-процессом на Cloud Run.",
-  "main": "index.js",
-  "scripts": { "test": "node test/audit.js" },
-  "license": "UNLICENSED",
-  "private": true
-}
