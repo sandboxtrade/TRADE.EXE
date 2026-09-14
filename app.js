@@ -4048,6 +4048,130 @@ input:focus-visible, textarea:focus-visible { outline: none; }
 .ui-scroll-pad { padding-bottom: calc(26px + var(--tx-safe-bottom)); }
 .no-scrollbar { scrollbar-width: none; }
 .no-scrollbar::-webkit-scrollbar { display: none; }
+
+/* ------------------------------- DESKTOP ---------------------------------
+   Mobile remains the source layout. At >=1024px the same React tree expands
+   into a desktop workspace instead of stretching a phone mockup. */
+@media (min-width: 1024px) {
+  body { overflow: hidden; }
+  .max-w-md { max-width: 36rem !important; }
+  .ui-safe-top { padding-top: 24px; }
+  .ui-safe-bottom { padding-bottom: 14px; }
+
+  /* Lobby: wide dashboard with two balanced columns. */
+  .tx-lobby-shell {
+    width: calc(100% - 124px) !important;
+    max-width: 1180px !important;
+    margin-left: 112px !important;
+    margin-right: auto !important;
+    padding-left: 32px;
+    padding-right: 32px;
+    padding-bottom: 28px;
+  }
+  .tx-lobby-home {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 18px 22px;
+    align-items: start;
+    padding-left: 0 !important;
+    padding-right: 0 !important;
+    padding-top: 26px !important;
+  }
+  .tx-lobby-home > .tx-desk-full { grid-column: 1 / -1; }
+  .tx-lobby-home > .tx-desk-half { margin-top: 0 !important; margin-bottom: 0 !important; }
+  .tx-lobby-home .tx-desk-half > .mt-6:first-child,
+  .tx-lobby-home .tx-desk-half > .mt-5:first-child { margin-top: 0 !important; }
+
+  .tx-lobby-nav {
+    position: fixed;
+    left: 24px;
+    top: 50%;
+    transform: translateY(-50%);
+    width: 76px !important;
+    max-width: 76px !important;
+    grid-template-columns: 1fr !important;
+    gap: 4px;
+    padding: 8px 7px !important;
+    border: 1px solid var(--tx-hair) !important;
+    border-radius: 22px;
+    background: rgba(8,8,10,.92);
+    box-shadow: 0 18px 50px rgba(0,0,0,.34), inset 0 1px 0 rgba(255,255,255,.025);
+    backdrop-filter: blur(18px);
+    -webkit-backdrop-filter: blur(18px);
+    z-index: 50;
+  }
+  .tx-lobby-nav button { min-height: 66px !important; border-radius: 16px; }
+  .tx-lobby-nav button:hover { background: rgba(255,255,255,.035); }
+  .tx-lobby-nav span { font-size: 8px !important; }
+
+  .tx-markets-wrap, .tx-rank-wrap {
+    width: calc(100% - 124px);
+    max-width: 1180px;
+    margin-left: 112px;
+    margin-right: auto;
+    padding-left: 32px !important;
+    padding-right: 32px !important;
+    padding-top: 28px !important;
+  }
+  .tx-markets-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px !important; }
+  .tx-rank-wrap { max-width: 980px; }
+
+  /* Trading terminal: chart/content on the left, order panel on the right. */
+  .tx-trade-shell {
+    max-width: 1440px !important;
+    margin-left: auto;
+    margin-right: auto;
+    display: grid !important;
+    grid-template-columns: minmax(0, 1fr) 390px;
+    grid-template-rows: auto minmax(0, 1fr) auto;
+    height: 100vh !important;
+    border-left: 1px solid var(--tx-hair);
+    border-right: 1px solid var(--tx-hair);
+    background: var(--tx-bg);
+  }
+  .tx-trade-header { grid-column: 1 / -1; grid-row: 1; padding-left: 24px !important; padding-right: 24px !important; }
+  .tx-trade-main { grid-column: 1; grid-row: 2; min-width: 0; min-height: 0; overflow-y: auto !important; overflow-x: hidden !important; }
+  .tx-trade-panel {
+    grid-column: 2; grid-row: 2;
+    min-width: 0; min-height: 0;
+    overflow-y: auto;
+    padding: 20px !important;
+    border-top: 0 !important;
+    border-left: 1px solid var(--tx-hair);
+    background: linear-gradient(180deg,#08080A,#030304) !important;
+  }
+  .tx-trade-tabs { grid-column: 1 / -1; grid-row: 3; }
+  .tx-trade-shell:not(:has(.tx-trade-panel)) .tx-trade-main { grid-column: 1 / -1; }
+  .tx-trade-settings {
+    position: absolute;
+    right: 18px;
+    top: 66px;
+    width: 360px;
+    margin: 0 !important;
+    z-index: 45;
+    box-shadow: 0 18px 60px rgba(0,0,0,.55);
+  }
+  .tx-trade-panel .tx-sheet { position: relative; }
+  .tx-trade-panel button { min-height: 40px; }
+  .tx-trade-panel input { font-size: 18px; }
+  .tx-trade-main svg { shape-rendering: geometricPrecision; }
+
+  /* Setup/forms stay focused instead of becoming full-width desktop pages. */
+  .tx-screen > .max-w-md:not(.tx-lobby-shell),
+  .tx-sheet > .max-w-md { max-width: 560px !important; }
+}
+
+@media (min-width: 1280px) {
+  .tx-lobby-shell { max-width: 1240px !important; }
+  .tx-trade-shell { grid-template-columns: minmax(0, 1fr) 420px; }
+}
+
+@media (hover: hover) and (pointer: fine) {
+  button:not(:disabled) { cursor: pointer; }
+  .tap { transition: transform var(--tx-fast) var(--tx-ease), filter var(--tx-fast) var(--tx-ease), border-color var(--tx-fast) var(--tx-ease); }
+  .tap:hover { filter: brightness(1.07); }
+  .tap:active { transform: scale(.985); }
+}
 @keyframes tx-fade-up { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: none; } }
 @keyframes tx-fade { from { opacity: 0; } to { opacity: 1; } }
 @keyframes tx-pop { from { opacity: 0; transform: scale(.975); } to { opacity: 1; transform: scale(1); } }
@@ -5400,7 +5524,7 @@ function RankingTab({ profile, period, onPeriod }) {
   const podium = [rows[1], rows[0], rows[2]];
 
   return (
-    <div className="px-5 ui-safe-top">
+    <div className="px-5 ui-safe-top tx-rank-wrap">
       <div className="text-[11px] tracking-[0.10em] text-center" style={{ color: DIM }}>
         {tr("РЕЙТИНГ ИГРОКОВ")}
       </div>
@@ -5499,7 +5623,7 @@ function MarketsTab({ onPlay, onFree }) {
   );
 
   return (
-    <div className="px-5 ui-safe-top pb-6">
+    <div className="px-5 ui-safe-top pb-6 tx-markets-wrap">
       <div className="mb-5">
         <div className="text-[22px] tracking-tight">{tr("Рынки")}</div>
         <div className="text-[11px] mt-1.5" style={{ color: DIM }}>
@@ -5507,7 +5631,7 @@ function MarketsTab({ onPlay, onFree }) {
         </div>
       </div>
 
-      <div className="grid gap-2.5">
+      <div className="grid gap-2.5 tx-markets-grid">
         <MarketItem kind="free" title={`${m.assetSymbol} · FREE`} status="LIVE"
           sub={tr("Свободный рынок без конца сессии")}
           rows={[[tr("ботов"), m.freeMarket.botCount.toLocaleString(ACTIVE_LANG === "en" ? "en-US" : "ru-RU")],
@@ -5544,7 +5668,7 @@ function TabBar({ active, onChange }) {
     /* Колонок ровно столько, сколько вкладок. Раньше стояло grid-cols-4 при
        трёх вкладках — они прижимались влево, а справа зияла пустая четверть.
        Активная вкладка помечается белым, а не зелёным. */
-    <div className="max-w-md w-full mx-auto grid shrink-0 pt-2 ui-safe-bottom"
+    <div className="max-w-md tx-lobby-nav w-full mx-auto grid shrink-0 pt-2 ui-safe-bottom"
       style={{ borderTop: `1px solid ${HAIR}`,
         gridTemplateColumns: `repeat(${TABS.length}, minmax(0, 1fr))` }}>
       {TABS.map((t) => {
@@ -5809,15 +5933,15 @@ function Lobby({ profile, account, onNew, onFree, onReset, onExit, onSignOut, on
     <div className="w-full flex flex-col tx-screen"
       style={{ height: "100dvh", backgroundColor: BG, color: TEXT }}>
       <div className="flex-1 min-h-0 overflow-y-auto no-scrollbar">
-        <div className="max-w-md w-full mx-auto pb-4">
+        <div className="max-w-md tx-lobby-shell w-full mx-auto pb-4">
 
           {tab === "home" && (
-            <div className="px-5 ui-safe-top">
+            <div className="px-5 ui-safe-top tx-lobby-home">
               {/* ---------------------------- шапка --------------------------
                  Логотип и название в одну строку, действия — круглыми
                  кнопками справа. Раньше название стояло ПОД логотипом, из-за
                  чего шапка занимала две строки и отжимала баланс вниз. */}
-              <div className="flex items-center justify-between gap-3 tx-in" style={stagger(0)}>
+              <div className="flex items-center justify-between gap-3 tx-in tx-desk-full" style={stagger(0)}>
                 <div className="flex items-center gap-3 min-w-0">
                   <Logo size={46} />
                   <div className="text-[23px] font-semibold tracking-tight truncate">trade.exe</div>
@@ -5835,7 +5959,7 @@ function Lobby({ profile, account, onNew, onFree, onReset, onExit, onSignOut, on
                  сумму на середину экрана.
                  Сумма набрана обычным шрифтом, а не моноширинным:
                  моноширинный на большом кегле читается как терминал. */}
-              <div className="mt-6">
+              <div className="mt-6 tx-desk-half">
                 <div className="text-[11px] tracking-[0.12em]" style={{ color: FAINT }}>
                   {tr("БАЛАНС")}
                 </div>
@@ -5849,20 +5973,20 @@ function Lobby({ profile, account, onNew, onFree, onReset, onExit, onSignOut, on
                 </div>
               </div>
 
-              <div className="mt-4">
+              <div className="mt-4 tx-desk-half">
                 <FreeMarketMiniCard onClick={onFree} />
               </div>
 
-              <div className="grid grid-cols-3 gap-2 mt-4">
+              <div className="grid grid-cols-3 gap-2 mt-4 tx-desk-half">
                 <WalletAction icon="plus" label={tr("Пополнить")} onClick={() => setDeposit(true)} />
                 <WalletAction icon="arrowUpRight" label={tr("Вывести")} onClick={() => setWithdraw(true)} />
                 <WalletAction icon="trophy" label={tr("Трофеи")} onClick={() => setTrophy(true)} />
               </div>
 
-              <LevelBar profile={profile} />
+              <div className="tx-desk-half"><LevelBar profile={profile} /></div>
 
               {/* --------------------------- режимы -------------------------- */}
-              <div className="grid grid-cols-1 gap-2 mt-5 tx-in" style={stagger(1)}>
+              <div className="grid grid-cols-1 gap-2 mt-5 tx-in tx-desk-half" style={stagger(1)}>
                 <ModeCard kind="online" title={tr("ОНЛАЙН РЫНОК")}
                   text={tr("Реальные участники и единая сессия в реальном времени")}
                   cta={tr("СЕРВЕРНАЯ ВЕРСИЯ")} primary
@@ -5873,12 +5997,12 @@ function Lobby({ profile, account, onNew, onFree, onReset, onExit, onSignOut, on
               </div>
 
               {notice && (
-                <div className="text-[12px] mt-3 rounded-xl px-4 py-3 leading-snug tx-pop"
+                <div className="text-[12px] mt-3 rounded-xl px-4 py-3 leading-snug tx-pop tx-desk-half"
                   style={{ ...card, color: DIM }}>{notice}</div>
               )}
 
               {/* ------------------------- статистика ------------------------ */}
-              <div className="rounded-2xl px-4 py-3.5 mt-5 tx-in" style={{ ...card, ...stagger(3) }}>
+              <div className="rounded-2xl px-4 py-3.5 mt-5 tx-in tx-desk-half" style={{ ...card, ...stagger(3) }}>
                 {/* Столбец «ПРИБЫЛЬНЫХ» убран: на четверти ширины подпись не
                     помещалась и обрезалась в «ПРИБЫЛЬ…», а сама цифра
                     повторяет винрейт из профиля. Осталось три колонки. */}
@@ -5905,6 +6029,7 @@ function Lobby({ profile, account, onNew, onFree, onReset, onExit, onSignOut, on
               </div>
 
               {/* ---------------------- дневная динамика --------------------- */}
+              <div className="tx-desk-half">
               <div className="text-[10px] tracking-[0.11em] mt-6 mb-2.5" style={{ color: FAINT }}>
                 {tr("ДНЕВНАЯ ДИНАМИКА")}
               </div>
@@ -5941,8 +6066,10 @@ function Lobby({ profile, account, onNew, onFree, onReset, onExit, onSignOut, on
                   <EquityCurve sessions={profile.sessions} rangeMs={range.ms} />
                 </div>
               </div>
+              </div>
 
               {/* ------------------------ последние сессии ------------------- */}
+              <div className="tx-desk-half">
               <div className="flex items-center justify-between mt-6 mb-2.5">
                 <span className="text-[10px] tracking-[0.11em]" style={{ color: FAINT }}>
                   {tr("ПОСЛЕДНИЕ СЕССИИ")}
@@ -5981,6 +6108,7 @@ function Lobby({ profile, account, onNew, onFree, onReset, onExit, onSignOut, on
                   ))}
                 </div>
               )}
+              </div>
 
             </div>
           )}
@@ -6690,10 +6818,10 @@ function PracticeApp({ onExit }) {
 
   return (
     <div className="w-full flex flex-col" style={{ height: "100dvh", backgroundColor: BG, color: TEXT }}>
-      <div className="max-w-md w-full mx-auto flex flex-col h-full relative">
+      <div className="max-w-md tx-trade-shell w-full mx-auto flex flex-col h-full relative">
 
         {/* --------------------------------- шапка --------------------------- */}
-        <div className="flex items-center justify-between px-5 pb-3 ui-safe-top">
+        <div className="flex items-center justify-between px-5 pb-3 ui-safe-top tx-trade-header">
           <span className="text-[11px] tracking-[0.11em]" style={{ color: FAINT }}>
             {CONFIG.market.assetSymbol} · {marketMode === "free" ? "FREE · " : ""}{fmt(session, 0)}
             {leverage > 1 && (
@@ -6723,7 +6851,7 @@ function PracticeApp({ onExit }) {
         </div>
 
         {showSettings && (
-          <div className="mx-4 mb-3 p-3.5 rounded-2xl flex flex-col gap-3 tx-pop"
+          <div className="mx-4 mb-3 p-3.5 rounded-2xl flex flex-col gap-3 tx-pop tx-trade-settings"
             style={CARD}>
             {marketMode !== "free" && (
               <div className="flex items-center justify-between">
@@ -6773,7 +6901,7 @@ function PracticeApp({ onExit }) {
         {/* -------------------------------- контент -------------------------- */}
         {/* min-h-0 обязателен: без него flex-элемент не даёт себя сжать и
             вся страница уезжает в скролл (проблема 1). */}
-        <div className="flex-1 min-h-0 overflow-y-auto no-scrollbar">
+        <div className="flex-1 min-h-0 overflow-y-auto no-scrollbar tx-trade-main">
 
           {tab === "Рынок" && (
             <div className="flex flex-col h-full relative overflow-hidden">
@@ -7076,7 +7204,7 @@ function PracticeApp({ onExit }) {
 
         {/* ---------------------------- панель торговли ---------------------- */}
         {tab === "Рынок" && (
-          <div className="px-4 pt-2 pb-2 border-t"
+          <div className="px-4 pt-2 pb-2 border-t tx-trade-panel"
             style={{ borderColor: HAIR, background: "linear-gradient(180deg,#070708,#030304)" }}>
 
             {sheet && snap.tradingOpen && (
@@ -7229,7 +7357,7 @@ function PracticeApp({ onExit }) {
           </div>
         )}
 
-        <div className="grid border-t ui-safe-bottom" style={{ borderColor: HAIR,
+        <div className="grid border-t ui-safe-bottom tx-trade-tabs" style={{ borderColor: HAIR,
           gridTemplateColumns: `repeat(${TAB_KEYS.length}, minmax(0, 1fr))` }}>
           {TAB_KEYS.map((key) => {
             const active = tab === key;
