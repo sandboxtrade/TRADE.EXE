@@ -1,0 +1,16 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "jsx": "react",
+    "allowJs": true,
+    "checkJs": false,
+    "noCheck": true,
+    "skipLibCheck": true,
+    "removeComments": true,
+    "rootDir": "source",
+    "outDir": "build"
+  },
+  "include": ["source/**/*.js", "source/**/*.jsx"]
+}

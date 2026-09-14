@@ -1,0 +1,13 @@
+{
+  "name": "trade-exe",
+  "private": true,
+  "version": "0.55.0",
+  "type": "module",
+  "scripts": {
+    "build": "tsc -p tsconfig.json && node tools/publish-build.mjs",
+    "test": "node tests/engine-smoke.mjs && node tests/storage-smoke.mjs"
+  },
+  "devDependencies": {
+    "typescript": "^5.8.3"
+  }
+}
